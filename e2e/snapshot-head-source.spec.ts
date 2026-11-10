@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { test, openExtension, dispose } from "./fixtures";
+import { itemLine, inspectText } from "./snapshot-format";
 
 test.use({ screenshot: "off", trace: "off" });
 const url = "http://snapshot-head-source.test/";
@@ -67,7 +68,7 @@ test("HEAD source churn upgrades the capture once and preserves geometry profile
     await opened.page.evaluate(() => { (globalThis as any).__headSource.churn = true; });
     const first = await inspect(opened.page);
     expect(first.partial).toBeUndefined();
-    expect(first.items.map((item: any) => item.line).join("\n")).toContain('"First"');
+    expect(inspectText(first.items)).toContain('"First"');
     const sizes = await opened.page.evaluate(() => {
       const state = (globalThis as any).__headSource; state.churn = false;
       return { compact: state.compact.length, lengths: state.profiles.map((profile: string[]) => profile.length), catalogReads: state.catalogReads };
@@ -149,7 +150,7 @@ for (const kind of ["selection", "svg-resource"] as const) test(`HEAD relaxation
     });
     const result = await inspect(opened.page);
     expect(result.partial).toBe(true);
-    const text = result.items.map((item: any) => item.line).join("\n");
+    const text = inspectText(result.items);
     expect(text).toContain("First");
     expect(text).not.toContain(kind === "selection" ? "SECRET" : "GHOST");
     if (kind === "selection") expect(await target.locator("#secret").evaluate((node) => getComputedStyle(node, "::selection").color)).toBe("rgba(0, 0, 0, 0)");
@@ -170,7 +171,7 @@ test("scoped HEAD proof preserves original frame edges after excluding a sibling
     await opened.page.evaluate(() => { (globalThis as any).__headSource.churn = true; });
     const result = await inspect(opened.page, {}, { queries: [{ kind: "css", value: "#region" }] });
     expect(result.partial).toBeUndefined();
-    const text = result.items.map((item: any) => item.line).join("\n");
+    const text = inspectText(result.items);
     expect(text).toContain("Child target"); expect(text).toContain("Grandchild target");
     expect(text).not.toContain("Unrelated sibling");
     expect(await opened.page.evaluate(() => (globalThis as any).__headSource.profiles.some((row: string[]) => row.length > (globalThis as any).__headSource.compact.length))).toBe(true);
@@ -190,14 +191,14 @@ test("equal captured colors retain unknown geometry without claiming invisible l
     const target = await opened.context.newPage(); await target.goto(url); await attach(opened.page);
     const result = await inspect(opened.page, { fields: ["text", "state", "ref"] });
     expect(result.partial).toBe(true); expect(result.limitations).toContain("composited visibility");
-    const text = result.items.map((item: any) => item.line).join("\n");
+    const text = inspectText(result.items);
     for (const unconfirmed of ["WHITE_ON_WHITE", "UNKNOWN_CONTROL", "VISIBLE_ON_IMAGE", "WIDE_GAMUT_SAME_COLOR"]) expect(text).not.toContain(unconfirmed);
     expect(text).toContain("VISIBLE_ON_NEAR_BACKGROUND");
     expect(text).toContain("First");
-    const unknown = result.items.filter((item: any) => item.line.includes("[name=unknown]"));
+    const unknown = result.items.filter((item: any) => itemLine(item).includes("[name=unknown]"));
     expect(unknown.length).toBeGreaterThanOrEqual(4);
     expect(unknown.every((item: any) => !item.ref), JSON.stringify(unknown)).toBe(true);
-    expect(unknown.filter((item: any) => /\[box=[\d., -]+\]/.test(item.line)).length, JSON.stringify(unknown)).toBeGreaterThanOrEqual(4);
+    expect(unknown.filter((item: any) => /\[box=[\d., -]+\]/.test(itemLine(item))).length, JSON.stringify(unknown)).toBeGreaterThanOrEqual(4);
   } finally {
     await detach(opened.page).catch(() => undefined); await dispose(opened.context, opened.userDataDirectory);
   }
@@ -216,7 +217,7 @@ test("full observations preserve labels through proven local mask and rounded in
     await opened.context.route(url, (route) => route.fulfill({ contentType: "text/html", body: markup }));
     const target = await opened.context.newPage(); await target.goto(url); await attach(opened.page);
     const result = await inspect(opened.page);
-    const text = result.items.map((item: any) => item.line).join("\n");
+    const text = inspectText(result.items);
     for (const label of ["政治分类", "体育分类", "模型菜单", "AI趋势"]) expect(text).toContain(label);
     expect(text).toContain("expanded=false"); expect(text).toContain("current=page");
     expect(text).not.toContain("UNCONFIRMED_MASK");

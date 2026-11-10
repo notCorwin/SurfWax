@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 const lastTool = (request: any) => {
   const content = request.messages.findLast((message: any) => message.role === "tool").content;
@@ -31,8 +32,8 @@ test("finds targets in scoped rows, follows a reference, and rejects a stale row
       commandResponse("inspect_page", {}, "inspect"),
       (request) => {
         const items = lastTool(request).items;
-        rowRef = items.find((item: any) => item.line.includes('article "First row"'))?.ref;
-        buttonRef = items.find((item: any) => item.line.includes('button "Safe target"'))?.ref;
+        rowRef = items.find((item: any) => itemLine(item).includes('article "First row"'))?.ref;
+        buttonRef = items.find((item: any) => itemLine(item).includes('button "Safe target"'))?.ref;
         expect(rowRef).toEqual(expect.any(String)); expect(buttonRef).toEqual(expect.any(String));
         return commandResponse("count_elements", { target: { by: "role", value: "button", name: "Safe target", scope: { by: "role", value: "article", name: "First row" } } }, "scoped-button");
       },
@@ -69,7 +70,7 @@ test("locates a scoped target in an out-of-process frame and follows its referen
     responses.push(
       commandResponse("inspect_page", {}, "inspect-frame"),
       (request) => {
-        frameRef = lastTool(request).items.find((item: any) => item.line.includes('button "Frame target"'))?.ref;
+        frameRef = lastTool(request).items.find((item: any) => itemLine(item).includes('button "Frame target"'))?.ref;
         expect(frameRef).toEqual(expect.any(String));
         return commandResponse("count_elements", { target: { by: "role", value: "button", name: "Frame target", scope: { by: "role", value: "article", name: "Frame row" }, frame: { by: "css", value: 'iframe[src*="localhost"]' } } }, "frame-scoped");
       },

@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -37,9 +38,9 @@ test("preserves visible live native values and selected labels without exposing 
     responses.push(commandResponse("inspect_page", { budget: 16000 }, "form-inspect"), (request) => {
       try {
         initial = lastTool(request);
-        textareaRef = initial.items?.find((item: any) => item.line.includes('textbox "Notes"') && item.line.includes("LIVE_NOTES"))?.ref ?? "";
-        selectRef = initial.items?.find((item: any) => item.line.includes('combobox "Color"') && item.line.includes('selected="Blue label"'))?.ref ?? "";
-        anonymousRef = initial.items?.find((item: any) => /^\s*- textbox(?:\s|$)/.test(item.line) && item.line.includes("masked=true") && !item.line.includes('textbox "'))?.ref ?? "";
+        textareaRef = initial.items?.find((item: any) => itemLine(item).includes('textbox "Notes"') && itemLine(item).includes("LIVE_NOTES"))?.ref ?? "";
+        selectRef = initial.items?.find((item: any) => itemLine(item).includes('combobox "Color"') && itemLine(item).includes('selected="Blue label"'))?.ref ?? "";
+        anonymousRef = initial.items?.find((item: any) => /^\s*- textbox(?:\s|$)/.test(itemLine(item)) && itemLine(item).includes("masked=true") && !itemLine(item).includes('textbox "'))?.ref ?? "";
         if (!textareaRef || !selectRef || !anonymousRef) return done();
         return commandResponse("fill", { target: { ref: textareaRef }, value: "CHANGED_NOTES" }, "form-fill");
       } catch (error) { failure = error; return done(); }
@@ -61,9 +62,9 @@ test("preserves visible live native values and selected labels without exposing 
     expect(contents).toContain("LIVE_NOTES");
     expect(contents).toContain('selected=\\\"Blue label\\\"');
     for (const hidden of ["OLD_DEFAULT", "INTERNAL_BLUE", "INTERNAL_RED", "SECRET_PASSWORD", "SECRET_MASK", "SECRET_ANONYMOUS", "SECRET_AX_PASSWORD", "SECRET_AX_MASK", "SECRET_AX_AREA"]) expect(contents).not.toContain(hidden);
-    const lines = initial.items.map((item: any) => item.line as string);
+    const lines = (initial.items).map(itemLine);
     for (const [label, value] of [["Outer label", "OUTER_VALUE"], ["Inner one", "INNER_ONE"], ["Inner two", "INNER_TWO"]]) {
-      const row = initial.items.find((item: any) => item.line.includes(`textbox "${label}"`) && item.line.includes(value));
+      const row = initial.items.find((item: any) => itemLine(item).includes(`textbox "${label}"`) && itemLine(item).includes(value));
       expect.soft(row?.ref, JSON.stringify(lines)).toEqual(expect.any(String));
     }
     expect(lines.some((line: string) => line.includes('textbox "Password"') && line.includes("masked=true"))).toBe(true);

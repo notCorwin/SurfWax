@@ -1,47 +1,83 @@
 import type { SnapshotLine } from "./snapshot-frame-tree";
-import { renderSnapshotNode, type SnapshotBounds } from "./snapshot-render";
+import {
+  formatSnapshotItem,
+  projectSnapshotNode,
+  type ProjectedSnapshotNode,
+  type SnapshotBounds,
+  type SnapshotBoxRun,
+} from "./snapshot-render";
 import { normalizeSnapshotText } from "./snapshot-preformatted";
 
-type RenderOptions = Parameters<typeof renderSnapshotNode>[1];
-const rounded = (bounds: SnapshotBounds) => bounds.map((value) => Math.round(value * 10));
-const tuple = (values: readonly number[]) => `(${values.map((value) => value / 10).join(",")})`;
+type RenderOptions = Parameters<typeof projectSnapshotNode>[1];
+const rounded = (bounds: SnapshotBounds) => bounds.map((value) => Math.round(value * 10) / 10) as unknown as SnapshotBounds;
 
 /** Encode every measured extent, including irregular gaps and visual reordering. */
-function boxes(members: readonly SnapshotLine[]): string {
+function boxRuns(members: readonly SnapshotLine[]): SnapshotBoxRun[] {
   const values = members.map((member) => rounded(member.node!.bounds!));
-  const parts: string[] = [];
+  const parts: SnapshotBoxRun[] = [];
   for (let index = 0; index < values.length;) {
     const first = values[index]!, next = values[index + 1];
-    const step = next?.map((value, coordinate) => value - first[coordinate]!);
+    const step = next
+      ? ([0, 1, 2, 3] as const).map((coordinate) => next[coordinate]! - first[coordinate]!) as unknown as SnapshotBounds
+      : undefined;
     let end = index + 1;
     if (step) while (end < values.length && values[end]!.every((value, coordinate) =>
       value === first[coordinate]! + step[coordinate]! * (end - index))) end += 1;
     if (end - index >= 3) {
-      parts.push(`${tuple(first)} step=${tuple(step!)} count=${end - index}`);
+      parts.push({ first, step: step!, count: end - index });
       index = end;
     } else {
-      parts.push(tuple(first));
+      parts.push({ box: first });
       index += 1;
     }
   }
-  return parts.join("; ");
+  return parts;
 }
 
-export function renderSnapshotLine(row: SnapshotLine, options?: RenderOptions): ReturnType<typeof renderSnapshotNode> {
-  if (!row.node) return { id: row.id, line: row.line, ...(row.ref ? { ref: row.ref } : {}) };
-  if (!row.members) return renderSnapshotNode(row.node, options);
+export function projectSnapshotLine(row: SnapshotLine, options?: RenderOptions): ProjectedSnapshotNode {
+  if (!row.node) {
+    return { id: row.id, depth: 0, role: "generic", ...(row.line ? { name: row.line } : {}), ...(row.ref ? { ref: row.ref } : {}) };
+  }
+  if (!row.members) return projectSnapshotNode(row.node, options);
   if (row.members.some((member) => member.node!.depth !== row.node!.depth)) {
-    // Batch a single-child path without changing any displayed tree line.
-    // Row IDs remain patch transport, never handles for the contained nodes.
-    return { id: row.id, line: row.members.map(({ node }) => renderSnapshotNode({ ...node!, ref: undefined, actions: undefined },
-      options ?? { fields: ["text", "state"] }).line).join("\n") };
+    // Batch a single-child path without changing transport identity.
+    const fields = options?.fields ?? ["text", "state"];
+    return {
+      id: row.id,
+      path: row.members.map(({ node }) => {
+        const { id: _id, ...rest } = projectSnapshotNode({ ...node!, ref: undefined, actions: undefined }, options ?? { fields });
+        return rest;
+      }),
+    };
   }
   const textParts = row.node.role === "StaticText" && !row.node.nameUnknown;
-  const rendered = renderSnapshotNode({ ...row.node, ...(textParts ? { name: undefined } : {}), bounds: undefined, ref: undefined, actions: undefined }, options);
+  const projected = projectSnapshotNode({
+    ...row.node,
+    ...(textParts ? { name: undefined } : {}),
+    bounds: undefined,
+    ref: undefined,
+    actions: undefined,
+  }, options);
   const showGeometry = !options?.fields || options.fields.includes("text");
-  if (textParts && showGeometry) return { id: row.id, line: `${rendered.line} [text-parts=${row.members.map(({ node }) =>
-    `${JSON.stringify(node!.preserveTextWhitespace || node!.textWhitespaceProven ? node!.name ?? "" : normalizeSnapshotText(node!.name ?? ""))} @${tuple(rounded(node!.bounds!))}`).join("; ")}]` };
-  return { id: row.id, line: `${rendered.line} [count=${row.members.length}]${showGeometry ? ` [boxes=${boxes(row.members)}]` : ""}` };
+  if (textParts && showGeometry) {
+    return {
+      ...projected,
+      textParts: row.members.map(({ node }) => ({
+        text: node!.preserveTextWhitespace || node!.textWhitespaceProven ? node!.name ?? "" : normalizeSnapshotText(node!.name ?? ""),
+        box: rounded(node!.bounds!),
+      })),
+    };
+  }
+  return {
+    ...projected,
+    count: row.members.length,
+    ...(showGeometry ? { boxes: boxRuns(row.members) } : {}),
+  };
+}
+
+export function renderSnapshotLine(row: SnapshotLine, options?: RenderOptions): { id: string; line: string; ref?: string } {
+  const projected = projectSnapshotLine(row, options);
+  return { id: projected.id, line: formatSnapshotItem(projected), ...(projected.ref ? { ref: projected.ref } : {}) };
 }
 
 /** Explicit targeting fields expose the original independently validated nodes. */

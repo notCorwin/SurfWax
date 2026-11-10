@@ -8,8 +8,8 @@ import { callUserScript } from "./script-client";
 import { ToolScheduler } from "./tool-scheduler";
 import { SNAPSHOT_DELIVERY_COMMIT, type SnapshotDeliveryLease } from "./snapshot-wire";
 
-function mockSnapshot(tabId: number, lines: string[] = [], cursor?: string, delivery: SnapshotDeliveryLease = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() }) {
-  const items = lines.map((line, index) => ({ id: `node-${index}`, line }));
+function mockSnapshot(tabId: number, names: string[] = [], cursor?: string, delivery: SnapshotDeliveryLease = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() }) {
+  const items = names.map((name, index) => ({ id: `node-${index}`, depth: 0, role: "button", name }));
   const page = { observationId: "observation", tabId, documentId: 1, url: "https://example.test/", title: "Page",
     viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items, ...(cursor ? { nextCursor: cursor } : {}),
     truncation: { truncated: Boolean(cursor), total: items.length + (cursor ? 1 : 0), returned: items.length, offset: 0, charOffset: 0,
@@ -116,7 +116,7 @@ describe("browser tools", () => {
   it("returns a budgeted inspection page inline with its continuation and fragments intact", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: testEventStore(events) });
-    const items = [{ id: "node-1", line: "海".repeat(3100), fragment: { index: 0, start: 0, end: 3100, total: 4000 } }];
+    const items = [{ id: "node-1", depth: 0, role: "button", name: "海".repeat(3100), fragment: { index: 0, field: "name", start: 0, end: 3100, total: 4000 } }];
     const page = { observationId: "obs", tabId: 4, documentId: 1, url: "https://example.test/", title: "Page",
       viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items, nextCursor: "obs:0:3100",
       truncation: { truncated: true, total: 2, returned: 1, offset: 0, charOffset: 0, nextOffset: 0, nextCharOffset: 3100,
@@ -137,7 +137,7 @@ describe("browser tools", () => {
   it("does not commit a snapshot page when the terminal event cannot be saved", async () => {
     const delivery = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
     const page = { observationId: "obs", tabId: 4, documentId: 1, url: "https://example.test/", title: "Page",
-      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items: [{ id: "node", line: "- main" }],
+      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items: [{ id: "node", depth: 0, role: "main" }],
       truncation: { truncated: false, total: 1, returned: 1, offset: 0, charOffset: 0, nextOffset: 1, nextCharOffset: 0,
         budget: 12000, used: 31, baselineComplete: true } };
     Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: delivery });
@@ -153,7 +153,7 @@ describe("browser tools", () => {
   it("reports a stale page as a failed tool result if its delivery lease cannot begin", async () => {
     const delivery = { begin: vi.fn(() => false), finish: vi.fn(), cancel: vi.fn() };
     const page = { observationId: "obs", tabId: 4, documentId: 1, url: "https://example.test/", title: "Page",
-      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items: [{ id: "node", line: "- main" }],
+      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items: [{ id: "node", depth: 0, role: "main" }],
       truncation: { truncated: false, total: 1, returned: 1, offset: 0, charOffset: 0, nextOffset: 1, nextCharOffset: 0,
         budget: 12000, used: 31, baselineComplete: true } };
     Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: delivery });
@@ -205,8 +205,8 @@ describe("browser tools", () => {
     const calls = ["first", "second"].map((toolCallId, index) => ({ type: "tool-call", toolCallId, toolName: "click", input: { target: { ref: "one" }, tabId: 4 + index } }));
     scheduler.prepare(calls, 4);
     const [first, second] = await Promise.all(calls.map(({ toolCallId }) => tools.click.execute({ target: { ref: "one" }, tabId: toolCallId === "first" ? 4 : 5 }, { toolCallId })));
-    expect(first).toMatchObject({ ok: false, pageSnapshot: { tabId: 4, items: [{ line: "action,snapshot" }], nextCursor: "next" } });
-    expect(second).toMatchObject({ ok: true, pageSnapshot: { items: [{ line: "action,snapshot,action,snapshot" }] } });
+    expect(first).toMatchObject({ ok: false, pageSnapshot: { tabId: 4, items: [{ name: "action,snapshot" }], nextCursor: "next" } });
+    expect(second).toMatchObject({ ok: true, pageSnapshot: { items: [{ name: "action,snapshot,action,snapshot" }] } });
     expect(order).toEqual(["action", "snapshot", "action", "snapshot"]);
   });
 
@@ -294,7 +294,7 @@ describe("browser tools", () => {
     const executor = { runProgram: vi.fn(async () => ({ ok: true, result: { screenshot } })), inspect, pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
     const tools = createProgramTools(executor, { visualEnabled: async () => true }) as Record<string, any>;
     const output = await tools.take_screenshot.execute({ tabId: 8 }, { toolCallId: "screen" });
-    expect(output).toMatchObject({ result: { screenshot }, pageSnapshot: { tabId: 8, nextCursor: "cursor", items: [{ line: "x".repeat(9000) }] } });
+    expect(output).toMatchObject({ result: { screenshot }, pageSnapshot: { tabId: 8, nextCursor: "cursor", items: [{ name: "x".repeat(9000) }] } });
     expect(inspect).toHaveBeenCalledWith({ tabId: 8, wire: { maxBytes: 16384, evidenceId: "screen" } }, expect.any(AbortSignal), expect.any(Object));
     const prepared = await prepareToolMessages([{ role: "tool", content: [{ type: "tool-result", output: { type: "json", value: output } }] }], 1);
     expect(prepared.at(-1).content).toContainEqual(expect.objectContaining({ type: "file", mediaType: "image/png" }));
@@ -1137,7 +1137,7 @@ describe("browser tools", () => {
 
   it("keeps long inspection continuation and fragment access visible", async () => {
     const logger = { append: async (event: any) => ({ ...event, id: 18 }) } as EventLogger;
-    const items = Array.from({ length: 50 }, (_, index) => ({ id: `node-${index}`, line: "x".repeat(250) }));
+    const items = Array.from({ length: 50 }, (_, index) => ({ id: `node-${index}`, depth: 0, role: "button", name: "x".repeat(250) }));
     const value = { observationId: "obs", tabId: 41, documentId: 3, mode: "full", items, nextCursor: "cursor", truncation: { truncated: true, total: 100, returned: 50, budget: 15000, used: 14000, reason: "budget", baselineComplete: false } };
     const result = await compactToolResult(value, { logger, preserveInspectionStatus: true });
     expect(result).toMatchObject({ $ref: 18, observationId: "obs", tabId: 41, documentId: 3, mode: "full", nextCursor: "cursor", cursorNote: expect.stringContaining("Read all items"), truncation: { truncated: true, reason: "budget", baselineComplete: false }, access: { artifactId: 18, path: ["items"], offset: 0, limit: expect.any(Number) } });
@@ -1145,13 +1145,13 @@ describe("browser tools", () => {
 
   it("only exempts verified inspection pages within the complete byte limit", async () => {
     const logger = { append: async (event: any) => ({ ...event, id: 18 }) } as EventLogger;
-    const makePage = (line: string) => ({ observationId: "obs", tabId: 41, documentId: 3, url: "https://example.test/", title: "Page",
-      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "delta", items: [{ id: "node", line, change: "updated", after: null }], nextCursor: "obs:1:0",
+    const makePage = (name: string) => ({ observationId: "obs", tabId: 41, documentId: 3, url: "https://example.test/", title: "Page",
+      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "delta", items: [{ id: "node", depth: 0, role: "button", name, change: "updated" as const, after: null }], nextCursor: "obs:1:0",
       truncation: { truncated: true, total: 2, returned: 1, offset: 0, charOffset: 0, nextOffset: 1, nextCharOffset: 0,
         budget: 12000, used: 10000, reason: "budget", baselineComplete: false } });
     const page = makePage("x".repeat(9000));
     expect(await compactToolResult(page, { logger, preserveInspectionStatus: true, toolCallId: "call" })).toEqual(page);
-    const lookahead = { nonAuthoritative: true as const, items: Array.from({ length: 30 }, (_, index) => ({ index: index + 2, id: `later-${index}`, line: "x".repeat(300) })) };
+    const lookahead = { nonAuthoritative: true as const, items: Array.from({ length: 30 }, (_, index) => ({ index: index + 2, id: `later-${index}`, name: "x".repeat(300) })) };
     const previewBase = { ...makePage("prefix"), mode: "full", lookahead };
     const withPreview = { ...previewBase, truncation: { ...previewBase.truncation,
       withLookahead: new TextEncoder().encode(JSON.stringify({ items: previewBase.items, lookahead })).byteLength } };
@@ -1173,8 +1173,8 @@ describe("browser tools", () => {
   it("fails explicitly instead of hiding an oversized inspection page in an artifact", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: testEventStore(events) });
-    const lookahead = { nonAuthoritative: true, items: [{ index: 2, id: "later", line: '  - button "Later"' }] };
-    const items = [{ id: "first", line: "x".repeat(600), fragment: { index: 0, start: 0, end: 600, total: 1000 } }];
+    const lookahead = { nonAuthoritative: true, items: [{ index: 2, id: "later", depth: 0, role: "button", name: "Later" }] };
+    const items = [{ id: "first", depth: 0, role: "button", name: "x".repeat(600), fragment: { index: 0, field: "name", start: 0, end: 600, total: 1000 } }];
     const withLookahead = new TextEncoder().encode(JSON.stringify({ items, lookahead })).byteLength;
     const page = { observationId: "obs", tabId: 4, documentId: 1, url: "x".repeat(70_000), title: "Page",
       viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items, lookahead, nextCursor: "obs:0:600",

@@ -134,6 +134,12 @@
 
 ## 快照协议
 
+### inspect_page 交付结构化 item，不再使用 `{id, line}`
+
+观察结果按字段交付（`role`、`depth`、`name`、`box`、`state`、`nameUnknown`、`textParts`、`count`、`boxes`、`path`、`coordinates` 等）。分页切片 `name` / `value` / `textParts.*.text`，并用 `fragment.field` 标明被切字段；独立消费者按字段拼接，不把整行字符串当作权威正文。遗留树形行仅用于 observe 字符串或测试断言，由 `formatSnapshotItem` 从结构化 item 生成。
+
+来源：当前实现见 `src/chrome/snapshot-render.ts`、`src/chrome/snapshot-pagination.ts`、`e2e/evaluation/semantic-state.ts`。
+
 ### 可见语义与操作引用分离
 
 2026-11-07 的实现默认以文字和状态呈现快照，不暴露元素操作引用；需要句柄时可显式请求 `ref` 字段，或通过 `find_elements` 获取。内部仍维护引用及其角色、身份和文档校验；快照行 `id` 用于分页和增量更新，不是操作目标别名。可见名称以绘制证据为准，未绘制的 alt 或无障碍名称不作为可见文字输出；`name=unknown` 只说明完整可见名称未被确认，仍可能提供已确认的前缀；不能推断底层元数据不存在。

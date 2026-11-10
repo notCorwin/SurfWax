@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
 import { applySemanticDelta, SemanticPages, type SemanticItem } from "./evaluation/semantic-state";
+import { itemLine } from "./snapshot-format";
 
 /** Observe exactly the result passed to the model provider. */
 function toolResult(request: any, id: string): any {
@@ -56,8 +57,8 @@ test("delivers action snapshots transactionally and preserves actions when metad
       const next = changed.append(page);
       const compare = () => {
         updated = applySemanticDelta(initialItems, changed.result().items);
-        expect(updated.some((item) => item.line.includes("STATUS_2"))).toBe(true);
-        expect(updated.some((item) => item.line.includes("STATUS_1"))).toBe(false);
+        expect(updated.some((item) => itemLine(item).includes("STATUS_2"))).toBe(true);
+        expect(updated.some((item) => itemLine(item).includes("STATUS_1"))).toBe(false);
         return compareFresh();
       };
       return next ? readRemaining(changed, next, compare) : compare();
@@ -85,9 +86,9 @@ test("delivers action snapshots transactionally and preserves actions when metad
     });
   const finishInitial = (): ReturnType<typeof commandResponse> | ReturnType<typeof textResponse> => {
     const baseline = initial.result(); baselineId = baseline.observationId; initialItems = baseline.items;
-    expect(initialItems.some((item) => item.line.includes(text))).toBe(true);
-    expect(initialItems.some((item) => item.line.includes("STATUS_1"))).toBe(true);
-    for (const row of rows) expect(initialItems.some((item) => item.line.includes(row))).toBe(true);
+    expect(initialItems.some((item) => itemLine(item).includes(text))).toBe(true);
+    expect(initialItems.some((item) => itemLine(item).includes("STATUS_1"))).toBe(true);
+    for (const row of rows) expect(initialItems.some((item) => itemLine(item).includes(row))).toBe(true);
     return changeWithHugeTitle();
   };
 

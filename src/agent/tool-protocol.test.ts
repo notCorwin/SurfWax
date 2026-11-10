@@ -33,7 +33,7 @@ describe("tool protocol", () => {
     expect(z.toJSONSchema(inspect.inputSchema).properties).toHaveProperty("since");
     expect(z.toJSONSchema(inspect.inputSchema).properties).toHaveProperty("full");
     expect(inspect.description).not.toContain("For since");
-    expect(inspect.description).toContain("Long lines can continue across pages");
+    expect(inspect.description).toContain("Oversized name/value/textParts text can continue across pages");
   });
 
   it("exposes conditional input constraints in the model-facing JSON Schema", () => {

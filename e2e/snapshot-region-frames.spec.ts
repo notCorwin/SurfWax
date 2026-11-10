@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -61,7 +62,7 @@ test("scoped snapshots include visible descendant frames and exclude frames outs
     for (const present of ["ROOT_INSIDE_MARKER", "SAME_INSIDE_FRAME", "Same frame action", "CHILD_OUTSIDE_REGION", "CROSS_INSIDE_REGION", "Cross frame action"]) expect.soft(parent).toContain(present);
     for (const absent of ["ROOT_OUTSIDE_MARKER", "HIDDEN_FRAME_CONTENT", "OUTSIDE_FRAME_CONTENT"]) expect.soft(parent).not.toContain(absent);
     for (const label of ["Same frame action", "Cross frame action"]) {
-      const button = parentSnapshot?.items?.find((item: any) => item.line.includes(`- button "${label}"`));
+      const button = parentSnapshot?.items?.find((item: any) => itemLine(item).includes(`- button "${label}"`));
       expect.soft(button?.ref).toEqual(expect.any(String));
     }
 
@@ -69,7 +70,7 @@ test("scoped snapshots include visible descendant frames and exclude frames outs
     const child = JSON.stringify(childSnapshot?.items ?? []);
     for (const present of ["CROSS_INSIDE_REGION", "Cross frame action"]) expect.soft(child).toContain(present);
     for (const absent of ["ROOT_OUTSIDE_MARKER", "ROOT_INSIDE_MARKER", "SAME_INSIDE_FRAME", "CHILD_OUTSIDE_REGION", "HIDDEN_FRAME_CONTENT", "OUTSIDE_FRAME_CONTENT", "Cross origin document"]) expect.soft(child).not.toContain(absent);
-    expect.soft(childSnapshot?.items?.find((item: any) => item.line.includes('- button "Cross frame action"'))?.ref).toEqual(expect.any(String));
+    expect.soft(childSnapshot?.items?.find((item: any) => itemLine(item).includes('- button "Cross frame action"'))?.ref).toEqual(expect.any(String));
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

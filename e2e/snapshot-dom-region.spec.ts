@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -50,7 +51,7 @@ test("inspects and acts inside AX-ignored regions without confusing same IDs acr
       (request) => {
         try {
           crossSnapshot = lastTool(request);
-          const button = crossSnapshot.items?.find((item: any) => item.line.includes('- button "Cross region action"'));
+          const button = crossSnapshot.items?.find((item: any) => itemLine(item).includes('- button "Cross region action"'));
           if (typeof button?.ref !== "string") return done();
           responses.unshift((next) => { try { clicked = lastTool(next); } catch (error) { problem = error; } return done(); });
           return commandResponse("click", { target: { ref: button.ref } }, "dom-region-click");
@@ -76,7 +77,7 @@ test("inspects and acts inside AX-ignored regions without confusing same IDs acr
     expect(crossItems).toContain("CROSS_INSIDE_REGION");
     expect(crossItems).toContain("Cross region action");
     for (const absent of ["ROOT_INSIDE_REGION", "ROOT_OUTSIDE_REGION", "SAME_FRAME_REGION", "CROSS_OUTSIDE_REGION", "CROSS_HIDDEN_CONTENT", "CROSS_TRANSPARENT_CONTENT"]) expect(crossItems).not.toContain(absent);
-    expect(crossSnapshot.items.find((item: any) => item.line.includes('- button "Cross region action"'))?.ref).toEqual(expect.any(String));
+    expect(crossSnapshot.items.find((item: any) => itemLine(item).includes('- button "Cross region action"'))?.ref).toEqual(expect.any(String));
     expect(clicked).toMatchObject({ ok: true });
     expect(await cross.locator("body").getAttribute("data-cross-clicked")).toBe("yes");
     expect(await target.locator("body").getAttribute("data-root-clicked")).toBeNull();
@@ -115,7 +116,7 @@ test("uses only the actual visible external label for a scoped input, including 
       (request) => {
         try {
           shadowSnapshot = lastTool(request);
-          const input = shadowSnapshot.items?.find((item: any) => item.line.includes('textbox "SHADOW_ASSOCIATED_LABEL"') && item.line.includes("SHADOW_VALUE"));
+          const input = shadowSnapshot.items?.find((item: any) => itemLine(item).includes('textbox "SHADOW_ASSOCIATED_LABEL"') && itemLine(item).includes("SHADOW_VALUE"));
           if (typeof input?.ref !== "string") return done();
           responses.unshift((next) => { try { filled = lastTool(next); } catch (error) { problem = error; } return done(); });
           return commandResponse("fill", { target: { ref: input.ref }, value: "SHADOW_FILLED" }, "shadow-region-fill");
@@ -133,7 +134,7 @@ test("uses only the actual visible external label for a scoped input, including 
     expect(outerSnapshot).toMatchObject({ mode: "full", truncation: { baselineComplete: true }, items: expect.any(Array) });
     const outer = JSON.stringify(outerSnapshot.items);
     expect(outer).toContain("OUTER_INSIDE");
-    const outerInput = outerSnapshot.items.find((item: any) => item.line.includes('textbox "OUTER_ASSOCIATED_LABEL"') && item.line.includes("OUTER_VALUE"));
+    const outerInput = outerSnapshot.items.find((item: any) => itemLine(item).includes('textbox "OUTER_ASSOCIATED_LABEL"') && itemLine(item).includes("OUTER_VALUE"));
     expect(outerInput?.ref).toEqual(expect.any(String));
     for (const absent of ["SHADOW_ASSOCIATED_LABEL", "SHADOW_INSIDE", "SHADOW_VALUE", "UNRELATED_OUTER_LABEL", "UNRELATED_OUTSIDE_VALUE", "UNRELATED_SHADOW_LABEL", "HIDDEN_OUTSIDE_LABEL"])
       expect(outer).not.toContain(absent);
@@ -141,7 +142,7 @@ test("uses only the actual visible external label for a scoped input, including 
     expect(shadowSnapshot).toMatchObject({ mode: "full", truncation: { baselineComplete: true }, items: expect.any(Array) });
     const shadow = JSON.stringify(shadowSnapshot.items);
     expect(shadow).toContain("SHADOW_INSIDE");
-    const shadowInput = shadowSnapshot.items.find((item: any) => item.line.includes('textbox "SHADOW_ASSOCIATED_LABEL"') && item.line.includes("SHADOW_VALUE"));
+    const shadowInput = shadowSnapshot.items.find((item: any) => itemLine(item).includes('textbox "SHADOW_ASSOCIATED_LABEL"') && itemLine(item).includes("SHADOW_VALUE"));
     expect(shadowInput?.ref).toEqual(expect.any(String));
     for (const absent of ["OUTER_ASSOCIATED_LABEL", "OUTER_INSIDE", "OUTER_VALUE", "UNRELATED_OUTER_LABEL", "UNRELATED_OUTSIDE_VALUE", "UNRELATED_SHADOW_LABEL", "HIDDEN_OUTSIDE_LABEL"])
       expect(shadow).not.toContain(absent);

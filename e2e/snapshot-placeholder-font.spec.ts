@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -28,7 +29,7 @@ test("shows native Arial placeholders while rejecting an author font using that 
       commandResponse("inspect_page", { budget: 12000 }, "arial-before"),
       (request) => {
         before = lastTool(request);
-        const button = before.items?.find((item: any) => item.line.includes('button "Toggle Arial face"'));
+        const button = before.items?.find((item: any) => itemLine(item).includes('button "Toggle Arial face"'));
         if (!button?.ref) return textResponse("ARIAL_TEST_DONE");
         responses.unshift(
           () => commandResponse("inspect_page", { budget: 12000 }, "arial-author-font"),
@@ -80,7 +81,7 @@ test("does not report a placeholder outside the visual viewport after pinch zoom
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PINCH_TEST_DONE", { timeout: 60_000 });
     expect(snapshot).toMatchObject({ mode: "full", items: expect.any(Array) });
     expect(JSON.stringify(snapshot.items)).not.toContain("OUTSIDE_VISUAL_VIEWPORT");
-    expect(snapshot.items.find((item: any) => item.line.includes("Zoomed input"))?.line).toContain("[placeholder=unknown]");
+    expect(itemLine(snapshot.items.find((item: any) => itemLine(item).includes("Zoomed input")))).toContain("[placeholder=unknown]");
     await cdp.detach();
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

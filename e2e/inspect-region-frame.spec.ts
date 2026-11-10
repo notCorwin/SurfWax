@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { inspectText } from "./snapshot-format";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
 
@@ -28,7 +29,7 @@ test("inspects a region in a cross-process frame without including other page co
       },
       (request) => {
         const output = lastTool(request);
-        const lines = output.items.map((item: any) => item.line).join("\n");
+        const lines = inspectText(output.items);
         expect(lines).toContain("Scoped frame marker");
         expect(lines).not.toContain("Other frame marker");
         expect(lines).not.toContain("Root marker");

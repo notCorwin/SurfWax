@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine, inspectText } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -40,7 +41,7 @@ test("region snapshots preserve DOM membership and semantic order across aria-ow
       commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#scope" } }, "owned-region"),
       (request) => {
         snapshot = lastTool(request);
-        const button = snapshot.items?.find((item: any) => item.line.includes('- button "Region action"'));
+        const button = snapshot.items?.find((item: any) => itemLine(item).includes('- button "Region action"'));
         return button?.ref ? commandResponse("click", { target: { ref: button.ref } }, "owned-click") : textResponse("OWNED_REGION_DONE");
       },
       (request) => { clicked = lastTool(request); return textResponse("OWNED_REGION_DONE"); },
@@ -52,7 +53,7 @@ test("region snapshots preserve DOM membership and semantic order across aria-ow
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("OWNED_REGION_DONE", { timeout: 60_000 });
     expect(snapshot).toMatchObject({ mode: "full", truncation: { baselineComplete: true }, items: expect.any(Array) });
-    const text = snapshot.items.map((item: any) => item.line).join("\n");
+    const text = inspectText(snapshot.items);
     expect(text).toContain('heading "REGION_HEADING"');
     expect(text).toContain('button "Region action"');
     expect(text).not.toContain("OUTSIDE_HEADING");

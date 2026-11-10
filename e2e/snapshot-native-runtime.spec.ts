@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, openExtension, dispose } from "./fixtures";
+import { inspectText } from "./snapshot-format";
 
 test.use({ screenshot: "off", trace: "off" });
 
@@ -57,14 +58,14 @@ test("the extension runtime reads current native fields after strict capture fai
       const result = await state.runtime.inspect(state.tabId, { full: true, budget: 100_000 });
       return { result, samples: state.samples, queries: state.queries, installs: state.installs };
     });
-    const first: any = await inspect(), text = first.result.items.map((item: any) => item.line).join("\n");
+    const first: any = await inspect(), text = inspectText(first.result.items);
     expect(first.result.partial).toBe(true);
     expect(text).toContain('textbox "Author label"'); expect(text).toContain("INITIAL_VALUE");
     expect(text).toContain('[placeholder="SEARCH_HINT"]'); expect(text).toContain(JSON.stringify("FIRST_LINE\nSECOND_LINE"));
     expect(first.samples).toBe(1); expect(first.queries).toBe(0); expect(first.installs).toBe(1);
     expect(text).not.toContain("[ref=");
     await target.evaluate(() => { (document.querySelector("#value") as HTMLInputElement).value = "CURRENT_VALUE"; });
-    const next: any = await inspect(), current = next.result.items.map((item: any) => item.line).join("\n");
+    const next: any = await inspect(), current = inspectText(next.result.items);
     expect(current).toContain("CURRENT_VALUE"); expect(current).not.toContain("INITIAL_VALUE");
     expect(next.samples).toBe(2); expect(next.installs).toBe(1); expect(next.queries).toBe(0);
     await opened.page.evaluate(() => {

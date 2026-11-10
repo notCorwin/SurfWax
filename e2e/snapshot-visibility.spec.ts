@@ -1,8 +1,9 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
-const button = (items: any[], name: string) => items.find((item) => item.line.includes(`button "${name}"`));
+const button = (items: any[], name: string) => items.find((item) => itemLine(item).includes(`button "${name}"`));
 
 test("snapshots reflect rendered visibility and update when content is shown or hidden", async () => {
   const responses: MockResponse[] = [];
@@ -72,7 +73,7 @@ test("snapshots reflect rendered visibility and update when content is shown or 
       commandResponse("inspect_page", { full: true, budget: 12000, region: { by: "css", value: "#legacy-partial" } }, "visibility-legacy-partial"),
       commandResponse("inspect_page", { full: true, budget: 12000, region: { by: "css", value: "#modern-partial" } }, "visibility-modern-partial"),
       () => {
-        const aggregateRef = baseline.items.find((item: any) => item.line.includes("Visible label"))?.ref;
+        const aggregateRef = baseline.items.find((item: any) => itemLine(item).includes("Visible label"))?.ref;
         return commandResponse("click", { target: { ref: aggregateRef } }, "visibility-change");
       },
       () => commandResponse("inspect_page", { budget: 12000 }, "visibility-delta"),
@@ -103,14 +104,14 @@ test("snapshots reflect rendered visibility and update when content is shown or 
       expect(JSON.stringify(before.items)).not.toContain(text);
     }
     for (const [id, prefix] of [["visibility-legacy-partial", "Legacy"], ["visibility-modern-partial", "Modern"]]) {
-      const page = output(id), row = page?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(item.line) && item.ref);
+      const page = output(id), row = page?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.ref);
       expect(row?.ref).toEqual(expect.any(String));
-      expect(row.line.includes(prefix) || row.line.includes("[name=unknown]")).toBe(true);
-      expect(row.line).not.toContain("partially clipped action");
+      expect(itemLine(row).includes(prefix) || itemLine(row).includes("[name=unknown]")).toBe(true);
+      expect(itemLine(row)).not.toContain("partially clipped action");
     }
     for (const [id, hidden] of [["visibility-clipped-name", "Clipped accessible name"], ["visibility-hidden-name", "Accessible name"], ["visibility-explicit-name", "Explicit label"]]) {
       const page = output(id);
-      expect(page?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toBe(true);
+      expect(page?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toBe(true);
       expect(JSON.stringify(page.items)).not.toContain(hidden);
     }
     expect(JSON.stringify(before.items)).not.toContain("Clipped accessible name");
@@ -136,7 +137,7 @@ test("snapshots reflect rendered visibility and update when content is shown or 
     }
     for (const text of ["Legacy clipped standalone text", "Modern clipped standalone text"]) {
       expect(JSON.stringify(changed.pageSnapshot.items)).toContain(text);
-      expect(delta.items.some((item: any) => item.change === "added" && item.line.includes(text))).toBe(true);
+      expect(delta.items.some((item: any) => item.change === "added" && itemLine(item).includes(text))).toBe(true);
     }
     expect(delta?.mode).toBe("delta");
     const previouslyVisible = button(before.items, "Visible action");

@@ -101,11 +101,11 @@ describe("findElements", () => {
   it("does not retarget an old AX ref after the node's visible name changes", async () => {
     const h = harness(); const page = await h.runtime.createPage(3);
     const before: any = await page.inspect({ fields: ["text", "state", "ref"] });
-    const old = before.items.find((item: any) => item.line.includes('button "First"')).ref;
+    const old = before.items.find((item: any) => item.role === "button" && item.name === "First").ref;
     h.nodes.get(1)!.name = "Replacement";
     await expect(page.ref(old).textContent()).rejects.toMatchObject({ code: "stale-ref", detail: { reason: "visible-identity-changed" } });
     const after: any = await page.inspect({ fields: ["text", "state", "ref"] });
-    const current = after.items.find((item: any) => item.line.includes('button "Replacement"')).ref;
+    const current = after.items.find((item: any) => item.role === "button" && item.name === "Replacement").ref;
     expect(current).not.toBe(old);
     await expect(page.ref(old).textContent()).rejects.toMatchObject({ code: "stale-ref" });
     await expect(page.ref(current).textContent()).resolves.toBe("Replacement");

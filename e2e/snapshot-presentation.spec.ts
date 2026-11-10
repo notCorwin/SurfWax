@@ -1,7 +1,8 @@
 import { expect, type Page } from "@playwright/test";
 import { test, openExtension, dispose } from "./fixtures";
+import { itemLine, inspectText } from "./snapshot-format";
 
-type Snapshot = { observationId: string; mode: string; nextCursor?: string; items: Array<{ id: string; line: string; ref?: string; change?: string }> };
+type Snapshot = { observationId: string; mode: string; nextCursor?: string; items: Array<{ id: string; role?: string; name?: string; ref?: string; change?: string; box?: readonly number[] }> };
 const fixtureUrl = "http://snapshot-presentation.test/";
 const image = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23555555'/%3E%3C/svg%3E";
 
@@ -77,7 +78,7 @@ test("compact observations distinguish same-name targets by measured layout and 
     await target.evaluate(() => document.fonts.ready);
     await attach(opened.page);
     const first = await inspect(opened.page);
-    const lines = first.items.map((item) => item.line);
+    const lines = first.items.map((item) => itemLine(item));
     const text = lines.join("\n");
     expect(first.items.every((item) => item.ref === undefined)).toBe(true);
     expect(text).not.toContain("[ref=");
@@ -94,13 +95,13 @@ test("compact observations distinguish same-name targets by measured layout and 
       const r = anchor.getBoundingClientRect(); return r.width > 0 && r.height > 0;
     }).map((anchor) => { const r = anchor.getBoundingClientRect(); return { x: r.x, width: r.width }; }));
     expect(expected[0]!.x).toBeGreaterThan(expected[1]!.x);
-    const pair = first.items.filter((item) => /- link "x2"/.test(item.line));
+    const pair = first.items.filter((item) => /- link "x2"/.test(itemLine(item)));
     const left = Math.min(...expected.map((item) => item.x));
     expect(text).not.toContain("[position=");
     for (const item of pair) {
-      expect(expected.some((actual) => Math.abs(actual.x - box(item.line)[0]!) < 0.2)).toBe(true);
+      expect(expected.some((actual) => Math.abs(actual.x - box(itemLine(item))[0]!) < 0.2)).toBe(true);
     }
-    expect(pair.filter((item) => box(item.line)[0] === left)).toHaveLength(1);
+    expect(pair.filter((item) => box(itemLine(item))[0] === left)).toHaveLength(1);
     const rawSnapshot = await opened.page.evaluate(async () => {
       const state = (globalThis as any).__presentationStudy;
       return state.runtime.snapshot(state.tabId);
@@ -112,7 +113,7 @@ test("compact observations distinguish same-name targets by measured layout and 
     expect(sliced.nextCursor).toEqual(expect.any(String));
     await target.locator("#badges").evaluate((element) => element.classList.add("swapped"));
     const continued = await inspect(opened.page, { cursor: sliced.nextCursor });
-    expect(continued.items.filter((item) => /- link "x2"/.test(item.line))).toEqual(pair);
+    expect(continued.items.filter((item) => /- link "x2"/.test(itemLine(item)))).toEqual(pair);
     await expect(inspect(opened.page, { cursor: actionable.nextCursor })).rejects.toThrow("stale-observation");
     const delta = await inspect(opened.page, { since: first.observationId });
     expect(delta.mode).toBe("delta");
@@ -120,7 +121,7 @@ test("compact observations distinguish same-name targets by measured layout and 
       const after = delta.items.find((item) => item.id === before.id);
       expect(after?.change).toBe("updated");
       const other = pair.find((item) => item.id !== before.id)!;
-      expect(box(after!.line)[0]).toBe(box(other.line)[0]);
+      expect(box(itemLine(after!))[0]).toBe(box(itemLine(other))[0]);
     }
     expect(await opened.page.evaluate(() => (globalThis as any).__presentationStudy.screenshots)).toBe(0);
   } finally {
@@ -142,9 +143,9 @@ test("geometry stays in the owning frame viewport after root scrolling", async (
     await expect(target.frameLocator("iframe").locator("img")).toBeVisible();
     await attach(opened.page);
     const observation = await inspect(opened.page);
-    const repeats = observation.items.filter((item) => /- link "Repeat"/.test(item.line));
+    const repeats = observation.items.filter((item) => /- link "Repeat"/.test(itemLine(item)));
     expect(repeats).toHaveLength(2);
-    const images = observation.items.filter((item) => /- image/.test(item.line)).map((item) => box(item.line));
+    const images = observation.items.filter((item) => /- image/.test(itemLine(item))).map((item) => box(itemLine(item)));
     const root = images.find((rect) => rect[2] === 19);
     const embedded = images.find((rect) => rect[2] === 23);
     expect(root).toEqual([20, 90, 19, 19]);
@@ -172,28 +173,28 @@ test("text-fragment reordering and actionable painted overflow survive presentat
     await target.goto(fixtureUrl);
     await attach(opened.page);
     const initial = await inspect(opened.page);
-    const label = initial.items.find((item) => item.line.includes('[text-parts=') && item.line.includes('"One"') && item.line.includes('"Two"'))!;
+    const label = initial.items.find((item) => itemLine(item).includes('[text-parts=') && itemLine(item).includes('"One"') && itemLine(item).includes('"Two"'))!;
     const part = (line: string, text: string) => {
       const match = new RegExp(`"${text}" @\\(([^)]+)\\)`).exec(line);
       if (!match) throw new Error(`Missing ${text} fragment geometry: ${line}`);
       return match[1]!.split(",").map(Number);
     };
     const textBox = (line: string) => /\[text-box=([^\]]+)\]/.exec(line)![1]!.split(",").map(Number);
-    expect(part(label.line, "One")[0]).toBeLessThan(part(label.line, "Two")[0]!);
+    expect(part(itemLine(label), "One")[0]).toBeLessThan(part(itemLine(label), "Two")[0]!);
     const shallow = await inspect(opened.page, { depth: 1 });
-    expect(shallow.items.some((item) => item.line.includes('"One"') && item.line.includes('"Two"'))).toBe(true);
-    expect(initial.items.some((item) => item.line.includes('button "OneTwo"') || item.line.includes('button "One Two"'))).toBe(false);
+    expect(shallow.items.some((item) => itemLine(item).includes('"One"') && itemLine(item).includes('"Two"'))).toBe(true);
+    expect(initial.items.some((item) => itemLine(item).includes('button "OneTwo"') || itemLine(item).includes('button "One Two"'))).toBe(false);
 
     await target.locator("#label").evaluate((element) => element.classList.add("reordered"));
     const delta = await inspect(opened.page, { since: initial.observationId });
     const changed = delta.items.find((item) => item.id === label.id)!;
     expect(changed?.change).toBe("updated");
-    expect(part(changed.line, "One")[0]).toBeGreaterThan(part(changed.line, "Two")[0]!);
+    expect(part(itemLine(changed), "One")[0]).toBeGreaterThan(part(itemLine(changed), "Two")[0]!);
 
-    const move = initial.items.find((item) => /- button "Move"/.test(item.line))!;
-    const domMove = initial.items.find((item) => /- button "DOMMove"/.test(item.line))!;
-    const generated = initial.items.find((item) => /- StaticText "Generated"/.test(item.line))!;
-    expect(box(generated.line)).toEqual(expect.arrayContaining([20, 300]));
+    const move = initial.items.find((item) => /- button "Move"/.test(itemLine(item)))!;
+    const domMove = initial.items.find((item) => /- button "DOMMove"/.test(itemLine(item)))!;
+    const generated = initial.items.find((item) => /- StaticText "Generated"/.test(itemLine(item)))!;
+    expect(box(itemLine(generated))).toEqual(expect.arrayContaining([20, 300]));
     const imageX = await target.locator("#with-image img").evaluate((element) => element.getBoundingClientRect().x);
     await target.locator("#with-image").evaluate((element) => element.classList.add("shifted"));
     await target.locator("#dom-only").evaluate((element) => element.classList.add("shifted"));
@@ -202,15 +203,15 @@ test("text-fragment reordering and actionable painted overflow survive presentat
     const moved = motion.items.find((item) => item.id === move.id)!;
     const movedGenerated = motion.items.find((item) => item.id === generated.id)!;
     expect(moved?.change).toBe("updated");
-    expect(textBox(moved.line)[0]).toBeGreaterThan(textBox(move.line)[0]!);
+    expect(textBox(itemLine(moved))[0]).toBeGreaterThan(textBox(itemLine(move))[0]!);
     const movedDOM = motion.items.find((item) => item.id === domMove.id)!;
     expect(movedDOM?.change).toBe("updated");
-    expect(textBox(movedDOM.line)[0]).toBeGreaterThan(textBox(domMove.line)[0]!);
+    expect(textBox(itemLine(movedDOM))[0]).toBeGreaterThan(textBox(itemLine(domMove))[0]!);
     expect(await target.locator("#with-image img").evaluate((element) => element.getBoundingClientRect().x)).toBe(imageX);
     expect(movedGenerated?.change).toBe("updated");
-    expect(box(movedGenerated.line)[0]).toBeGreaterThan(box(generated.line)[0]!);
+    expect(box(itemLine(movedGenerated))[0]).toBeGreaterThan(box(itemLine(generated))[0]!);
 
-    const boundary = initial.items.find((item) => item.line.includes("Save") && item.line.includes("changes"))!;
+    const boundary = initial.items.find((item) => itemLine(item).includes("Save") && itemLine(item).includes("changes"))!;
     const rects = await target.locator("#boundary span").evaluateAll((elements) => elements.map((element) => {
       const rect = element.getBoundingClientRect(); return [rect.x, rect.y, rect.width, rect.height];
     }));
@@ -229,16 +230,16 @@ test("text-fragment reordering and actionable painted overflow survive presentat
     const spacing = await inspect(opened.page, { since: initial.observationId });
     const changedBoundary = spacing.items.find((item) => item.id === boundary.id)!;
     expect(changedBoundary?.change).toBe("updated");
-    expect(changedBoundary.line).not.toBe(boundary.line);
-    expect(boundary.line).toContain('"Save "');
-    expect(changedBoundary.line).not.toContain('"Save "');
+    expect(itemLine(changedBoundary)).not.toBe(itemLine(boundary));
+    expect(itemLine(boundary)).toContain('"Save "');
+    expect(itemLine(changedBoundary)).not.toContain('"Save "');
 
     await target.locator("button, #pseudo").evaluateAll((elements) => elements.forEach((element) => element.remove()));
     const explicit = await inspect(opened.page, { fields: ["text", "state", "ref"] });
-    const overflow = explicit.items.find((item) => item.line.includes("[box=400,200,0,0]"));
-    expect(overflow?.line).toContain("- generic");
+    const overflow = explicit.items.find((item) => itemLine(item).includes("[box=400,200,0,0]"));
+    expect(itemLine(overflow)).toContain("- generic");
     expect(overflow?.ref).toEqual(expect.any(String));
-    expect(explicit.items.some((item) => /- image/.test(item.line))).toBe(true);
+    expect(explicit.items.some((item) => /- image/.test(itemLine(item)))).toBe(true);
     const observed = await opened.page.evaluate(async () => {
       const state = (globalThis as any).__presentationStudy;
       return state.runtime.observe(state.tabId, "auto");
@@ -263,21 +264,21 @@ test("repeated grid cells retain every position, state change and explicit actio
     await target.goto(fixtureUrl);
     await attach(opened.page);
     const initial = await inspect(opened.page);
-    const group = initial.items.find((item) => /- gridcell .*\[count=12\]/.test(item.line))!;
+    const group = initial.items.find((item) => /- gridcell .*\[count=12\]/.test(itemLine(item)))!;
     expect(group).toBeDefined();
-    expect(group.line).toContain("step=(16,0,0,0) count=12");
-    expect(group.line).toContain("[name=unknown]");
-    expect(group.line).not.toContain("PRIVATE_");
+    expect(itemLine(group)).toContain("step=(16,0,0,0) count=12");
+    expect(itemLine(group)).toContain("[name=unknown]");
+    expect(itemLine(group)).not.toContain("PRIVATE_");
     const explicit = await inspect(opened.page, { fields: ["text", "state", "ref"] });
-    const individual = explicit.items.filter((item) => /- gridcell/.test(item.line));
+    const individual = explicit.items.filter((item) => /- gridcell/.test(itemLine(item)));
     expect(individual).toHaveLength(12);
     expect(new Set(individual.map((item) => item.ref)).size).toBe(12);
-    expect(individual.every((item) => item.ref && /\[box=/.test(item.line))).toBe(true);
+    expect(individual.every((item) => item.ref && /\[box=/.test(itemLine(item)))).toBe(true);
     await target.locator("td").nth(5).evaluate((element) => element.setAttribute("aria-readonly", "true"));
     const changed = await inspect(opened.page, { since: initial.observationId });
-    expect(changed.items.some((item) => /gridcell/.test(item.line) && /readonly=true/.test(item.line))).toBe(true);
+    expect(changed.items.some((item) => /gridcell/.test(itemLine(item)) && /readonly=true/.test(itemLine(item)))).toBe(true);
     const full = await inspect(opened.page, { full: true });
-    const counts = full.items.filter((item) => /- gridcell/.test(item.line)).reduce((total, item) => total + Number(/\[count=(\d+)\]/.exec(item.line)?.[1] ?? 1), 0);
+    const counts = full.items.filter((item) => /- gridcell/.test(itemLine(item))).reduce((total, item) => total + Number(/\[count=(\d+)\]/.exec(itemLine(item))?.[1] ?? 1), 0);
     expect(counts).toBe(12);
     expect(await opened.page.evaluate(() => (globalThis as any).__presentationStudy.screenshots)).toBe(0);
   } finally {
@@ -296,15 +297,15 @@ test("transformed preserved spaces remain visible in deltas and source paragraph
     await target.goto(fixtureUrl);
     await attach(opened.page);
     const initial = await inspect(opened.page);
-    expect(initial.items.some((item) => item.line.includes('"ONE "'))).toBe(true);
-    expect(initial.items.some((item) => item.line.includes('"A  B"'))).toBe(true);
-    expect(initial.items.some((item) => item.line.includes('"A SS "')), initial.items.map((item) => item.line).join("\n")).toBe(true);
-    expect(initial.items.some((item) => item.line.includes('"AA SS\\nBB"'))).toBe(true);
-    expect(initial.items.some((item) => item.line.includes('"İİ İ\\nBB"'))).toBe(true);
-    expect(initial.items.some((item) => item.line.includes('"Aa B\\nCc"'))).toBe(true);
-    expect(initial.items.some((item) => item.line.includes('"   E"'))).toBe(true);
-    expect(initial.items.some((item) => item.line.includes('"   BEFORE  WORDS"'))).toBe(true);
-    const paragraphs = initial.items.filter((item) => /PARAONE|PARATWO/.test(item.line));
+    expect(initial.items.some((item) => itemLine(item).includes('"ONE "'))).toBe(true);
+    expect(initial.items.some((item) => itemLine(item).includes('"A  B"'))).toBe(true);
+    expect(initial.items.some((item) => itemLine(item).includes('"A SS "')), inspectText(initial.items)).toBe(true);
+    expect(initial.items.some((item) => itemLine(item).includes('"AA SS\\nBB"'))).toBe(true);
+    expect(initial.items.some((item) => itemLine(item).includes('"İİ İ\\nBB"'))).toBe(true);
+    expect(initial.items.some((item) => itemLine(item).includes('"Aa B\\nCc"'))).toBe(true);
+    expect(initial.items.some((item) => itemLine(item).includes('"   E"'))).toBe(true);
+    expect(initial.items.some((item) => itemLine(item).includes('"   BEFORE  WORDS"'))).toBe(true);
+    const paragraphs = initial.items.filter((item) => /PARAONE|PARATWO/.test(itemLine(item)));
     expect(paragraphs).toHaveLength(2);
     const before = await target.locator("#pre span").first().evaluate((element) => {
       const rect = element.getBoundingClientRect(), range = document.createRange();
@@ -320,7 +321,7 @@ test("transformed preserved spaces remain visible in deltas and source paragraph
     expect(after.width).toBeCloseTo(before.width, 1);
     expect(after.b).toBeLessThan(before.b);
     const delta = await inspect(opened.page, { since: initial.observationId });
-    expect(delta.items.some((item) => item.change === "updated" && item.line.includes('"A B "'))).toBe(true);
+    expect(delta.items.some((item) => item.change === "updated" && itemLine(item).includes('"A B "'))).toBe(true);
     const lineRect = await target.locator("#line").evaluate((element) => {
       const range = document.createRange(); range.selectNodeContents(element); const rect = range.getBoundingClientRect();
       return [rect.width, rect.height];
@@ -332,7 +333,7 @@ test("transformed preserved spaces remain visible in deltas and source paragraph
     });
     expect(movedLineRect).toEqual(lineRect);
     const lineDelta = await inspect(opened.page, { since: initial.observationId });
-    expect(lineDelta.items.some((item) => item.change === "updated" && item.line.includes('"AA\\nSS BB"'))).toBe(true);
+    expect(lineDelta.items.some((item) => item.change === "updated" && itemLine(item).includes('"AA\\nSS BB"'))).toBe(true);
     for (const [id, text, rendered] of [["turkish", "ii\ni bb", '"İİ\\nİ BB"'], ["capital", "aa\nb cc", '"Aa\\nB Cc"']] as const) {
       const before = await target.locator(`#${id}`).evaluate((element) => {
         const range = document.createRange(); range.selectNodeContents(element); const rect = range.getBoundingClientRect();
@@ -345,7 +346,7 @@ test("transformed preserved spaces remain visible in deltas and source paragraph
       }, text);
       expect(after).toEqual(before);
       const changed = await inspect(opened.page, { since: initial.observationId });
-      expect(changed.items.some((item) => item.change === "updated" && item.line.includes(rendered))).toBe(true);
+      expect(changed.items.some((item) => item.change === "updated" && itemLine(item).includes(rendered))).toBe(true);
     }
   } finally {
     await detach(opened.page).catch(() => undefined);

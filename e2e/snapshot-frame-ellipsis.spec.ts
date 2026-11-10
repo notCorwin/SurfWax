@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { test, commandResponse, configure, dispose, openExtension, startProvider, textResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const message = request.messages.findLast((entry: any) => entry.role === "tool");
@@ -80,7 +81,7 @@ for (const kind of ["visible", "parent-overlay", "scaled", "frame-clip"] as cons
       }
       responses.push(commandResponse("inspect_page", { budget: 12000 }, `frame-ellipsis-${kind}`), (request: any) => {
         snapshot = lastTool(request);
-        const row = snapshot.items?.find((entry: any) => entry.line.includes('- button "Next TASK-7…"'));
+        const row = snapshot.items?.find((entry: any) => itemLine(entry).includes('- button "Next TASK-7…"'));
         return (kind === "visible" || kind === "scaled") && row?.ref ? commandResponse("click", { target: { ref: row.ref } }, "frame-ellipsis-click") : textResponse("FRAME_ELLIPSIS_DONE");
       }, (request: any) => {
         if (request.messages.some((entry: any) => entry.role === "tool")) click = lastTool(request);
@@ -95,9 +96,9 @@ for (const kind of ["visible", "parent-overlay", "scaled", "frame-clip"] as cons
       const text = JSON.stringify(snapshot.items);
       expect(text).not.toContain("UNPAINTED_FRAME_ACCESSIBLE_NAME");
       expect(text).not.toContain("46F9DB6E6FB");
-      const row = snapshot.items.find((entry: any) => /\bbutton(?:\s|$)/.test(entry.line));
-      if (kind === "visible" || (kind === "scaled" && row?.line.includes('"Next TASK-7…"'))) {
-        expect(row?.line).toContain('- button "Next TASK-7…"');
+      const row = snapshot.items.find((entry: any) => /\bbutton(?:\s|$)/.test(itemLine(entry)));
+      if (kind === "visible" || (kind === "scaled" && itemLine(row).includes('"Next TASK-7…"'))) {
+        expect(itemLine(row)).toContain('- button "Next TASK-7…"');
         expect(row?.ref).toEqual(expect.any(String));
         expect(click).toMatchObject({ ok: true });
         expect(await frame.getAttribute("data-clicked")).toBe("yes");
@@ -105,7 +106,7 @@ for (const kind of ["visible", "parent-overlay", "scaled", "frame-clip"] as cons
         // Parent clipping or occlusion cannot prove the entire prefix; transformed
         // frames may conservatively remain unknown until their proof is supported.
         expect(text).not.toContain("Next TASK-7");
-        if (row) expect(row.line).toContain("[name=unknown]");
+        if (row) expect(itemLine(row)).toContain("[name=unknown]");
       }
     } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
   });

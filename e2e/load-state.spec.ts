@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
+import { inspectText } from "./snapshot-format";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
 
@@ -21,7 +22,7 @@ test("inspection waits for the root document to load after a child frame has loa
     await target.frames().find((frame) => frame.url() === `${crossOrigin}/child-load-state`)!.waitForLoadState("load");
     expect(await target.evaluate(() => document.readyState)).toBe("interactive");
     responses.push(commandResponse("inspect_page", { timeoutMs: 30_000 }, "inspect-loaded"),
-      (request) => { const result = lastTool(request); expect(result.items.map((item: any) => item.line).join("\n")).toContain("Root ready"); return textResponse("ROOT_LOAD_STATE_OK"); },
+      (request) => { const result = lastTool(request); expect(inspectText(result.items)).toContain("Root ready"); return textResponse("ROOT_LOAD_STATE_OK"); },
       textResponse("页面加载检查"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();

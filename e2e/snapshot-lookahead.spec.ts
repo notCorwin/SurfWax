@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
 import { applySemanticDelta, SemanticPages, type SemanticItem } from "./evaluation/semantic-state";
+import { itemLine } from "./snapshot-format";
 
 function resultFor(request: any, id: string): any {
   const message = request.messages.findLast((item: any) => item.role === "tool" && item.tool_call_id === id);
@@ -43,11 +44,11 @@ test("preview exposes a later target without changing frozen pagination or delta
     });
   const finishLimit = () => {
     const result = limited.result();
-    const long = result.items.find((item) => item.line.includes("LONG_LABEL_BEGIN_"));
-    expect(long?.line).toContain(label);
-    expect(long!.line.slice(0, 255)).toBe(firstLabelPrefix);
+    const long = result.items.find((item) => itemLine(item).includes("LONG_LABEL_BEGIN_"));
+    expect(itemLine(long)).toContain(label);
+    expect(itemLine(long).slice(0, 255)).toBe(firstLabelPrefix);
     expect(limitedLabelPrefix).toBe(firstLabelPrefix);
-    expect(result.items.some((item) => item.line.includes('button "Unique action"'))).toBe(true);
+    expect(result.items.some((item) => itemLine(item).includes('button "Unique action"'))).toBe(true);
     return complete();
   };
   const beginLimit = () => call("inspect_page", { full: true, budget: 5000, limit: 1 }, (value) => {
@@ -57,9 +58,9 @@ test("preview exposes a later target without changing frozen pagination or delta
     const cursor = limited.append(value);
     expect(cursor).toEqual(expect.any(String));
     return page(limited, limitedPages, cursor!, () => {
-      const fragment = limitedPages.flatMap((entry) => entry.items).find((item: any) => item.line.includes("LONG_LABEL_BEGIN_"));
-      expect(fragment?.line.length).toBeGreaterThan(256);
-      limitedLabelPrefix = fragment.line.slice(0, 255);
+      const fragment = limitedPages.flatMap((entry) => entry.items).find((item: any) => itemLine(item).includes("LONG_LABEL_BEGIN_"));
+      expect(itemLine(fragment).length).toBeGreaterThan(256);
+      limitedLabelPrefix = itemLine(fragment).slice(0, 255);
       return finishLimit();
     });
   });
@@ -70,16 +71,16 @@ test("preview exposes a later target without changing frozen pagination or delta
     const cursor = small.append(value);
     expect(cursor).toEqual(expect.any(String));
     return page(small, smallPages, cursor!, () => {
-      expect(small.result().items.some((item) => item.line.includes(label))).toBe(true);
-      expect(small.result().items.some((item) => item.line.includes('button "Unique action"'))).toBe(true);
+      expect(small.result().items.some((item) => itemLine(item).includes(label))).toBe(true);
+      expect(small.result().items.some((item) => itemLine(item).includes('button "Unique action"'))).toBe(true);
       return beginLimit();
     });
   });
   const afterDelta = () => {
     const reconstructed = applySemanticDelta(initial.result().items, deltaPages.result().items);
-    expect(reconstructed.some((item) => item.line.includes(label))).toBe(true);
-    expect(reconstructed.some((item) => item.line.includes("STATUS_DONE"))).toBe(true);
-    expect(reconstructed.some((item) => item.line.includes("STATUS_READY"))).toBe(false);
+    expect(reconstructed.some((item) => itemLine(item).includes(label))).toBe(true);
+    expect(reconstructed.some((item) => itemLine(item).includes("STATUS_DONE"))).toBe(true);
+    expect(reconstructed.some((item) => itemLine(item).includes("STATUS_READY"))).toBe(false);
     return beginSmall();
   };
   const beginDelta = () => call("inspect_page", { since: first.observationId, budget: 5000 }, (value) => {
@@ -92,14 +93,14 @@ test("preview exposes a later target without changing frozen pagination or delta
   const afterInitial = () => {
     const baseline = initial.result().items;
     expect(initialPages.at(-1).truncation.baselineComplete).toBe(true);
-    expect(baseline.some((item) => item.line.includes(label))).toBe(true);
-    expect(baseline.some((item) => item.line.includes("STATUS_READY"))).toBe(true);
-    expect(baseline.some((item) => item.line.includes("STATUS_DONE"))).toBe(false);
-    expect(baseline[previewTarget.index]).toMatchObject({ id: previewTarget.id, line: previewTarget.line, ref: expect.any(String) });
-    const fragment = initialPages.flatMap((entry) => entry.items).find((item: any) => item.line.includes("LONG_LABEL_BEGIN_"));
-    expect(fragment?.line.length).toBeGreaterThan(256);
-    firstLabelPrefix = fragment.line.slice(0, 255);
-    expect(baseline.find((item) => item.line.includes(label))?.line.slice(0, 255)).toBe(firstLabelPrefix);
+    expect(baseline.some((item) => itemLine(item).includes(label))).toBe(true);
+    expect(baseline.some((item) => itemLine(item).includes("STATUS_READY"))).toBe(true);
+    expect(baseline.some((item) => itemLine(item).includes("STATUS_DONE"))).toBe(false);
+    expect(baseline[previewTarget.index]).toMatchObject({ id: previewTarget.id, role: previewTarget.role, name: previewTarget.name, ref: expect.any(String) });
+    const fragment = initialPages.flatMap((entry) => entry.items).find((item: any) => itemLine(item).includes("LONG_LABEL_BEGIN_"));
+    expect(itemLine(fragment).length).toBeGreaterThan(256);
+    firstLabelPrefix = itemLine(fragment).slice(0, 255);
+    expect(itemLine(baseline.find((item) => itemLine(item).includes(label))).slice(0, 255)).toBe(firstLabelPrefix);
     return call("click", { target: { by: "role", value: "button", name: "Unique action", exact: true } }, (outcome) => {
       clicked = outcome;
       expect(outcome).toMatchObject({ ok: true });
@@ -127,7 +128,7 @@ test("preview exposes a later target without changing frozen pagination or delta
       initialPages.push(value);
       const cursor = initial.append(value);
       expect(cursor).toEqual(expect.any(String));
-      previewTarget = value.lookahead.items.find((item: SemanticItem) => item.line.includes('button "Unique action"'));
+      previewTarget = value.lookahead.items.find((item: SemanticItem) => itemLine(item).includes('button "Unique action"'));
       expect(previewTarget).toMatchObject({ index: expect.any(Number), id: expect.any(String) });
       expect(value.lookahead.items.every((item: SemanticItem) => item.ref === undefined)).toBe(true);
       expect(value.items.some((item: SemanticItem) => item.id === previewTarget.id)).toBe(false);

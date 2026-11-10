@@ -1,9 +1,10 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, delayedResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
 import { deliveredSemanticState } from "./evaluation/semantic-state";
+import { itemLine } from "./snapshot-format";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
-const button = (items: any[], name: string) => items.find((item) => item.line.includes(`button "${name}"`));
+const button = (items: any[], name: string) => items.find((item) => itemLine(item).includes(`button "${name}"`));
 
 test("snapshot excludes offscreen content until root, nested and frame scrolling makes it visible", async () => {
   const responses: MockResponse[] = [];
@@ -175,15 +176,15 @@ test("snapshot excludes offscreen content until root, nested and frame scrolling
       expect(button(output("scroll-nested").items, name), name).toMatchObject({ ref: expect.any(String), change: "added" });
     }
     for (const [id, runs] of [["offscreen-partial", fixedRuns], ["offscreen-frame-partial", frameRuns]] as const) {
-      const partial = output(id)?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(item.line) && item.ref);
+      const partial = output(id)?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.ref);
       expect(partial?.ref, id).toEqual(expect.any(String));
-      const name = /\bbutton\s+("(?:\\.|[^"\\])*")/.exec(partial.line)?.[1];
+      const name = /\bbutton\s+("(?:\\.|[^"\\])*")/.exec(itemLine(partial))?.[1];
       if (name) expect(runs.some((run) => run.includes(JSON.parse(name))) || runs.join(" ").includes(JSON.parse(name)), id).toBe(true);
-      else expect(partial.line, id).toContain("[name=unknown]");
+      else expect(itemLine(partial), id).toContain("[name=unknown]");
     }
     expect(JSON.stringify(before.items)).not.toContain("Offscreen accessible name");
     const anonymous = output("offscreen-label");
-    expect(anonymous?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toBe(true);
+    expect(anonymous?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toBe(true);
     expect(JSON.stringify(anonymous.items)).not.toContain("Offscreen accessible name");
     expect(changed).toMatchObject({ ok: true });
     for (const name of ["Root negative hidden", "Fixed negative hidden", "LTR scroller hidden", "Frame fixed hidden"]) {
@@ -346,7 +347,7 @@ test("partially occluded button keeps its ref without exposing covered text", as
     const result = (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === "partial-opaque")?.output;
     expect(JSON.stringify(result)).toContain("CONTROL_VISIBLE");
     expect(JSON.stringify(result)).not.toContain("PARTIALLY_OCCLUDED_BUTTON");
-    expect(result.items.filter((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toHaveLength(2);
+    expect(result.items.filter((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toHaveLength(2);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 

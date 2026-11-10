@@ -40,11 +40,10 @@ function nextFrameRefs(output: any): string[] {
     if (!Array.isArray(snapshot?.items)) continue;
     let heading = "";
     for (const item of snapshot.items) {
-      if (typeof item?.line !== "string") continue;
-      const label = /^\s*- heading "(Next|Waiting)"/.exec(item.line);
-      if (label) heading = label[1]!;
-      const frame = /^\s*- Iframe "Work item" \[frameRef=(f[A-Za-z0-9_-]{22})\]/.exec(item.line);
-      if (heading === "Next" && frame) refs.push(frame[1]!);
+      if (item?.role === "heading" && (item.name === "Next" || item.name === "Waiting")) heading = item.name;
+      if (heading === "Next" && item?.role === "Iframe" && typeof item.frameRef === "string" && /^f[A-Za-z0-9_-]{22}$/.test(item.frameRef)) {
+        refs.push(item.frameRef);
+      }
     }
   }
   return refs;
@@ -52,10 +51,10 @@ function nextFrameRefs(output: any): string[] {
 
 test("identifies the Next frame only from its actual snapshot owner row", () => {
   const next = `f${"A".repeat(22)}`, waiting = `f${"B".repeat(22)}`;
-  const snapshot = { items: [{ line: '- heading "Waiting"' }, { line: `- Iframe "Work item" [frameRef=${waiting}]` },
-    { line: '- heading "Next"' }, { line: `- Iframe "Work item" [frameRef=${next}]` }] };
+  const snapshot = { items: [{ role: "heading", name: "Waiting" }, { role: "Iframe", frameRef: waiting },
+    { role: "heading", name: "Next" }, { role: "Iframe", frameRef: next }] };
   expect(nextFrameRefs({ pageSnapshot: snapshot })).toEqual([next]);
-  expect(nextFrameRefs({ items: [{ line: `- paragraph "[frameRef=${next}]"` }] })).toEqual([]);
+  expect(nextFrameRefs({ items: [{ role: "paragraph", name: `[frameRef=${next}]` }] })).toEqual([]);
 });
 
 test("@real-model targeted short frameRef copy and click", async () => {

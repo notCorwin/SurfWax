@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { AutomationRuntime } from "./automation";
 import { TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE } from "./snapshot-text-paint";
+import { formatSnapshotItem, type ProjectedSnapshotNode } from "./snapshot-render";
+
+const itemLine = (item: ProjectedSnapshotNode & { change?: string }) =>
+  item.role === undefined && item.change === "removed" ? "" : formatSnapshotItem(item);
+const inspectText = (value: { items?: readonly ProjectedSnapshotNode[] }) => (value.items ?? []).map(itemLine).join("\n");
 
 function emptyFrameDocument(frameId: number) {
   return { frameId, nodes: { backendNodeId: [], parentIndex: [], nodeType: [], nodeName: [] },
@@ -805,10 +810,10 @@ describe("frame tree discovery", () => {
     });
     const page = await runtime.createPage(3);
     const before: any = await page.inspect();
-    expect(before.items.map((item: any) => item.line).join("\n")).not.toContain('button "Same frame"');
+    expect(inspectText(before)).not.toContain('button "Same frame"');
     hideSame = false;
     const after: any = await page.inspect();
-    const lines = after.items.map((item: any) => item.line).join("\n");
+    const lines = inspectText(after);
     expect(lines).toContain('button "Root frame"');
     expect(lines).toContain('button "Same frame"');
     expect(lines).toContain('button "Other frame"');
@@ -849,7 +854,7 @@ describe("frame tree discovery", () => {
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "cross" } });
     release();
     const result: any = await pending;
-    expect(result.items.map((item: any) => item.line).join("\n")).toContain('button "Child target"');
+    expect(inspectText(result)).toContain('button "Child target"');
     expect(rootCaptures).toBe(2);
     expect(command.mock.calls.filter(([source, method, params]) => source.sessionId === "child" && method === "Accessibility.getFullAXTree" && !params.frameId)).toHaveLength(1);
     await runtime.abortSessions();
@@ -879,7 +884,7 @@ describe("frame tree discovery", () => {
     });
     const page = await runtime.createPage(3);
     const initial: any = await page.inspect({ fields: ["text", "state", "ref"] });
-    const root = initial.items.find((item: any) => item.line.includes('button "Root control"'));
+    const root = initial.items.find((item: any) => itemLine(item).includes('button "Root control"'));
     expect(root.id).toMatch(/^[0-9a-z]+\.ashared-ax$/);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "old-child", targetInfo: { type: "iframe", targetId: "cross" } });
     await expect(page.inspect({ fields: ["text", "state", "ref"], since: initial.observationId })).rejects.toMatchObject({ code: "stale-observation" });
@@ -887,7 +892,7 @@ describe("frame tree discovery", () => {
     // A changed frame tree invalidates the delivered baseline, even when root identities survive.
     expect(attached.mode).toBe("full");
     expect(attached.items.some((item: any) => item.id === root.id)).toBe(true);
-    const old = attached.items.find((item: any) => item.line.includes('button "Cross control"'));
+    const old = attached.items.find((item: any) => itemLine(item).includes('button "Cross control"'));
     expect(old).toMatchObject({ ref: expect.any(String) });
     expect(old.id).toMatch(/^[0-9a-z]+\.ashared-ax$/);
     expect(old.id).not.toBe(root.id);
@@ -897,7 +902,7 @@ describe("frame tree discovery", () => {
     expect(changed.documentId).toBe(initial.documentId);
     expect(changed.mode).toBe("full");
     expect(changed.items.some((item: any) => item.id === old.id)).toBe(false);
-    const replacement = changed.items.find((item: any) => item.line.includes('button "Cross control"'));
+    const replacement = changed.items.find((item: any) => itemLine(item).includes('button "Cross control"'));
     expect(replacement).toMatchObject({ ref: expect.any(String) });
     expect(replacement.id).not.toBe(old.id);
     expect(replacement.ref).not.toBe(old.ref);
@@ -928,14 +933,14 @@ describe("frame tree discovery", () => {
     const owner = capture.items.find((item: any) => ignored ? item.id.endsWith(".d102") : item.id.endsWith(".aowner"));
     expect(owner).toEqual(expect.any(Object));
     // The iframe's accessible title is private metadata, not painted text.
-    if (!ignored) { expect(owner.line).toContain("[name=unknown]"); expect(owner.line).not.toContain("Work item"); }
+    if (!ignored) { expect(owner.nameUnknown).toBe(true); expect(inspectText({ items: [owner] })).not.toContain("Work item"); }
     const root = capture.items.find((item: any) => item.id.endsWith(".a102"));
     expect(root).toEqual(expect.any(Object));
     expect(owner.id).not.toBe(root.id);
-    const ref = /\[frameRef=(f[^\]]+)\]/.exec(owner.line)?.[1];
+    const ref = owner.frameRef;
     expect(ref).toEqual(expect.any(String));
-    expect(owner.line).not.toContain("[frame=");
-    const marker = capture.items.find((item: any) => item.line.includes(`- frame-document [frameRef=${ref}]`));
+    expect(itemLine(owner)).not.toContain("[frame=");
+    const marker = capture.items.find((item: any) => item.role === "frame-document" && item.frameRef === ref);
     expect(marker.id).toMatch(/^[0-9a-z]+\.m$/);
     expect(new Set([root.id, owner.id, marker.id]).size).toBe(3);
     const listed: any = await runtime.listFrames(3);
@@ -974,7 +979,7 @@ describe("frame tree discovery", () => {
     release();
     const capture: any = await pending;
     const marker = capture.items.find((item: any) => item.id.endsWith(".m"));
-    const ref = /\[frameRef=(f[^\]]+)\]/.exec(marker.line)?.[1];
+    const ref = marker.frameRef;
     expect(ref).toEqual(expect.any(String));
     await expect(page.frameRef(ref!).getByRole("button").count()).rejects.toMatchObject({ code: "stale-frame" });
     runtime.setContext({ conversationId: "c", runId: "initial-run" });
@@ -1009,7 +1014,7 @@ describe("frame tree discovery", () => {
     const frames: any = await runtime.listFrames(3);
     const cross = frames.frames.find((frame: any) => frame.url === "https://cross.test/");
     const result: any = await page.inspect({}, page.frameRef(cross.frameRef).getByRole("button"));
-    expect(result.items.map((item: any) => item.line).join("\n")).toContain('button "Regional target"');
+    expect(inspectText(result)).toContain('button "Regional target"');
     expect(unrelatedChanges).toBeGreaterThanOrEqual(3);
     expect(command.mock.calls.filter(([, method]) => method === "Accessibility.getFullAXTree")).toEqual([
       [{ tabId: 3, sessionId: "child" }, "Accessibility.getFullAXTree", {}],
@@ -1124,7 +1129,7 @@ describe("frame tree discovery", () => {
       else runtime.handleEvent({ tabId: 3 }, "Target.detachedFromTarget", { sessionId: "child" });
       release();
       const result: any = await pending;
-      const text = mode === "snapshot" ? result.snapshot : result.items.map((item: any) => item.line).join("\n");
+      const text = mode === "snapshot" ? result.snapshot : inspectText(result);
       // Fresh inspect binds the internally verified final capture. Neither
       // mode can publish the old document under that new observation.
       expect(text).toContain('heading "New document"');

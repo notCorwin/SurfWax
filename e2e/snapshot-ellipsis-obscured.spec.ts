@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, configure, dispose, openExtension, startProvider, textResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const message = request.messages.findLast((entry: any) => entry.role === "tool");
@@ -79,8 +80,8 @@ for (const kind of ["backdrop", "border-image", "marker"] as const) {
       await opened.page.getByTestId("composer-input").press("Enter");
       await expect(opened.page.locator(".markdown-body").last()).toContainText("OBSCURED_DONE", { timeout: 60_000 });
       expect(snapshot).toMatchObject({ mode: "full", items: expect.any(Array) });
-      const buttonRow = snapshot.items.find((item: any) => /\bbutton(?:\s|$)/.test(item.line));
-      expect(buttonRow?.line).toContain("[name=unknown]");
+      const buttonRow = snapshot.items.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)));
+      expect(itemLine(buttonRow)).toContain("[name=unknown]");
       expect(JSON.stringify(snapshot.items)).not.toContain("Next TASK-7");
       expect(JSON.stringify(snapshot.items)).not.toContain("UNPAINTED_ACCESSIBLE_NAME");
     } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }

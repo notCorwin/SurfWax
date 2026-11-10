@@ -1,25 +1,26 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
   return JSON.parse(Array.isArray(content) ? content.find((part: any) => part.type === "text").text : content);
 }
 
-type Item = { line: string; ref?: string };
+type Item = { role?: string; name?: string; depth?: number; actions?: readonly string[]; ref?: string };
 const hasClickAction = (line: string) => /\[actions=[^\]]*\bclick\b/.test(line);
 
 /** Find an exposed focus-only node either directly by name or through its text child. */
 function focusOnlyControl(items: Item[]): Item | undefined {
-  const textIndex = items.findIndex((item) => item.line.includes("Focus only text"));
+  const textIndex = items.findIndex((item) => itemLine(item).includes("Focus only text"));
   if (textIndex < 0) return undefined;
   const text = items[textIndex]!;
-  if (/- generic(?:\s|$)/.test(text.line)) return text;
-  const depth = text.line.length - text.line.trimStart().length;
+  if (/- generic(?:\s|$)/.test(itemLine(text))) return text;
+  const depth = itemLine(text).length - itemLine(text).trimStart().length;
   for (let index = textIndex - 1; index >= 0; index--) {
-    const item = items[index]!, parentDepth = item.line.length - item.line.trimStart().length;
+    const item = items[index]!, parentDepth = itemLine(item).length - itemLine(item).trimStart().length;
     if (parentDepth >= depth) continue;
-    return /- generic(?:\s|$)/.test(item.line) ? item : undefined;
+    return /- generic(?:\s|$)/.test(itemLine(item)) ? item : undefined;
   }
   return undefined;
 }
@@ -52,8 +53,8 @@ test("supplements visible custom controls omitted from AX without inventing clic
       (request) => {
         snapshot = lastTool(request);
         const items: Item[] = Array.isArray(snapshot.items) ? snapshot.items : [];
-        const role = items.find((item) => item.line.includes('- button "Custom role button"'));
-        const generic = items.find((item) => item.line.includes('- generic "Generic clickable"'));
+        const role = items.find((item) => itemLine(item).includes('- button "Custom role button"'));
+        const generic = items.find((item) => itemLine(item).includes('- generic "Generic clickable"'));
         if (!role?.ref || !generic?.ref) return textResponse("CUSTOM_CONTROLS_DONE");
         responses.unshift(
           (next) => { roleClick = lastTool(next); return commandResponse("click", { target: { ref: generic.ref } }, "custom-generic-click"); },
@@ -71,14 +72,14 @@ test("supplements visible custom controls omitted from AX without inventing clic
 
     expect(snapshot).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
     const items: Item[] = snapshot.items;
-    const role = items.find((item) => item.line.includes('- button "Custom role button"'));
-    const generic = items.find((item) => item.line.includes('- generic "Generic clickable"'));
+    const role = items.find((item) => itemLine(item).includes('- button "Custom role button"'));
+    const generic = items.find((item) => itemLine(item).includes('- generic "Generic clickable"'));
     expect(role?.ref).toEqual(expect.any(String));
     expect(generic?.ref).toEqual(expect.any(String));
-    expect(hasClickAction(role!.line)).toBe(true);
-    expect(hasClickAction(generic!.line)).toBe(true);
+    expect(hasClickAction(itemLine(role!))).toBe(true);
+    expect(hasClickAction(itemLine(generic!))).toBe(true);
     const focus = focusOnlyControl(items);
-    if (focus) expect(hasClickAction(focus.line)).toBe(false);
+    if (focus) expect(hasClickAction(itemLine(focus))).toBe(false);
     expect(JSON.stringify(items)).not.toContain("Hidden custom button");
     expect(JSON.stringify(items)).not.toContain("Hidden generic clickable");
     expect(roleClick).toMatchObject({ ok: true });

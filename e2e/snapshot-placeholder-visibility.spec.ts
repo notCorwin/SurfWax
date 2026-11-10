@@ -1,12 +1,13 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
   return JSON.parse(Array.isArray(content) ? content.find((part: any) => part.type === "text").text : content);
 }
 
-type Item = { line: string; ref?: string };
+type Item = { role?: string; name?: string; placeholder?: string | "unknown"; ref?: string };
 
 test("reports only proven visible placeholders and keeps normal controls actionable", async () => {
   test.setTimeout(90_000);
@@ -38,7 +39,7 @@ test("reports only proven visible placeholders and keeps normal controls actiona
       (request) => {
         inspectElapsedMs = performance.now() - inspectStartedAt;
         snapshot = lastTool(request);
-        const normal: Item | undefined = snapshot.items?.find((item: Item) => item.line.includes("NORMAL_VISIBLE_HINT") && item.line.includes("textbox"));
+        const normal: Item | undefined = snapshot.items?.find((item: Item) => itemLine(item).includes("NORMAL_VISIBLE_HINT") && itemLine(item).includes("textbox"));
         if (!normal?.ref) return textResponse("PLACEHOLDER_VISIBILITY_DONE");
         responses.unshift((next) => { filled = lastTool(next); return textResponse("PLACEHOLDER_VISIBILITY_DONE"); });
         return commandResponse("fill", { target: { ref: normal.ref }, value: "FILLED_FROM_REF" }, "placeholder-fill");
@@ -59,11 +60,11 @@ test("reports only proven visible placeholders and keeps normal controls actiona
     expect(output).toContain("FILLED_VISIBLE_VALUE");
     expect(output).toContain("ARIA_DOM_VISIBLE_HINT");
     for (const hidden of ["TRANSPARENT_SECRET_TEXT", "CLIPPED_SECRET_SUFFIX", "FILLED_HIDDEN_HINT"]) expect(output).not.toContain(hidden);
-    const labeled = items.find((item) => item.line.includes('textbox "Delivery address"'));
-    expect(labeled?.line).toContain("VISIBLE_ADDRESS_HINT");
-    const clipped = items.find((item) => item.line.includes('textbox "Clipped control"'));
-    expect(clipped?.line).toContain("[placeholder=unknown]");
-    expect(items.find((item) => item.line.includes("NORMAL_VISIBLE_HINT") && item.line.includes("textbox"))?.ref).toEqual(expect.any(String));
+    const labeled = items.find((item) => itemLine(item).includes('textbox "Delivery address"'));
+    expect(itemLine(labeled)).toContain("VISIBLE_ADDRESS_HINT");
+    const clipped = items.find((item) => itemLine(item).includes('textbox "Clipped control"'));
+    expect(itemLine(clipped)).toContain("[placeholder=unknown]");
+    expect(items.find((item) => itemLine(item).includes("NORMAL_VISIBLE_HINT") && itemLine(item).includes("textbox"))?.ref).toEqual(expect.any(String));
     expect(filled).toMatchObject({ ok: true });
     expect(await target.locator("#normal").inputValue()).toBe("FILLED_FROM_REF");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
@@ -122,7 +123,7 @@ test("updates the snapshot when a placeholder becomes transparent and visible ag
       commandResponse("inspect_page", { budget: 12000 }, "placeholder-before-toggle"),
       (request) => {
         before = lastTool(request);
-        const button: Item | undefined = before.items?.find((item: Item) => item.line.includes('- button "Toggle hint"'));
+        const button: Item | undefined = before.items?.find((item: Item) => itemLine(item).includes('- button "Toggle hint"'));
         if (!button?.ref) return textResponse("PLACEHOLDER_TOGGLE_DONE");
         responses.unshift(
           (next) => { hideClick = lastTool(next); return commandResponse("inspect_page", { budget: 12000 }, "placeholder-hidden"); },
@@ -209,6 +210,6 @@ test("proves child frame placeholders only through fully contained frame owners"
     expect(JSON.stringify(items)).not.toContain("SLOTTED_INPUT_CLIPPED_HINT");
     expect(JSON.stringify(items)).not.toContain("CLOSED_FRAME_CLIPPED_HINT");
     expect(JSON.stringify(items)).not.toContain("CLOSED_INPUT_CLIPPED_HINT");
-    expect(items.find((item) => item.line.includes("Clipped frame input") && item.line.includes("[placeholder=unknown]"))).toBeTruthy();
+    expect(items.find((item) => itemLine(item).includes("Clipped frame input") && itemLine(item).includes("[placeholder=unknown]"))).toBeTruthy();
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

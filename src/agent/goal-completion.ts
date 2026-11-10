@@ -106,10 +106,13 @@ function actionReceipt(input: unknown, output: unknown): ActionReceipt {
   if (Array.isArray(items)) for (const key of ["target", "source", "destination"]) {
     const ref = object(parameters[key]).ref;
     if (typeof ref !== "string") continue;
-    const item = items.find((item) => object(item).ref === ref);
-    if (typeof object(item).line === "string") {
+    const item = object(items.find((entry) => object(entry).ref === ref));
+    const label = typeof item.name === "string" ? item.name
+      : typeof item.role === "string" ? item.role
+      : typeof item.line === "string" ? item.line : undefined;
+    if (typeof label === "string") {
       receipt.labels ??= {};
-      receipt.labels[key] = short(object(item).line) as string;
+      receipt.labels[key] = short(label) as string;
     }
   }
   return receipt;

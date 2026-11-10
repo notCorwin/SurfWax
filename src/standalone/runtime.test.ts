@@ -6,6 +6,11 @@ import { chromium } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { connectToolRuntime } from "./runtime";
 import { executeNodeProgram } from "./program-host";
+import { formatSnapshotItem, type ProjectedSnapshotNode } from "../chrome/snapshot-render";
+
+const itemLine = (item: ProjectedSnapshotNode & { change?: string }) =>
+  item.role === undefined && item.change === "removed" ? "" : formatSnapshotItem(item);
+const inspectText = (value: { items?: readonly any[] }) => (value.items ?? []).map((item: any) => itemLine(item)).join("\n");
 
 describe("standalone tools", () => {
   it("terminates non-yielding programs and preserves the shared value codec", async () => {
@@ -108,7 +113,7 @@ describe("standalone tools", () => {
         expect(recovered, JSON.stringify(recovered)).not.toHaveProperty("ok", false);
         expect(recovered.partial).toBe(true);
         expect(recovered.limitations).toContain("Read-only root viewport");
-        const text = recovered.items.map((item: any) => item.line).join("\n");
+        const text = inspectText(recovered);
         expect(text).toContain("Fallback visible sentinel");
         expect(text).toContain("open shadow visible");
         expect(text).toContain("closed shadow visible");
@@ -118,7 +123,7 @@ describe("standalone tools", () => {
         expect(changed).toMatchObject({ ok: false, error: { code: "stale-observation" } });
         const fresh = await runtime.call("inspect_page", { full: true }) as any;
         expect(fresh, JSON.stringify(fresh)).not.toHaveProperty("ok", false);
-        const freshText = fresh.items.map((item: any) => item.line).join("\n");
+        const freshText = inspectText(fresh);
         expect(freshText).toContain("New shadow visible");
         expect(freshText).not.toContain("RACE_LIGHT_SECRET");
         mutateShadow = "insert"; censusStarted = false;
@@ -126,7 +131,7 @@ describe("standalone tools", () => {
         expect(inserted).toMatchObject({ ok: false, error: { code: "stale-observation" } });
         const afterInsert = await runtime.call("inspect_page", { full: true }) as any;
         expect(afterInsert, JSON.stringify(afterInsert)).not.toHaveProperty("ok", false);
-        const insertedText = afterInsert.items.map((item: any) => item.line).join("\n");
+        const insertedText = inspectText(afterInsert);
         expect(insertedText).toContain("Inserted shadow visible");
         expect(insertedText).not.toContain("INSERTED_LIGHT_SECRET");
       } finally { command.mockRestore(); }

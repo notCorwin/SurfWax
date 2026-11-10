@@ -2,8 +2,9 @@ import { expect, type CDPSession } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, closeServer, type MockResponse } from "./fixtures";
 import { frameReplacementFixture } from "./evaluation/frame-replacement-fixture";
 import { sequenceFixture } from "./evaluation/sequence-fixture";
+import { itemLine } from "./snapshot-format";
 
-type Item = { id: string; line: string; ref?: string };
+type Item = { id: string; role?: string; name?: string; depth?: number; frameRef?: string; ref?: string };
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -36,19 +37,19 @@ function snapshotFrames(snapshot: any): Record<string, { label: string; buttonRe
   const owners = new Map<string, string>();
   let label = "";
   for (const item of items) {
-    const heading = /- heading "(Next|Waiting)"/.exec(item.line);
+    const heading = /- heading "(Next|Waiting)"/.exec(itemLine(item));
     if (heading) label = heading[1]!;
-    if (!/- Iframe\s/.test(item.line)) continue;
-    const id = /\[frameRef=([^\]]+)\]/.exec(item.line)?.[1];
+    if (!/- Iframe\s/.test(itemLine(item))) continue;
+    const id = /\[frameRef=([^\]]+)\]/.exec(itemLine(item))?.[1];
     if (id) owners.set(id, label);
   }
   const result: Record<string, { label: string; buttonRef?: string }> = {};
   for (let index = 0; index < items.length; index++) {
-    const id = /^\s*- frame-document \[frameRef=([^\]]+)\]/.exec(items[index]!.line)?.[1];
+    const id = items[index]!.role === "frame-document" ? items[index]!.frameRef : undefined;
     if (!id) continue;
-    const next = items.slice(index + 1).findIndex((item) => /^\s*- frame-document \[frameRef=/.test(item.line));
+    const next = items.slice(index + 1).findIndex((item) => /^\s*- frame-document \[frameRef=/.test(itemLine(item)));
     const subtree = items.slice(index + 1, next < 0 ? undefined : index + 1 + next);
-    result[id] = { label: owners.get(id) ?? "", buttonRef: subtree.find((item) => /- button "Confirm"/.test(item.line))?.ref };
+    result[id] = { label: owners.get(id) ?? "", buttonRef: subtree.find((item) => /- button "Confirm"/.test(itemLine(item)))?.ref };
   }
   return result;
 }
@@ -95,10 +96,10 @@ test("ties same-name iframe owners to their child snapshots across frame replace
     expect(new Set(ids(first)).size).toBe(first.items.length);
     expect(ids(repeated)).toEqual(ids(first));
     expect(ids(first).every((id) => /^[0-9a-z]+\.(?:[ad].+|m)$/.test(id))).toBe(true);
-    const root = first.items.find((item: Item) => /- heading "Work queue"/.test(item.line));
+    const root = first.items.find((item: Item) => /- heading "Work queue"/.test(itemLine(item)));
     expect(root?.id).toEqual(expect.any(String));
     const rootScope = root.id.split(".")[0];
-    const childScopes = first.items.filter((item: Item) => /^\s*- frame-document \[frameRef=/.test(item.line)).map((item: Item) => item.id.split(".")[0]);
+    const childScopes = first.items.filter((item: Item) => /^\s*- frame-document \[frameRef=/.test(itemLine(item))).map((item: Item) => item.id.split(".")[0]);
     expect(childScopes).toHaveLength(2);
     expect(new Set([rootScope, ...childScopes]).size).toBe(3);
     const firstFrames = snapshotFrames(first);
@@ -116,8 +117,8 @@ test("ties same-name iframe owners to their child snapshots across frame replace
 
     expect(second).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
     expect(new Set(ids(second)).size).toBe(second.items.length);
-    expect(second.items.find((item: Item) => /- heading "Work queue"/.test(item.line))?.id).toBe(root.id);
-    const replacedScopes = second.items.filter((item: Item) => /^\s*- frame-document \[frameRef=/.test(item.line)).map((item: Item) => item.id.split(".")[0]);
+    expect(second.items.find((item: Item) => /- heading "Work queue"/.test(itemLine(item)))?.id).toBe(root.id);
+    const replacedScopes = second.items.filter((item: Item) => /^\s*- frame-document \[frameRef=/.test(itemLine(item))).map((item: Item) => item.id.split(".")[0]);
     expect(replacedScopes).toHaveLength(2);
     expect(replacedScopes.every((scope: string) => scope !== rootScope && !childScopes.includes(scope))).toBe(true);
     const after = await frameOwners(cdp);
@@ -150,8 +151,8 @@ test("nests cross-origin frame documents at their owners ahead of same-name oute
       commandResponse("inspect_page", { full: true, budget: 12000 }, "nested-full"),
       (request) => {
         full = lastTool(request);
-        const owner = full.items?.find((item: Item) => /- Iframe\s/.test(item.line));
-        workspaceRef = /\[frameRef=([^\]]+)\]/.exec(owner?.line ?? "")?.[1] ?? "";
+        const owner = full.items?.find((item: Item) => /- Iframe\s/.test(itemLine(item)));
+        workspaceRef = owner?.frameRef ?? "";
         return workspaceRef ? commandResponse("inspect_page", { budget: 12000,
           region: { by: "role", value: "main", frame: { ref: workspaceRef } } }, "nested-region") : textResponse("NESTED_DONE");
       },
@@ -168,27 +169,27 @@ test("nests cross-origin frame documents at their owners ahead of same-name oute
     const rows: Item[] = full.items;
     // Iframe titles are accessibility metadata, not painted labels. Associate
     // the ordered frame refs with the visible headings inside their documents.
-    const workspace = rows.findIndex((item) => /- Iframe\s/.test(item.line));
-    const editor = rows.findIndex((item, index) => index > workspace && /- Iframe\s/.test(item.line));
-    expect(rows.slice(workspace, editor).some(item => item.line.includes('heading "Dispatch workspace"'))).toBe(true);
-    expect(rows.slice(editor).some(item => item.line.includes('heading "Sequence editor"'))).toBe(true);
-    const editorRef = /\[frameRef=([^\]]+)\]/.exec(rows[editor]?.line ?? "")?.[1];
-    const depth = (line: string) => /^ */.exec(line)![0].length;
+    const workspace = rows.findIndex((item) => /- Iframe\s/.test(itemLine(item)));
+    const editor = rows.findIndex((item, index) => index > workspace && /- Iframe\s/.test(itemLine(item)));
+    expect(rows.slice(workspace, editor).some(item => itemLine(item).includes('heading "Dispatch workspace"'))).toBe(true);
+    expect(rows.slice(editor).some(item => itemLine(item).includes('heading "Sequence editor"'))).toBe(true);
+    const editorRef = rows[editor]?.frameRef;
+    const depth = (item: Item) => item.depth ?? 0;
     expect(workspace).toBeGreaterThanOrEqual(0);
     expect(editor).toBeGreaterThan(workspace);
     expect(editorRef).toEqual(expect.any(String));
-    expect(rows[workspace + 1]?.line).toContain(`- frame-document [frameRef=${workspaceRef}]`);
-    expect(depth(rows[workspace + 1]!.line)).toBe(depth(rows[workspace]!.line) + 2);
-    expect(rows[editor + 1]?.line).toContain(`- frame-document [frameRef=${editorRef}]`);
-    expect(depth(rows[editor + 1]!.line)).toBe(depth(rows[editor]!.line) + 2);
-    const sends = rows.filter((item) => item.line.includes('- button "Send dispatch"'));
+    expect(rows[workspace + 1]).toMatchObject({ role: "frame-document", frameRef: workspaceRef });
+    expect(depth(rows[workspace + 1]!)).toBe(depth(rows[workspace]!) + 1);
+    expect(rows[editor + 1]).toMatchObject({ role: "frame-document", frameRef: editorRef });
+    expect(depth(rows[editor + 1]!)).toBe(depth(rows[editor]!) + 1);
+    const sends = rows.filter((item) => itemLine(item).includes('- button "Send dispatch"'));
     expect(sends).toHaveLength(2);
     expect(rows.indexOf(sends[0]!)).toBeGreaterThan(editor);
-    expect(depth(sends[0]!.line)).toBeGreaterThan(depth(rows[editor]!.line));
-    expect(depth(sends[1]!.line)).toBe(depth(rows[workspace]!.line));
+    expect(depth(sends[0]!)).toBeGreaterThan(depth(rows[editor]!));
+    expect(depth(sends[1]!)).toBe(depth(rows[workspace]!));
     expect(sends[0]!.ref).not.toBe(sends[1]!.ref);
     expect(scoped).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
-    expect((scoped.items as Item[]).filter((item) => item.line.includes('- button "Send dispatch"')).map((item) => item.ref)).toEqual([sends[0]!.ref]);
+    expect((scoped.items as Item[]).filter((item) => itemLine(item).includes('- button "Send dispatch"')).map((item) => item.ref)).toEqual([sends[0]!.ref]);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
     await closeServer(fixture.server);

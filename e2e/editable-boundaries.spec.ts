@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 const lastTool = (request: any) => {
   const content = request.messages.findLast((message: any) => message.role === "tool").content;
@@ -205,7 +206,7 @@ test("fills once through open and closed shadow roots and a nested frame", async
     responses.push(
       commandResponse("inspect_page", {}, "inspect-editors"),
       (request) => {
-        const item = lastTool(request).items.find((entry: any) => entry.ref && entry.line.includes("Closed input"));
+        const item = lastTool(request).items.find((entry: any) => entry.ref && itemLine(entry).includes("Closed input"));
         expect(item?.ref).toEqual(expect.any(String));
         closedRef = item.ref;
         return commandResponse("fill", { target: { by: "css", value: "#open-input" }, value: "" }, "clear-open");

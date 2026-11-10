@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -33,7 +34,7 @@ test("keeps each native input value once without collapsing independent frame an
     }
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "native-initial"), (request) => {
       initial = lastTool(request);
-      const ref = initial.items?.find((item: any) => item.line.includes("textbox") && item.line.includes(value))?.ref;
+      const ref = initial.items?.find((item: any) => itemLine(item).includes("textbox") && itemLine(item).includes(value))?.ref;
       if (!ref) return textResponse("NATIVE_INPUT_DONE");
       responses.unshift(
         (next) => { region = lastTool(next); return commandResponse("fill", { target: { ref }, value: "CHANGED_NATIVE_VALUE" }, "native-fill"); },

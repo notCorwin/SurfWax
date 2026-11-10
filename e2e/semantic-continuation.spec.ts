@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
 
@@ -54,10 +55,10 @@ test("continues a frozen long semantic line without interpreting page text as a 
     const outputs = events.filter((event) => ["tool.finished", "tool.result.data"].includes(event.type))
       .map((event) => event.output).filter((output) => output?.observationId === observationId && Array.isArray(output.items));
     const fragments = outputs.flatMap((output) => output.items);
-    const start = fragments.find((fragment) => fragment.line.includes("SURF_LONG_START"));
+    const start = fragments.find((fragment) => itemLine(fragment).includes("SURF_LONG_START"));
     expect(start?.ref).toMatch(/^t\d+s[a-f0-9]+d\d+e\d+$/);
     const pieces = fragments.filter((fragment) => fragment.id === start.id).sort((a, b) => a.fragment.start - b.fragment.start);
-    const reconstructed = pieces.map((fragment) => fragment.line).join("");
+    const reconstructed = pieces.map((fragment) => fragment.name ?? "").join("");
     expect(reconstructed).toContain(original);
     expect(reconstructed).not.toContain("CHANGED_AFTER_CAPTURE");
     expect(start.ref).not.toBe("e1");

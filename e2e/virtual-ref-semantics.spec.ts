@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
 
@@ -28,14 +29,14 @@ test("does not retarget an issued ref after the same DOM node changes visible id
     responses.push(
       commandResponse("inspect_page", {}, "inspect-a"),
       (request) => {
-        axRef = lastTool(request).items.find((item: any) => item.line.includes('button "Order A"'))?.ref;
+        axRef = lastTool(request).items.find((item: any) => itemLine(item).includes('button "Order A"'))?.ref;
         expect(axRef).toEqual(expect.any(String));
         return commandResponse("click", { target: { by: "css", value: "#rewrite-ax" } }, "rewrite-ax");
       },
       () => commandResponse("click", { target: { ref: axRef } }, "old-ax"),
       (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } }); return commandResponse("inspect_page", {}, "inspect-b"); },
       (request) => {
-        const next = lastTool(request).items.find((item: any) => item.line.includes('button "Order B"'))?.ref;
+        const next = lastTool(request).items.find((item: any) => itemLine(item).includes('button "Order B"'))?.ref;
         expect(next).toEqual(expect.any(String)); expect(next).not.toBe(axRef); axRef = next;
         return commandResponse("click", { target: { ref: axRef } }, "new-ax");
       },

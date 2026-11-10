@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, openExtension, dispose } from "./fixtures";
+import { inspectText } from "./snapshot-format";
 
 test.use({ screenshot: "off", trace: "off" });
 const origin = "http://snapshot-line-clamp.test";
@@ -86,7 +87,7 @@ test("shares a bounded no-truncation proof while rejecting hidden and ambiguous 
       });
       expect(value.flow.length, item.id).toBeGreaterThan(0);
       expect(value.flow.every((proof) => proof.coverage === "complete"), item.id).toBe(item.flow);
-      const fullLines = (value.full as any).items.map((row: any) => row.line).join("\n");
+      const fullLines = inspectText((value.full as any).items);
       const semanticText = value.semantic.rows.flatMap((row: any) => [row.text || "", ...(row.textFragments || []).map((part: any) => part.text)]).join("\n");
       if (item.readable) {
         expect(fullLines, item.id).toContain(fullText);
@@ -153,7 +154,7 @@ test("leaves unclamped author composition readable while withholding ambiguous c
     expect(content).not.toContain("SHADOW_UNCONFIRMED"); expect(content).not.toContain("SLOTTED_UNCONFIRMED");
     expect(sample.gaps.some((gap: any) => gap.reason === "effect-coverage")).toBe(true);
     await test.info().attach("composed-clamp-production-path", { body: JSON.stringify({ branches: sample.branches, full: sample.full }), contentType: "application/json" });
-    expect(sample.full.items.map((row: any) => row.line).join("\n")).not.toContain("HIDDEN_TAIL");
+    expect(inspectText(sample.full.items)).not.toContain("HIDDEN_TAIL");
   } finally { await dispose(opened.context, opened.userDataDirectory); }
 });
 
@@ -205,7 +206,7 @@ test("keeps a clamped market heading with an inkless stretched-link pseudo and r
       const textOf = (row: any) => row.text || row.textFragments?.map((part: any) => part.text).join("") || "";
       await test.info().attach(`market-heading-${variant.id}`, { body: JSON.stringify(observed), contentType: "application/json" });
       expect(observed.flow.coverage === "complete", variant.id).toBe(variant.readable);
-      const fullLines = observed.full.items.map((row: any) => row.line).join("\n");
+      const fullLines = inspectText(observed.full.items);
       if (variant.readable) {
         expect(fullLines, variant.id).toContain(title);
         const heading = observed.semantic.rows.find((row: any) => row.role === "heading" && row.state?.level === 3);

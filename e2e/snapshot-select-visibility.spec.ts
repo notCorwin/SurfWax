@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, configure, dispose, openExtension, startProvider, textResponse, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const message = request.messages.findLast((entry: any) => entry.role === "tool");
@@ -10,7 +11,7 @@ function lastTool(request: any): any {
 }
 
 const roleRows = (snapshot: any, role: string) => snapshot.items.filter((item: any) =>
-  typeof item.line === "string" && new RegExp(`^\\s*- ${role}(?:\\s|$)`).test(item.line));
+  typeof itemLine(item) === "string" && new RegExp(`^\\s*- ${role}(?:\\s|$)`).test(itemLine(item)));
 
 test("closed single select exposes the painted label and actionable ref, not its value or unopened options", async () => {
   test.setTimeout(90_000);
@@ -88,7 +89,7 @@ test("closed select does not expose zero-size or clipped labels in AX or DOM sup
     await expect(opened.page.locator(".markdown-body").last()).toContainText("SELECT_HIDDEN_DONE", { timeout: 60_000 });
     const rows = roleRows(snapshot, "combobox");
     expect(rows).toHaveLength(3);
-    expect(rows.every((item: any) => typeof item.ref === "string" && item.line.includes("[value=unknown]"))).toBe(true);
+    expect(rows.every((item: any) => typeof item.ref === "string" && itemLine(item).includes("[value=unknown]"))).toBe(true);
     const text = JSON.stringify(snapshot.items);
     for (const hidden of ["ZERO_HIDDEN_ABC", "PREFIX_HIDDEN_ABC", "ARIA_HIDDEN_ABC", "MenuListPopup"]) expect(text).not.toContain(hidden);
     expect(roleRows(snapshot, "option")).toHaveLength(0);

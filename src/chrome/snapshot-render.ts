@@ -4,7 +4,7 @@ export type SnapshotField = "text" | "state" | "ref" | "actions";
 export type SnapshotStateName = "checked" | "disabled" | "expanded" | "pressed" | "selected" | "required" | "readonly" | "editable" | "masked" | "current" | "level";
 export type SnapshotBounds = readonly [x: number, y: number, width: number, height: number];
 
-/** Data received from one AX node, before it is rendered into page text. */
+/** Data received from one AX node, before it is projected into a wire item. */
 export type SnapshotNode = Readonly<{
   id: string;
   depth: number;
@@ -38,10 +38,42 @@ export type SnapshotNode = Readonly<{
   state?: Readonly<Partial<Record<SnapshotStateName, unknown>>>;
 }>;
 
+export type SnapshotBoxRun =
+  | Readonly<{ box: SnapshotBounds }>
+  | Readonly<{ first: SnapshotBounds; step: SnapshotBounds; count: number }>;
+
+export type SnapshotTextPart = Readonly<{ text: string; box?: SnapshotBounds }>;
+
+/** Structured wire/projection row. Removed deltas omit role/depth. */
+export type ProjectedSnapshotNode = Readonly<{
+  id: string;
+  depth?: number;
+  role?: string;
+  name?: string;
+  nameUnknown?: true;
+  box?: SnapshotBounds;
+  textBox?: SnapshotBounds;
+  textParts?: readonly SnapshotTextPart[];
+  coordinates?: "frame-viewport";
+  value?: string;
+  valueUnknown?: true;
+  placeholder?: string | "unknown";
+  selected?: readonly string[];
+  frameRef?: string;
+  ownerUnrepresented?: true;
+  ref?: string;
+  actions?: readonly string[];
+  state?: Readonly<Partial<Record<SnapshotStateName, unknown>>>;
+  count?: number;
+  boxes?: readonly SnapshotBoxRun[];
+  /** Single-child ancestry packed into one transport row. */
+  path?: readonly Omit<ProjectedSnapshotNode, "id" | "path">[];
+}>;
+
+/** @deprecated Prefer ProjectedSnapshotNode; kept for call sites that still expect a line. */
 export type RenderedSnapshotNode = Readonly<{
   id: string;
   line: string;
-  /** Only present when the ref field was requested and the node has a ref. */
   ref?: string;
 }>;
 
@@ -49,49 +81,132 @@ const allFields: readonly SnapshotField[] = ["text", "state", "ref", "actions"];
 const stateNames: readonly SnapshotStateName[] = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly", "editable", "masked", "current", "level"];
 const toolActions: Readonly<Record<string, string>> = { doubleClick: "double_click", insertText: "type_text", select: "select_option", clear: "fill", press: "press_key", check: "check_element", uncheck: "uncheck_element" };
 
+const roundBox = (bounds: SnapshotBounds): SnapshotBounds =>
+  bounds.map((value) => Math.round(value * 10) / 10) as unknown as SnapshotBounds;
+
+const boxText = (bounds: SnapshotBounds) => roundBox(bounds).join(",");
+
+function displayName(node: SnapshotNode): string | undefined {
+  if (node.name === undefined) return undefined;
+  return node.preserveTextWhitespace || node.textWhitespaceProven ? node.name : normalizeSnapshotText(node.name);
+}
+
 /**
- * Render from structured AX fields, so page-supplied names and values never
- * become instructions to replace, add or remove an action reference. `raw`
- * keeps the internal page.snapshot action spelling; `program` uses the
- * model-visible tool names used in inspect_page.
+ * Project structured AX fields for wire delivery. Page-supplied names and
+ * values never become instructions to replace, add or remove an action ref.
+ */
+export function projectSnapshotNode(
+  node: SnapshotNode,
+  options: { fields?: readonly SnapshotField[]; actionNames?: "raw" | "program"; inlineRef?: boolean } = {},
+): ProjectedSnapshotNode {
+  if (!Number.isSafeInteger(node.depth) || node.depth < 0) throw new RangeError("Snapshot depth must be a nonnegative integer");
+  const fields = new Set(options.fields ?? allFields);
+  const text = fields.has("text");
+  const item: ProjectedSnapshotNode = {
+    id: node.id,
+    depth: node.depth,
+    role: node.role,
+    ...(text && node.nameUnknown ? { nameUnknown: true as const } : {}),
+    ...(text && node.role === "RootWebArea" && node.layoutScope ? { coordinates: "frame-viewport" as const } : {}),
+    ...(text && node.bounds ? { box: roundBox(node.bounds) } : {}),
+    ...(node.childFrameRef || node.documentFrameRef ? { frameRef: node.childFrameRef ?? node.documentFrameRef } : {}),
+    ...(node.ownerUnrepresented ? { ownerUnrepresented: true as const } : {}),
+    ...(fields.has("ref") && node.ref ? { ref: node.ref } : {}),
+  };
+
+  if (text) {
+    const fragments = node.textFragments;
+    const sameBounds = fragments?.length === 1 && fragments[0]!.bounds && node.bounds
+      && fragments[0]!.bounds!.every((value, index) => value === node.bounds![index]);
+    if (fragments?.length === 1) {
+      Object.assign(item, {
+        name: fragments[0]!.text,
+        ...(!sameBounds && fragments[0]!.bounds ? { textBox: roundBox(fragments[0]!.bounds!) } : {}),
+      });
+    } else if (fragments?.length) {
+      Object.assign(item, {
+        textParts: fragments.map((fragment) => ({
+          text: fragment.text,
+          ...(fragment.bounds ? { box: roundBox(fragment.bounds) } : {}),
+        })),
+      });
+    } else {
+      const name = displayName(node);
+      if (name) Object.assign(item, { name });
+    }
+    if (node.value !== undefined) Object.assign(item, { value: node.value });
+    if (node.valueUnknown) Object.assign(item, { valueUnknown: true as const });
+    if (node.placeholder?.status === "unknown") Object.assign(item, { placeholder: "unknown" as const });
+    else if (node.placeholder?.status === "visible") Object.assign(item, { placeholder: node.placeholder.text });
+    if (node.selectedLabels?.length) Object.assign(item, { selected: [...node.selectedLabels] });
+  }
+
+  if (fields.has("actions") && node.actions?.length) {
+    const actions = options.actionNames === "program"
+      ? [...new Set(node.actions.flatMap((action) => action === "check" ? ["check_element", "uncheck_element"] : [toolActions[action] ?? action]))]
+      : [...node.actions];
+    Object.assign(item, { actions });
+  }
+  if (fields.has("state") && node.state) {
+    const state: Partial<Record<SnapshotStateName, unknown>> = {};
+    for (const key of stateNames) if (node.state[key] !== undefined) state[key] = node.state[key];
+    if (Object.keys(state).length) Object.assign(item, { state });
+  }
+  return item;
+}
+
+/** Format a projected item as the legacy tree line for observe/snapshot strings. */
+export function formatSnapshotItem(item: ProjectedSnapshotNode): string {
+  if (item.path?.length) {
+    return item.path.map((step) => formatSnapshotItem({ id: item.id, ...step })).join("\n");
+  }
+  const depth = item.depth ?? 0;
+  const role = item.role ?? "generic";
+  let line = `${"  ".repeat(depth)}- ${role}`;
+  if (item.name !== undefined) {
+    line += ` ${JSON.stringify(item.name)}`;
+    if (item.textBox) line += ` [text-box=${boxText(item.textBox)}]`;
+  } else if (item.textParts?.length) {
+    line += ` [text-parts=${item.textParts.map((part) =>
+      `${JSON.stringify(part.text)} @(${part.box ? boxText(part.box) : "unknown"})`).join("; ")}]`;
+  }
+  if (item.nameUnknown) line += " [name=unknown]";
+  if (item.coordinates) line += " [coordinates=frame-viewport]";
+  if (item.box) line += ` [box=${boxText(item.box)}]`;
+  if (item.frameRef) line += ` [frameRef=${item.frameRef}]`;
+  if (item.ownerUnrepresented) line += " [owner=unrepresented]";
+  if (item.ref) line += ` [ref=${item.ref}]`;
+  if (item.actions?.length) line += ` [actions=${item.actions.join(",")}]`;
+  if (item.state) {
+    const state = stateNames.filter((key) => item.state![key] !== undefined).map((key) => `${key}=${item.state![key]}`).join(" ");
+    if (state) line += ` [${state}]`;
+  }
+  if (item.value !== undefined) line += `: ${JSON.stringify(item.value)}`;
+  if (item.valueUnknown) line += " [value=unknown]";
+  if (item.placeholder === "unknown") line += " [placeholder=unknown]";
+  else if (item.placeholder !== undefined) line += ` [placeholder=${JSON.stringify(item.placeholder)}]`;
+  if (item.selected?.length) line += ` [selected=${item.selected.map((label) => JSON.stringify(label)).join(",")}]`;
+  if (item.count !== undefined) line += ` [count=${item.count}]`;
+  if (item.boxes?.length) {
+    const parts = item.boxes.map((run) => "box" in run
+      ? `(${boxText(run.box)})`
+      : `(${boxText(run.first)}) step=(${boxText(run.step)}) count=${run.count}`);
+    line += ` [boxes=${parts.join("; ")}]`;
+  }
+  return line;
+}
+
+/**
+ * Render from structured AX fields into a legacy line. Prefer
+ * `projectSnapshotNode` for wire delivery.
  */
 export function renderSnapshotNode(
   node: SnapshotNode,
   options: { fields?: readonly SnapshotField[]; actionNames?: "raw" | "program"; inlineRef?: boolean } = {},
 ): RenderedSnapshotNode {
-  if (!Number.isSafeInteger(node.depth) || node.depth < 0) throw new RangeError("Snapshot depth must be a nonnegative integer");
-  const fields = new Set(options.fields ?? allFields);
-  const name = node.name ?? "";
-  const value = node.value ?? "";
-  const box = (bounds: SnapshotBounds) => bounds.map((value) => Math.round(value * 10) / 10).join(",");
-  const fragments = node.textFragments;
-  const sameBounds = fragments?.length === 1 && fragments[0]!.bounds && node.bounds
-    && fragments[0]!.bounds!.every((value, index) => value === node.bounds![index]);
-  const visibleName = fragments?.length === 1 ? `${JSON.stringify(fragments[0]!.text)}${sameBounds ? "" : ` [text-box=${fragments[0]!.bounds ? box(fragments[0]!.bounds!) : "unknown"}]`}`
-    : fragments?.length ? `[text-parts=${fragments.map((fragment) => `${JSON.stringify(fragment.text)} @(${fragment.bounds ? box(fragment.bounds) : "unknown"})`).join("; ")}]`
-    : name ? node.preserveTextWhitespace || node.textWhitespaceProven ? JSON.stringify(name) : JSON.stringify(normalizeSnapshotText(name)) : "";
-  let line = `${"  ".repeat(node.depth)}- ${node.role}${fields.has("text") && visibleName ? ` ${visibleName}` : ""}`;
-  if (fields.has("text") && node.nameUnknown) line += " [name=unknown]";
-  if (fields.has("text") && node.role === "RootWebArea" && node.layoutScope) line += " [coordinates=frame-viewport]";
-  if (fields.has("text") && node.bounds) {
-    line += ` [box=${box(node.bounds)}]`;
-  }
-  if (node.childFrameRef || node.documentFrameRef) line += ` [frameRef=${node.childFrameRef ?? node.documentFrameRef}]`;
-  if (node.ownerUnrepresented) line += " [owner=unrepresented]";
-  if (fields.has("ref") && node.ref && options.inlineRef !== false) line += ` [ref=${node.ref}]`;
-  if (fields.has("actions") && node.actions?.length) {
-    const actions = options.actionNames === "program" ? [...new Set(node.actions.flatMap((action) => action === "check" ? ["check_element", "uncheck_element"] : [toolActions[action] ?? action]))] : node.actions;
-    line += ` [actions=${actions.join(",")}]`;
-  }
-  if (fields.has("state") && node.state) {
-    const state = stateNames.filter((key) => node.state![key] !== undefined).map((key) => `${key}=${node.state![key]}`).join(" ");
-    if (state) line += ` [${state}]`;
-  }
-  if (fields.has("text") && value) line += `: ${JSON.stringify(value)}`;
-  if (fields.has("text") && node.valueUnknown) line += " [value=unknown]";
-  if (fields.has("text") && node.placeholder?.status === "unknown") line += " [placeholder=unknown]";
-  else if (fields.has("text") && node.placeholder?.status === "visible")
-    line += ` [placeholder=${JSON.stringify(node.placeholder.text)}]`;
-  if (fields.has("text") && node.selectedLabels?.length) line += ` [selected=${node.selectedLabels.map((label) => JSON.stringify(label)).join(",")}]`;
-  return { id: node.id, line, ...(fields.has("ref") && node.ref ? { ref: node.ref } : {}) };
+  const projected = projectSnapshotNode(node, options);
+  const forLine = options.inlineRef === false && projected.ref
+    ? (({ ref: _ref, ...rest }) => rest)(projected)
+    : projected;
+  return { id: node.id, line: formatSnapshotItem(forLine), ...(projected.ref ? { ref: projected.ref } : {}) };
 }

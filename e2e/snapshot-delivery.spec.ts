@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
 import { applySemanticDelta, SemanticPages, type SemanticItem } from "./evaluation/semantic-state";
+import { itemLine } from "./snapshot-format";
 
 /** Only consume the actual tool result delivered to the scripted provider. */
 function toolResult(request: any, id: string): any {
@@ -49,8 +50,8 @@ test("delivers every large snapshot page inline before completing a baseline", a
           fullPageCount = count; fullFragmentCount = pages.fragments;
           expect(observation.mode).toBe("full");
           baselineId = observation.observationId; baseline = observation.items;
-          for (let index = 0; index < 150; index++) expect(baseline.some((item) => item.line.includes(rowText(index)))).toBe(true);
-          expect(baseline.some((item) => item.line.includes(longText))).toBe(true);
+          for (let index = 0; index < 150; index++) expect(baseline.some((item) => itemLine(item).includes(rowText(index)))).toBe(true);
+          expect(baseline.some((item) => itemLine(item).includes(longText))).toBe(true);
           return call("click", { target: { by: "css", value: "#change-snapshot" } }, (outcome) => {
             expect(outcome).toMatchObject({ ok: true });
             return capture("delta");
@@ -60,8 +61,8 @@ test("delivers every large snapshot page inline before completing a baseline", a
           deltaPageCount = count;
           expect(observation).toMatchObject({ mode: "delta", baseObservationId: baselineId });
           updated = applySemanticDelta(baseline, observation.items);
-          expect(updated.some((item) => item.line.includes("ROW_074_CHANGED"))).toBe(true);
-          expect(updated.some((item) => item.line.includes(rowText(74)))).toBe(false);
+          expect(updated.some((item) => itemLine(item).includes("ROW_074_CHANGED"))).toBe(true);
+          expect(updated.some((item) => itemLine(item).includes(rowText(74)))).toBe(false);
           return capture("fresh");
         }
         freshPageCount = count;

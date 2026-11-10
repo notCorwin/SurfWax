@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, configure, dispose, openExtension, startProvider, textResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const message = request.messages.findLast((entry: any) => entry.role === "tool");
@@ -24,7 +25,7 @@ test("exposes a proven painted ellipsis prefix and keeps its action reference", 
     await button.evaluate((element) => { element.textContent = "Next TASK-746F9DB6E6FB"; });
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "ellipsis-proof"), (request: any) => {
       snapshot = lastTool(request);
-      const item = snapshot.items?.find((entry: any) => entry.line.includes('- button "Next TASK-7…"'));
+      const item = snapshot.items?.find((entry: any) => itemLine(entry).includes('- button "Next TASK-7…"'));
       return item?.ref ? commandResponse("click", { target: { ref: item.ref } }, "ellipsis-click") : textResponse("ELLIPSIS_DONE");
     }, (request: any) => { click = lastTool(request); return textResponse("ELLIPSIS_DONE"); }, textResponse("Inspect the queue"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -35,7 +36,7 @@ test("exposes a proven painted ellipsis prefix and keeps its action reference", 
     expect(snapshot).toMatchObject({ mode: "full", items: expect.any(Array) });
     expect(JSON.stringify(snapshot.items)).not.toContain("UNPAINTED_ACCESSIBLE_NAME");
     expect(JSON.stringify(snapshot.items)).not.toContain("46F9DB6E6FB");
-    expect(snapshot.items.some((entry: any) => entry.line.includes('- button "Next TASK-7…"') && typeof entry.ref === "string")).toBe(true);
+    expect(snapshot.items.some((entry: any) => itemLine(entry).includes('- button "Next TASK-7…"') && typeof entry.ref === "string")).toBe(true);
     expect(click).toMatchObject({ ok: true });
     expect(await target.locator("body").getAttribute("data-clicked")).toBe("yes");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }

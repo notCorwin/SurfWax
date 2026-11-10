@@ -1,9 +1,10 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
 import { deliveredSemanticState } from "./evaluation/semantic-state";
+import { itemLine } from "./snapshot-format";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
-const button = (items: any[], name: string) => items.find((entry) => entry.line.includes(`button "${name}"`));
+const button = (items: any[], name: string) => items.find((entry) => itemLine(entry).includes(`button "${name}"`));
 
 test("snapshot follows rendered text visibility and updates when the text is revealed", async () => {
   const responses: MockResponse[] = [];
@@ -66,7 +67,7 @@ test("snapshot follows rendered text visibility and updates when the text is rev
     expect(JSON.stringify(before.items)).not.toContain("Explicit label");
     expect(button(before.items, "Visible button")?.ref).toBeTruthy();
     const transparentLabel = output("text-transparent-label");
-    expect(transparentLabel?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toBe(true);
+    expect(transparentLabel?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toBe(true);
     expect(JSON.stringify(transparentLabel.items)).not.toContain("Accessible hidden label");
     for (const visible of ["MIXED CASE SAMPLE", "Translucent text", "Shadow painted text", "Stroke painted text", "Gradient painted text"]) {
       expect(JSON.stringify(before.items)).toContain(visible);
@@ -74,7 +75,7 @@ test("snapshot follows rendered text visibility and updates when the text is rev
     expect(changed).toMatchObject({ ok: true });
     for (const revealed of ["hidden transparent child", "hidden zero-size child", "Standalone transparent text", "Standalone zero-size text"]) {
       expect(JSON.stringify(deliveredSemanticState(events, changed.pageSnapshot))).toContain(revealed);
-      expect(delta.items.some((entry: any) => entry.change !== "removed" && entry.line.includes(revealed))).toBe(true);
+      expect(delta.items.some((entry: any) => entry.change !== "removed" && itemLine(entry).includes(revealed))).toBe(true);
     }
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
@@ -166,7 +167,7 @@ for (const kind of ["first-line", "first-letter"] as const) {
       await expect(opened.page.locator(".markdown-body").last()).toContainText("PSEUDO_OK", { timeout: 45_000 });
       const events = await readEvents(opened.page);
       const result = events.find((event) => event.type === "tool.finished" && event.toolCallId === "pseudo-snapshot")?.output;
-      const lines: string[] = (result?.items ?? []).map((entry: any) => entry.line);
+      const lines: string[] = (result?.items ?? []).map((entry: any) => itemLine(entry));
       if (kind === "first-line") {
         expect(lines.some((line) => line.includes("Painted first line"))).toBe(true);
         expect(JSON.stringify(lines)).not.toContain("Unpainted later line");
@@ -219,7 +220,7 @@ for (const kind of ["uppercase", "text-security"] as const) {
       expect(stillPainted.equals(stillNoGlyph)).toBe(false);
       const events = await readEvents(opened.page);
       const result = events.find((event) => event.type === "tool.finished" && event.toolCallId === "transform-selection")?.output;
-      const textLines: string[] = (result?.items ?? []).map((entry: any) => entry.line).filter((line: string) => line.includes("- StaticText"));
+      const textLines: string[] = (result?.items ?? []).map((entry: any) => itemLine(entry)).filter((line: string) => line.includes("- StaticText"));
       const expected = kind === "uppercase" ? "MASS" : "•••";
       expect(textLines).toHaveLength(1);
       expect(textLines[0]).toMatch(new RegExp(`StaticText "${expected}"`));
@@ -308,7 +309,7 @@ test("filters transparent generated text but keeps painted pseudo-elements and u
     expect(changed).toMatchObject({ ok: true });
     for (const revealed of ["Hidden button before", "Hidden standalone before"]) {
       expect(JSON.stringify(deliveredSemanticState(events, changed.pageSnapshot))).toContain(revealed);
-      expect(delta.items.some((entry: any) => entry.change !== "removed" && entry.line.includes(revealed))).toBe(true);
+      expect(delta.items.some((entry: any) => entry.change !== "removed" && itemLine(entry).includes(revealed))).toBe(true);
     }
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

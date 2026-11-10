@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const message = request.messages.findLast((entry: any) => entry.role === "tool");
@@ -30,8 +31,8 @@ test("isolates resizing text in a clipped container from a separate stable butto
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ISOLATION_DONE", { timeout: 80_000 });
     expect(observed).toMatchObject({ partial: true, items: expect.any(Array) });
-    const items = observed.items.map((item: any) => ({ ...item, line: typeof item.line === "number" ? observed.lineDictionary?.[item.line] : item.line }));
-    expect(items.find((item: any) => item.line.includes('button "Stable action"'))?.ref).toEqual(expect.any(String));
-    expect(items.some((item: any) => item.line.includes("short") || item.line.includes("a longer value"))).toBe(false);
+    const items = observed.items;
+    expect(items.find((item: any) => itemLine(item).includes('button "Stable action"'))?.ref).toEqual(expect.any(String));
+    expect(items.some((item: any) => itemLine(item).includes("short") || itemLine(item).includes("a longer value"))).toBe(false);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

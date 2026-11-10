@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -40,7 +41,7 @@ test("old refs reject transparent ancestors across shadow and frames, then work 
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "opacity-inspect"), (request) => {
       try {
         initial = lastTool(request);
-        for (const name of [...names, "Toggle opacity", "Far target"]) refs[name] = initial.items?.find((item: any) => item.line.includes(`button "${name}"`))?.ref ?? "";
+        for (const name of [...names, "Toggle opacity", "Far target"]) refs[name] = initial.items?.find((item: any) => itemLine(item).includes(`button "${name}"`))?.ref ?? "";
         if (Object.values(refs).some((ref) => !ref)) return done();
         const steps: MockResponse[] = [
           (next) => { found = lastTool(next); refs["Same frame target"] = found.elements?.[0]?.ref ?? "";

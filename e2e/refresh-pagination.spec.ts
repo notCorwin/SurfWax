@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, configure, delayedResponse, dispose, openExtension, readEvents, startProvider, textResponse, type MockResponse } from "./fixtures";
 import { SemanticPages } from "./evaluation/semantic-state";
+import { itemLine } from "./snapshot-format";
 
 /** A scripted provider consumes the actual refresh, metadata artifact, and frozen snapshot. */
 test("restores long refresh metadata and continues a bounded snapshot in the same run", async () => {
@@ -36,8 +37,8 @@ test("restores long refresh metadata and continues a bounded snapshot in the sam
         responses.unshift(consume);
         return commandResponse("inspect_page", { tabId, cursor: currentCursor, budget: 3000 }, `refresh-page-${pagesRead}`);
       }
-      expect(pages.result().items.some((item) => item.line.includes("REFRESH_PAGE_LAST_ITEM"))).toBe(true);
-      expect(pages.result().items.some((item) => item.line.includes("REFRESH_PAGE_LOADED_MARKER"))).toBe(true);
+      expect(pages.result().items.some((item) => itemLine(item).includes("REFRESH_PAGE_LAST_ITEM"))).toBe(true);
+      expect(pages.result().items.some((item) => itemLine(item).includes("REFRESH_PAGE_LOADED_MARKER"))).toBe(true);
       return done();
     } catch (error) { problem = error; return done(); }
   };

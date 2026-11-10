@@ -1,9 +1,10 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
 import { deliveredSemanticState } from "./evaluation/semantic-state";
+import { itemLine } from "./snapshot-format";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
-const button = (items: any[], name: string) => items.find((item) => item.line.includes(`button "${name}"`));
+const button = (items: any[], name: string) => items.find((item) => itemLine(item).includes(`button "${name}"`));
 
 test("filters transparent effects and empty clip shapes while retaining visible content and labels", async () => {
   const responses: MockResponse[] = [];
@@ -69,15 +70,15 @@ test("filters transparent effects and empty clip shapes while retaining visible 
     const hidden = ["Filter hidden", "Filter fixed hidden", "Final filter hidden", "Circle hidden", "Ellipse hidden", "Polygon hidden"];
     for (const name of hidden) expect(JSON.stringify(before.items)).not.toContain(name);
     for (const name of ["SVG filter visible", "Translucent visible", "Backdrop visible", "Visible text"]) expect(button(before.items, name)?.ref, name).toBeTruthy();
-    const partial = output("effects-partial-circle")?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(item.line) && item.ref);
+    const partial = output("effects-partial-circle")?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.ref);
     expect(partial?.ref).toEqual(expect.any(String));
-    const name = /\bbutton\s+("(?:\\.|[^"\\])*")/.exec(partial.line)?.[1];
+    const name = /\bbutton\s+("(?:\\.|[^"\\])*")/.exec(itemLine(partial))?.[1];
     if (name) expect(circleRuns.some((run) => run.includes(JSON.parse(name)))).toBe(true);
-    else expect(partial.line).toContain("[name=unknown]");
+    else expect(itemLine(partial)).toContain("[name=unknown]");
     expect(JSON.stringify(before.items)).not.toContain("Hidden effect text");
     expect(JSON.stringify(before.items)).not.toContain("Filter accessible name");
     const anonymous = output("effects-hidden-label");
-    expect(anonymous?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toBe(true);
+    expect(anonymous?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toBe(true);
     expect(JSON.stringify(anonymous.items)).not.toContain("Filter accessible name");
     expect(changed).toMatchObject({ ok: true });
     for (const name of hidden) {

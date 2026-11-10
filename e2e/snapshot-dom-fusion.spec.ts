@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -38,7 +39,7 @@ test("retains exact visible DOM text and operates a native input omitted by AX",
     responses.push(commandResponse("inspect_page", { budget: 6000 }, "dom-fusion-inspect"), (request) => {
       try {
         snapshot = lastTool(request);
-        const input = snapshot.items?.find((item: any) => /- textbox(?:\s|:)/.test(item.line) && item.line.includes("INITIAL_INPUT_VALUE"));
+        const input = snapshot.items?.find((item: any) => /- textbox(?:\s|:)/.test(itemLine(item)) && itemLine(item).includes("INITIAL_INPUT_VALUE"));
         if (typeof input?.ref !== "string") return done();
         responses.unshift((next) => { try { filled = lastTool(next); } catch (error) { problem = error; } return done(); });
         return commandResponse("fill", { target: { ref: input.ref }, value: "UPDATED_INPUT_VALUE" }, "dom-fusion-fill");
@@ -51,11 +52,11 @@ test("retains exact visible DOM text and operates a native input omitted by AX",
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DOM_FUSION_PROBE_DONE", { timeout: 45_000 });
     if (problem) throw problem;
     expect(snapshot).toMatchObject({ mode: "full", truncation: { baselineComplete: true }, items: expect.any(Array) });
-    const lines = snapshot.items.map((item: any) => item.line as string);
+    const lines = (snapshot.items).map(itemLine);
     expect.soft(lines.some((line: string) => line.includes('- button "NoSpaceANoSpaceB"'))).toBe(true);
     expect.soft(lines.some((line: string) => line.includes('- button "SpacedA SpacedB"'))).toBe(true);
     expect.soft(lines.some((line: string) => line.includes("Visible input label"))).toBe(true);
-    const input = snapshot.items.find((item: any) => /- textbox(?:\s|:)/.test(item.line) && item.line.includes("INITIAL_INPUT_VALUE"));
+    const input = snapshot.items.find((item: any) => /- textbox(?:\s|:)/.test(itemLine(item)) && itemLine(item).includes("INITIAL_INPUT_VALUE"));
     expect.soft(input?.ref).toEqual(expect.any(String));
     const initial = JSON.stringify(snapshot.items);
     expect.soft(initial).toContain("VISIBLE_BEFORE_CHANGE");

@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 test.use({ screenshot: "off", trace: "off" });
 
@@ -9,7 +10,7 @@ function lastTool(request: any): any {
   return JSON.parse(content);
 }
 
-function lines(snapshot: any): Array<{ line: string; ref?: string }> {
+function lines(snapshot: any): any[] {
   return snapshot?.items ?? [];
 }
 
@@ -33,7 +34,7 @@ test("a changing visible clock does not block a stable button or replay its clic
       commandResponse("inspect_page", { budget: 12000, fields: ["text", "state", "ref"] }, "dynamic-inspect"),
       (request) => {
         observed = lastTool(request);
-        const stable = lines(observed).find((item) => item.line?.includes('button "Save once"'));
+        const stable = lines(observed).find((item) => itemLine(item)?.includes('button "Save once"'));
         return commandResponse("click", { target: stable?.ref ? { ref: stable.ref } : { by: "role", value: "button", name: "Save once" } }, "dynamic-click");
       },
       (request) => { action = lastTool(request); return textResponse("DYNAMIC_CLOCK_DONE"); },
@@ -45,7 +46,7 @@ test("a changing visible clock does not block a stable button or replay its clic
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DYNAMIC_CLOCK_DONE", { timeout: 70_000 });
     expect(observed).toMatchObject({ partial: true, items: expect.any(Array) });
-    expect(lines(observed).find((item) => item.line?.includes('button "Save once"'))?.ref).toEqual(expect.any(String));
+    expect(lines(observed).find((item) => itemLine(item)?.includes('button "Save once"'))?.ref).toEqual(expect.any(String));
     expect(action).toMatchObject({ ok: true });
     await expect(target.locator("#count")).toHaveText("COUNT_1");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
@@ -77,12 +78,12 @@ test("a changing external label does not produce a stale actionable button name"
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DYNAMIC_LABEL_DONE", { timeout: 70_000 });
     expect(observed).toMatchObject({ partial: true, items: expect.any(Array) });
-    const buttons = lines(observed).filter((item) => /\bbutton(?:\s|$)/.test(item.line));
-    expect(buttons.find((item) => item.line.includes('"Independent"'))?.ref).toEqual(expect.any(String));
-    const changingButton = buttons.find((item) => item.line.includes("[name=unknown]"));
+    const buttons = lines(observed).filter((item) => /\bbutton(?:\s|$)/.test(itemLine(item)));
+    expect(buttons.find((item) => itemLine(item).includes('"Independent"'))?.ref).toEqual(expect.any(String));
+    const changingButton = buttons.find((item) => itemLine(item).includes("[name=unknown]"));
     expect(changingButton).toBeDefined();
     expect(changingButton?.ref).toBeUndefined();
-    expect(buttons.some((item) => item.line.includes("LABEL_"))).toBe(false);
+    expect(buttons.some((item) => itemLine(item).includes("LABEL_"))).toBe(false);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
@@ -129,7 +130,7 @@ for (const kind of ["native-label", "geometry", "ellipsis", "ellipsis-replace", 
       if (observed?.limitations) {
         expect(observed).toMatchObject({ partial: true, limitations: expect.stringContaining("Read-only"), items: expect.any(Array) });
         expect(lines(observed).every((item) => !item.ref)).toBe(true);
-        expect(lines(observed).some((item) => item.line.includes("Independent"))).toBe(true);
+        expect(lines(observed).some((item) => itemLine(item).includes("Independent"))).toBe(true);
         return;
       }
       if (kind === "geometry" && observed?.ok === false) {
@@ -138,24 +139,24 @@ for (const kind of ["native-label", "geometry", "ellipsis", "ellipsis-replace", 
       }
       expect(observed).toMatchObject({ partial: true, items: expect.any(Array) });
       const items = lines(observed);
-      expect(items.find((item) => item.line?.includes('button "Independent"'))?.ref).toEqual(expect.any(String));
+      expect(items.find((item) => itemLine(item)?.includes('button "Independent"'))?.ref).toEqual(expect.any(String));
       if (kind === "geometry") {
-        expect(items.find((item) => item.line?.includes('button "Moving neighbor"'))?.ref).toBeUndefined();
+        expect(items.find((item) => itemLine(item)?.includes('button "Moving neighbor"'))?.ref).toBeUndefined();
       } else if (kind === "native-label") {
-        const field = items.find((item) => /\btextbox\b/.test(item.line));
-        expect(field?.line).toContain("[name=unknown]");
+        const field = items.find((item) => /\btextbox\b/.test(itemLine(item)));
+        expect(itemLine(field)).toContain("[name=unknown]");
         expect(field?.ref).toBeUndefined();
-        expect(field?.line).not.toContain("NATIVE_");
+        expect(itemLine(field)).not.toContain("NATIVE_");
       } else if (kind === "ellipsis" || kind === "ellipsis-replace") {
-        const button = items.find((item) => /\bbutton\b/.test(item.line) && !item.line.includes('"Independent"'));
-        expect(button?.line).toContain("[name=unknown]");
+        const button = items.find((item) => /\bbutton\b/.test(itemLine(item)) && !itemLine(item).includes('"Independent"'));
+        expect(itemLine(button)).toContain("[name=unknown]");
         expect(button?.ref).toBeUndefined();
-        expect(button?.line).not.toContain("ELLIP");
+        expect(itemLine(button)).not.toContain("ELLIP");
       } else {
-        const editable = items.find((item) => /\btextbox\b/.test(item.line));
+        const editable = items.find((item) => /\btextbox\b/.test(itemLine(item)));
         expect(editable).toBeDefined();
         expect(editable?.ref).toBeUndefined();
-        expect(editable?.line).not.toContain("EDITABLE_");
+        expect(itemLine(editable)).not.toContain("EDITABLE_");
       }
     } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
   });

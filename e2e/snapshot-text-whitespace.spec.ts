@@ -2,6 +2,7 @@ import { expect } from "@playwright/test";
 import { snapshotDomSupplement } from "../src/chrome/snapshot-dom";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility } from "../src/chrome/snapshot-visibility";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { inspectText } from "./snapshot-format";
 
 test.use({ screenshot: "off", trace: "off" });
 
@@ -62,7 +63,7 @@ test("uses Chrome's text boxes for visible whitespace in snapshots", async () =>
     await opened.page.getByTestId("composer-input").fill("Inspect the content");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("WHITESPACE_DONE", { timeout: 60_000 });
-    const lines = inspected.items.map((item: any) => item.line).join("\n");
+    const lines = inspectText(inspected.items);
     expect(lines).not.toContain('"\\n            1\\n          "');
     expect(lines).toContain('" A  B\\n C "');
     expect(lines).toContain('"A B\\nC"');

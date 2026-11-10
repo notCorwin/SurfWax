@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { inspectText } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -30,7 +31,7 @@ test("preserves rendered preformatted whitespace in AX and DOM supplement text",
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PREFORMATTED_DONE", { timeout: 60_000 });
     expect(snapshot).toMatchObject({ mode: "full", items: expect.any(Array) });
-    const lines = snapshot.items.map((item: any) => item.line).join("\n");
+    const lines = inspectText(snapshot.items);
     expect(lines).toContain('"AX_A    B\\nC"');
     expect(lines).toContain('"DOM_A    B\\nC"');
     expect(lines).toContain('"NORMAL_A B C"');

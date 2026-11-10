@@ -3,13 +3,15 @@ import { paginateSnapshot, type SnapshotItem } from "./snapshot-pagination";
 import { snapshotLookahead } from "./snapshot-lookahead";
 
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+const row = (id: string, name: string, extra: Partial<SnapshotItem> = {}): SnapshotItem =>
+  ({ id, depth: 0, role: "button", name, ...extra });
 
-function sample(line = `- button "${"海🌊".repeat(2500)}"`): SnapshotItem[] {
+function sample(name = "海🌊".repeat(2500)): SnapshotItem[] {
   return [
-    { id: "root", line: "- main" },
-    { id: "long", ref: "ref-long", line },
-    { id: "next", ref: "ref-next", line: '  - button "Next"' },
-    { id: "status", line: '  - status "Ready"' },
+    row("root", "main", { role: "main" }),
+    row("long", name, { ref: "ref-long" }),
+    row("next", "Next", { depth: 1, ref: "ref-next" }),
+    row("status", "Ready", { depth: 1, role: "status" }),
   ];
 }
 
@@ -20,15 +22,16 @@ describe("snapshot lookahead", () => {
     const { page, lookahead, combinedBytes } = snapshotLookahead(source, original, { budget, mode: "full" });
     const originalLast = original.fragments.at(-1)!, shortened = page.fragments.at(-1)!;
     expect(originalLast.fragment?.start).toBe(0);
-    expect(shortened.line.length).toBeGreaterThanOrEqual(512);
-    expect(shortened.line.slice(0, 255)).toBe(originalLast.line.slice(0, 255));
-    expect(shortened.line.length > 256).toBe(originalLast.line.length > 256);
-    expect(shortened.line + source[1]!.line.slice(page.next!.charOffset)).toBe(source[1]!.line);
-    expect(page.next).toEqual({ index: 1, charOffset: shortened.line.length });
-    expect(shortened.fragment).toEqual({ index: 1, start: 0, end: shortened.line.length, total: source[1]!.line.length });
+    expect(shortened.name!.length).toBeGreaterThanOrEqual(512);
+    expect(shortened.name!.slice(0, 255)).toBe(originalLast.name!.slice(0, 255));
+    expect(shortened.name!.length > 256).toBe(originalLast.name!.length > 256);
+    expect(shortened.name! + source[1]!.name!.slice(page.next!.charOffset)).toBe(source[1]!.name);
+    expect(page.next).toEqual({ index: 1, charOffset: shortened.name!.length });
+    expect(shortened.fragment).toEqual({ index: 1, field: "name", start: 0, end: shortened.name!.length, total: source[1]!.name!.length });
     expect(page.usedBytes).toBe(bytes(page.fragments));
     expect(lookahead).toEqual({ nonAuthoritative: true, items: [
-      { index: 2, id: source[2]!.id, line: source[2]!.line }, { index: 3, id: source[3]!.id, line: source[3]!.line },
+      { index: 2, id: source[2]!.id, depth: 1, role: "button", name: "Next" },
+      { index: 3, id: source[3]!.id, depth: 1, role: "status", name: "Ready" },
     ] });
     expect(combinedBytes).toBe(bytes({ items: page.fragments, lookahead }));
     expect(combinedBytes).toBeLessThanOrEqual(budget);
@@ -36,26 +39,26 @@ describe("snapshot lookahead", () => {
     const reconstructed = new Map<string, string>();
     let current = page;
     for (;;) {
-      for (const item of current.fragments) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + item.line);
+      for (const item of current.fragments) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + (item.name ?? ""));
       if (!current.next) break;
       current = paginateSnapshot(source, { budget, position: current.next });
     }
-    expect([...reconstructed]).toEqual(source.map(({ id, line }) => [id, line]));
-    expect(original.fragments.at(-1)?.line).toBe(originalLast.line);
+    expect([...reconstructed]).toEqual(source.map(({ id, name }) => [id, name]));
+    expect(original.fragments.at(-1)?.name).toBe(originalLast.name);
   });
 
   it("does not split a surrogate pair at the minimum prefix", () => {
     const source = sample("x".repeat(511) + "😀" + "y".repeat(5000)), budget = 4000;
     const original = paginateSnapshot(source, { budget });
     const result = snapshotLookahead(source, original, { budget, mode: "full" });
-    expect(result.page.fragments.at(-1)?.line.length).toBe(513);
-    expect(result.page.fragments.at(-1)?.line.endsWith("😀")).toBe(true);
+    expect(result.page.fragments.at(-1)?.name!.length).toBe(513);
+    expect(result.page.fragments.at(-1)?.name!.endsWith("😀")).toBe(true);
     expect(result.page.next?.charOffset).toBe(513);
   });
 
   it("does not put long later rows or partial rows in the preview", () => {
     const source = sample();
-    source.splice(2, 0, { id: "large", line: '"' + "z".repeat(700) + '"' });
+    source.splice(2, 0, row("large", "z".repeat(700)));
     const budget = 12_000, page = paginateSnapshot(source, { budget });
     const result = snapshotLookahead(source, page, { budget, mode: "full" });
     expect(result.lookahead?.items.map((item) => item.id)).toEqual(["next", "status"]);
@@ -63,33 +66,36 @@ describe("snapshot lookahead", () => {
 
   it("accounts exactly for escaped JSON and retains only preview rows that fit", () => {
     const source = sample("x".repeat(5000));
-    source[2] = { id: "escaped", ref: "r\\\"", line: '\\"\n'.repeat(80) };
+    source[2] = row("escaped", '\\"\n'.repeat(80), { ref: "r\\\"" });
     const budget = 1000, original = paginateSnapshot(source, { budget });
     const result = snapshotLookahead(source, original, { budget, mode: "full" });
     expect(result.lookahead).toBeDefined();
     expect(result.combinedBytes).toBe(bytes({ items: result.page.fragments, lookahead: result.lookahead }));
     expect(result.combinedBytes).toBeLessThanOrEqual(budget);
-    for (const { index, ...item } of result.lookahead!.items) expect(source[index]).toEqual(item);
+    for (const item of result.lookahead!.items) {
+      expect(source[item.index]!.id).toBe(item.id);
+      expect(source[item.index]!.name).toBe(item.name);
+    }
   });
 
   it("preserves the original page when no complete candidate can fit", () => {
     const source = sample("x".repeat(5000));
-    source.splice(2, 2, { id: "long-again", line: "z".repeat(600) });
+    source.splice(2, 2, row("long-again", "z".repeat(600)));
     const original = paginateSnapshot(source, { budget: 1000 });
     expect(snapshotLookahead(source, original, { budget: 1000, mode: "full" })).toEqual({ page: original });
   });
 
   it("returns the original page if even a complete short row cannot fit with its identity", () => {
     const source = sample("x".repeat(5000));
-    source.splice(2, 2, { id: "huge-id-" + "x".repeat(2000), line: "short" });
+    source.splice(2, 2, row("huge-id-" + "x".repeat(2000), "short"));
     const original = paginateSnapshot(source, { budget: 1000 });
     expect(snapshotLookahead(source, original, { budget: 1000, mode: "full" })).toEqual({ page: original });
   });
 
   it("previews within an explicit source window while preserving the cursor and row limit", () => {
     const source = sample();
-    source.splice(2, 0, { id: "skipped", line: "z".repeat(600) });
-    for (let index = 0; index < 150; index++) source.push({ id: `row-${index}`, line: `- row ${index}` });
+    source.splice(2, 0, row("skipped", "z".repeat(600)));
+    for (let index = 0; index < 150; index++) source.push(row(`row-${index}`, `row ${index}`));
     const budget = 12_000, limit = 100;
     const original = paginateSnapshot(source, { budget, limit });
     const { page, lookahead, combinedBytes } = snapshotLookahead(source, original, { budget, limit, mode: "full" });
@@ -102,11 +108,11 @@ describe("snapshot lookahead", () => {
     const reconstructed = new Map<string, string>();
     let current = page;
     for (;;) {
-      for (const item of current.fragments) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + item.line);
+      for (const item of current.fragments) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + (item.name ?? ""));
       if (!current.next) break;
       current = paginateSnapshot(source, { budget, limit, position: current.next });
     }
-    expect([...reconstructed]).toEqual(source.map(({ id, line }) => [id, line]));
+    expect([...reconstructed]).toEqual(source.map(({ id, name }) => [id, name]));
   });
 
   it("does not preview when primary fragments exhaust the explicit limit", () => {

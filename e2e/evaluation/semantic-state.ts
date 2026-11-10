@@ -1,7 +1,53 @@
-/** A compact independent consumer for paged semantic observations. */
-export type SemanticItem = { id: string; line: string; ref?: string; change?: "added" | "updated" | "removed" | "moved"; after?: string | null };
-type Fragment = SemanticItem & { fragment?: { index: number; start: number; end: number; total: number } };
+/** A compact independent consumer for paged structured semantic observations. */
+export type SemanticItem = {
+  id: string;
+  depth?: number;
+  role?: string;
+  name?: string;
+  nameUnknown?: true;
+  box?: readonly number[];
+  textBox?: readonly number[];
+  textParts?: readonly { text: string; box?: readonly number[] }[];
+  coordinates?: "frame-viewport";
+  value?: string;
+  valueUnknown?: true;
+  placeholder?: string | "unknown";
+  selected?: readonly string[];
+  frameRef?: string;
+  ownerUnrepresented?: true;
+  ref?: string;
+  actions?: readonly string[];
+  state?: Record<string, unknown>;
+  count?: number;
+  boxes?: readonly unknown[];
+  path?: readonly unknown[];
+  change?: "added" | "updated" | "removed" | "moved";
+  after?: string | null;
+};
+type FragmentMeta = { index: number; field: string; start: number; end: number; total: number };
+type Fragment = SemanticItem & { fragment?: FragmentMeta };
 type Page = { observationId: string; documentId: number; mode: "full" | "delta"; baseObservationId?: string; items: Fragment[]; nextCursor?: string; truncation: { baselineComplete: boolean } };
+
+function sliceText(item: SemanticItem, field: string): string | undefined {
+  if (field === "name") return typeof item.name === "string" ? item.name : undefined;
+  if (field === "value") return typeof item.value === "string" ? item.value : undefined;
+  const match = /^textParts\.(\d+)\.text$/.exec(field);
+  if (match && item.textParts) {
+    const text = item.textParts[Number(match[1])]?.text;
+    return typeof text === "string" ? text : undefined;
+  }
+}
+
+function withSlice(item: SemanticItem, field: string, text: string): SemanticItem {
+  if (field === "name") return { ...item, name: text };
+  if (field === "value") return { ...item, value: text };
+  const match = /^textParts\.(\d+)\.text$/.exec(field);
+  if (match && item.textParts) {
+    const index = Number(match[1]);
+    return { ...item, textParts: item.textParts.map((part, partIndex) => partIndex === index ? { ...part, text } : part) };
+  }
+  throw new Error("Invalid semantic fragment");
+}
 
 export class SemanticPages {
   private identity?: { observationId: string; documentId: number; mode: Page["mode"]; baseObservationId?: string };
@@ -9,7 +55,7 @@ export class SemanticPages {
   private ended = false;
   private readonly items: SemanticItem[] = [];
   private readonly ids = new Set<string>();
-  private partial?: { item: SemanticItem; index: number; total: number };
+  private partial?: { item: SemanticItem; field: string; index: number; total: number };
   fragments = 0;
 
   append(page: Page, cursor?: string): string | undefined {
@@ -20,29 +66,30 @@ export class SemanticPages {
     if (page.observationId !== this.identity.observationId || page.documentId !== this.identity.documentId || page.mode !== this.identity.mode
       || page.baseObservationId !== this.identity.baseObservationId) throw new Error("Mixed semantic observations");
     for (const raw of page.items) {
-      if (!raw || typeof raw.line !== "string") throw new Error("Invalid semantic item");
-      if (typeof raw.id !== "string" || !raw.id
+      if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !raw.id
         || raw.ref !== undefined && typeof raw.ref !== "string"
         || raw.change !== undefined && !["added", "updated", "removed", "moved"].includes(raw.change)
         || raw.after !== undefined && raw.after !== null && typeof raw.after !== "string") throw new Error("Invalid semantic item");
-      if (/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(raw.line)) throw new Error("Split Unicode surrogate");
       const { fragment, ...item } = raw;
       if (!fragment) {
         if (this.partial || this.ids.has(item.id)) throw new Error("Duplicate or incomplete semantic item");
         this.ids.add(item.id); this.items.push(item); continue;
       }
       this.fragments++;
-      if (![fragment.index, fragment.start, fragment.end, fragment.total].every(Number.isSafeInteger)
-        || fragment.index < 0 || fragment.start < 0 || fragment.end <= fragment.start || fragment.end > fragment.total
-        || fragment.end - fragment.start !== item.line.length) throw new Error("Invalid semantic fragment");
+      if (typeof fragment.field !== "string" || !fragment.field
+        || ![fragment.index, fragment.start, fragment.end, fragment.total].every(Number.isSafeInteger)
+        || fragment.index < 0 || fragment.start < 0 || fragment.end <= fragment.start || fragment.end > fragment.total) throw new Error("Invalid semantic fragment");
+      const text = sliceText(item, fragment.field);
+      if (typeof text !== "string" || fragment.end - fragment.start !== text.length) throw new Error("Invalid semantic fragment");
+      if (/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(text)) throw new Error("Split Unicode surrogate");
       if (!this.partial) {
         if (fragment.start !== 0 || this.ids.has(item.id)) throw new Error("Missing semantic fragment");
-        this.partial = { item: { ...item, line: "" }, index: fragment.index, total: fragment.total };
+        this.partial = { item: withSlice(item, fragment.field, ""), field: fragment.field, index: fragment.index, total: fragment.total };
       }
-      const part = this.partial;
-      if (part.item.id !== item.id || part.index !== fragment.index || part.total !== fragment.total
-        || part.item.line.length !== fragment.start || part.item.ref !== item.ref || part.item.change !== item.change || part.item.after !== item.after) throw new Error("Inconsistent semantic fragments");
-      part.item.line += item.line;
+      const part = this.partial, assembled = sliceText(part.item, part.field) ?? "";
+      if (part.item.id !== item.id || part.field !== fragment.field || part.index !== fragment.index || part.total !== fragment.total
+        || assembled.length !== fragment.start || part.item.ref !== item.ref || part.item.change !== item.change || part.item.after !== item.after) throw new Error("Inconsistent semantic fragments");
+      part.item = withSlice(part.item, part.field, assembled + text);
       if (fragment.end === fragment.total) { this.ids.add(item.id); this.items.push(part.item); this.partial = undefined; }
     }
     if (page.nextCursor !== undefined && (typeof page.nextCursor !== "string" || !page.nextCursor || page.nextCursor === cursor)) throw new Error("Invalid semantic cursor");

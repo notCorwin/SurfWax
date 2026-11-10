@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configureWithImages, readEvents, type MockResponse } from "./fixtures";
 import { deliveredSemanticState } from "./evaluation/semantic-state";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const message = request.messages.findLast((entry: any) => entry.role === "tool");
@@ -9,7 +10,7 @@ function lastTool(request: any): any {
   return JSON.parse(content);
 }
 
-const named = (items: any[], role: string, text: string) => items.find((item) => item.line.includes(`${role} "${text}"`));
+const named = (items: any[], role: string, text: string) => items.find((item) => itemLine(item).includes(`${role} "${text}"`));
 
 test("snapshots use painted names while retaining private action identity", async () => {
   test.setTimeout(120_000);
@@ -81,7 +82,7 @@ test("snapshots use painted names while retaining private action identity", asyn
       step((request) => { stale = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#icon" }, budget: 12000 }, "visible-names-icon"); }),
       step((request) => {
         iconPage = lastTool(request);
-        const icon = iconPage.items.find((item: any) => /\bbutton(?:\s|$)/.test(item.line) && item.ref);
+        const icon = iconPage.items.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.ref);
         return commandResponse("click", { target: { ref: requireRef(icon, "icon button") } }, "visible-names-icon-click");
       }),
       step((request) => { iconClick = lastTool(request); return commandResponse("click", { target: { ref: requireRef(named(baseline.items, "button", "Visible DOM control"), "Visible DOM control") } }, "visible-names-dom-click"); }),
@@ -89,11 +90,11 @@ test("snapshots use painted names while retaining private action identity", asyn
       step((request) => { scoped = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#ellipsized" }, budget: 12000 }, "visible-names-ellipsis"); }),
       step((request) => {
         ellipsisPage = lastTool(request);
-        const row = ellipsisPage.items.find((item: any) => /\bbutton(?:\s|$)/.test(item.line));
-        expect(row?.line).toEqual(expect.any(String));
-        expect(row.line).not.toContain("SECRET_ELLIPSIZED_SUFFIX_A");
-        expect(row.line.includes("VISIBLE_PR") || row.line.includes("[name=unknown]")).toBe(true);
-        return row.line.includes("[name=unknown]")
+        const row = ellipsisPage.items.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)));
+        expect(row).toEqual(expect.any(Object));
+        expect(itemLine(row)).not.toContain("SECRET_ELLIPSIZED_SUFFIX_A");
+        expect(itemLine(row).includes("VISIBLE_PR") || itemLine(row).includes("[name=unknown]")).toBe(true);
+        return itemLine(row).includes("[name=unknown]")
           ? commandResponse("take_screenshot", { target: { by: "css", value: "#ellipsized" } }, "visible-names-ellipsis-image")
           : textResponse("VISIBLE_NAMES_DONE");
       }),
@@ -114,10 +115,10 @@ test("snapshots use painted names while retaining private action identity", asyn
     expect(JSON.stringify(deliveredSemanticState(events, changed.pageSnapshot))).toContain("Visible after change");
     expect(JSON.stringify(changed.pageSnapshot.items)).not.toContain("SECRET_IDENTITY_AFTER");
     expect(delta).toMatchObject({ mode: "delta", baseObservationId: baseline.observationId });
-    expect(delta.items.some((item: any) => item.change !== "removed" && item.line.includes("Visible after change"))).toBe(true);
+    expect(delta.items.some((item: any) => item.change !== "removed" && itemLine(item).includes("Visible after change"))).toBe(true);
     expect(stale).toMatchObject({ ok: false, error: { code: "stale-ref" } });
     expect(JSON.stringify(iconPage.items)).not.toContain("SECRET_ICON_LABEL");
-    expect(iconPage.items.some((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toBe(true);
+    expect(iconPage.items.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toBe(true);
     expect(iconClick).toMatchObject({ ok: true });
     expect(domClick).toMatchObject({ ok: true });
     expect(JSON.stringify(scoped.items)).toContain("Inside visible caption");

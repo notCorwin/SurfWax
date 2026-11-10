@@ -10,8 +10,11 @@ import { ToolScheduler } from "./tool-scheduler";
 import { PLACEHOLDER_EVIDENCE_SOURCE } from "./snapshot-placeholder";
 import { SNAPSHOT_CONTROL_PAINT_SOURCE } from "./snapshot-control-paint";
 import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
+import { formatSnapshotItem, type ProjectedSnapshotNode } from "./snapshot-render";
 
-const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
+const itemLine = (item: ProjectedSnapshotNode & { change?: string }) =>
+  item.role === undefined && item.change === "removed" ? "" : formatSnapshotItem(item);
+const inspectText = (value: any) => value.items.map((item: any) => itemLine(item)).join("\n");
 const deliver = (value: any) => { const lease = value[SNAPSHOT_DELIVERY_COMMIT]; expect(lease.begin()).toBe(true); lease.finish(); };
 
 it("invalidates frozen geometry when an element is reparented without moving its box", async () => {
@@ -483,11 +486,11 @@ describe("AutomationRuntime", () => {
       expect(reads).toBe(2);
       if (settles) {
         expect(observed.partial).toBeUndefined();
-        expect(observed.items.some((item: any) => item.ref && item.line.includes("checkbox") && item.line.includes("checked=false"))).toBe(true);
+        expect(observed.items.some((item: any) => item.ref && item.role === "checkbox" && item.state?.checked === false)).toBe(true);
       } else {
         expect(observed).toMatchObject({ partial: true, limitations: expect.stringContaining("dom-control-changed-during-capture") });
         expect(inspectText(observed)).toContain("Independent visible text");
-        expect(observed.items.every((item: any) => !item.ref && !item.line.includes("checked="))).toBe(true);
+        expect(observed.items.every((item: any) => !item.ref && item.state?.checked === undefined)).toBe(true);
       }
       expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-dom-snapshot:"))).toHaveLength(2);
     } finally { await runtime.abortSessions(); }
@@ -1703,7 +1706,7 @@ describe("AutomationRuntime", () => {
     expect(inspectText(result)).not.toContain("Recipient");
     expect(inspectText(result).split(value)).toHaveLength(2);
     expect(inspectText(result)).not.toContain("StaticText");
-    expect((result.items as any[]).find((item) => item.line.includes(role))?.ref).toBeTruthy();
+    expect((result.items as any[]).find((item) => item.role === role)?.ref).toBeTruthy();
     await runtime.abortSessions();
   });
 
@@ -1719,7 +1722,7 @@ describe("AutomationRuntime", () => {
     expect(inspectText(result)).not.toContain(value);
     expect(inspectText(result)).toContain("[value=unknown]");
     expect(inspectText(result)).not.toContain("StaticText");
-    expect((result.items as any[]).find((item) => item.line.includes("textbox"))?.ref).toBeTruthy();
+    expect((result.items as any[]).find((item) => item.role === "textbox")?.ref).toBeTruthy();
     await runtime.abortSessions();
   });
 
@@ -1752,7 +1755,7 @@ describe("AutomationRuntime", () => {
       return tree;
     });
     const result = await (await runtime.createPage(3)).inspect();
-    expect(inspectText(result)).toContain("StaticText [name=unknown] [value=unknown]");
+    expect(inspectText(result)).toContain('StaticText [name=unknown]: "" [value=unknown]');
     expect(inspectText(result)).not.toContain("independent");
     await runtime.abortSessions();
   });
@@ -1802,9 +1805,9 @@ describe("AutomationRuntime", () => {
       return original(source, method, params);
     });
     const page = await runtime.createPage(3), result = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
-    const textbox = result.items.find((item: any) => item.line.includes("textbox"));
+    const textbox = result.items.find((item: any) => item.role === "textbox");
     expect(textbox.ref).toBeTruthy();
-    if (visible) expect(textbox.line).toContain('textbox "Recipient"');
+    if (visible) expect(textbox).toMatchObject({ role: "textbox", name: "Recipient" });
     else expect(inspectText(result)).not.toContain("Recipient");
     await expect(page.ref(textbox.ref).count()).resolves.toBe(1);
     await runtime.abortSessions();
@@ -1840,8 +1843,8 @@ describe("AutomationRuntime", () => {
     const result = await (await runtime.createPage(3)).inspect({ fields: ["text", "state", "ref"] });
     expect(inspectText(result).split(value)).toHaveLength(2);
     expect(inspectText(result)).not.toContain("Recipient");
-    expect((result.items as any[]).find((item) => item.line.includes("textbox"))?.ref).toBeTruthy();
-    const unknownText = (result.items as any[]).filter((item) => item.line.includes("StaticText [name=unknown]"));
+    expect((result.items as any[]).find((item) => item.role === "textbox")?.ref).toBeTruthy();
+    const unknownText = (result.items as any[]).filter((item) => item.role === "StaticText" && item.nameUnknown);
     if (property || action || sibling || wrapperName) expect(unknownText.length).toBeGreaterThan(0);
     else expect(unknownText).toHaveLength(0);
     await runtime.abortSessions();
@@ -1878,13 +1881,13 @@ describe("AutomationRuntime", () => {
       if (!cursor) expect(next.truncation.baselineComplete).toBe(true);
     }
     expect(pages).toBeGreaterThan(2);
-    const reconstructed = items.map((item: any) => item.line).join("");
+    const reconstructed = items.map((item: any) => item.name ?? "").join("");
     expect(reconstructed).toContain(value);
-    expect(reconstructed).toContain("StaticText");
+    expect(items.some((item: any) => item.role === "StaticText")).toBe(true);
     // The independently painted text remains fully pageable. The long native
     // input has no full-paint proof in this fixture and must not be duplicated.
     expect(reconstructed.split(value)).toHaveLength(2);
-    expect(reconstructed).toContain("[value=unknown]");
+    expect(items.some((item: any) => item.valueUnknown)).toBe(true);
     await runtime.abortSessions();
   });
 
@@ -1969,7 +1972,7 @@ describe("AutomationRuntime", () => {
     expect(text).toContain('heading "Inside"');
     expect(text).toContain('button "Action"');
     expect(text.indexOf('heading "Inside"')).toBeLessThan(text.indexOf('button "Action"'));
-    expect((result.items as any[]).find((item) => item.line.includes('button "Action"'))?.ref).toBeTruthy();
+    expect((result.items as any[]).find((item) => item.role === "button" && item.name === "Action")?.ref).toBeTruthy();
     const paged: any = await page.inspect({ fields: ["text", "state", "ref"], budget: 240, limit: 1 }, page.locator("#region"));
     const parts = [...paged.items];
     let cursor = paged.nextCursor;
@@ -1978,8 +1981,8 @@ describe("AutomationRuntime", () => {
       parts.push(...next.items); cursor = next.nextCursor;
     }
     const reconstructed = new Map<string, string>();
-    for (const item of parts) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + item.line);
-    expect([...reconstructed.values()]).toEqual((result.items as any[]).map((item) => item.line));
+    for (const item of parts) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + (item.name ?? ""));
+    expect([...reconstructed.values()]).toEqual((result.items as any[]).map((item) => item.name ?? ""));
     expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "node-1")).toBe(true);
     await runtime.abortSessions();
   });
@@ -2008,7 +2011,7 @@ describe("AutomationRuntime", () => {
     const text = inspectText(result);
     expect(text.includes("PRIVATE_HINT")).toBe(visible);
     expect(text.includes("[placeholder=unknown]")).toBe(status === "unknown");
-    expect((result.items as any[]).find((item) => item.line.includes("textbox"))?.ref).toBeTruthy();
+    expect((result.items as any[]).find((item) => item.role === "textbox")?.ref).toBeTruthy();
     expect(reads()).toBe(2);
     expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-placeholder:"))).toHaveLength(2);
     await runtime.abortSessions();
@@ -2097,7 +2100,7 @@ describe("AutomationRuntime", () => {
     const { runtime } = placeholderSnapshot({ status: ["hidden"], dependency: true, transitive: true });
     const result = await (await runtime.createPage(3)).inspect();
     expect(inspectText(result)).not.toContain("PRIVATE_HINT");
-    expect((result.items as any[]).filter((item) => item.line.includes("button [name=unknown]"))).toHaveLength(2);
+    expect((result.items as any[]).filter((item) => item.role === "button" && item.nameUnknown)).toHaveLength(2);
     await runtime.abortSessions();
   });
 
@@ -2274,12 +2277,12 @@ describe("AutomationRuntime", () => {
     });
     const page = await runtime.createPage(3);
     const result = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
-    const button = result.items.find((item: any) => item.line.includes("- button "));
-    expect(button.line).toContain('button "Begin Original text end"');
-    expect(button.line).not.toContain("HIDDEN");
-    expect(button.line).not.toContain("Known alias");
-    expect(button.line).not.toContain("Unselected choice");
-    expect(button.line).not.toContain("Other");
+    const button = result.items.find((item: any) => item.role === "button");
+    expect(button).toMatchObject({ role: "button", name: "Begin Original text end" });
+    expect(button.name).not.toContain("HIDDEN");
+    expect(button.name).not.toContain("Known alias");
+    expect(button.name).not.toContain("Unselected choice");
+    expect(button.name).not.toContain("Other");
     expect((runtime as any).sessions.get(3).refs.get(button.ref).name).toBe(originalName);
     await runtime.abortSessions();
   });
@@ -2320,11 +2323,11 @@ describe("AutomationRuntime", () => {
     expect(inspectText(first)).not.toContain("[ref=");
     expect(first).not.toHaveProperty("screenshot");
     const referenced = await page.inspect({ fields: ["text", "state", "ref"] });
-    const ref = (referenced.items as any[]).find((item) => item.line.includes('button "Save"'))?.ref;
+    const ref = (referenced.items as any[]).find((item) => item.role === "button" && item.name === "Save")?.ref;
     expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
     metadata[0]!.name = "Continue"; metadata[0]!.text = "Continue";
     const second = await page.inspect({ since: first.observationId as string });
-    expect(second).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Continue") })] });
+    expect(second).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "updated", name: "Continue" })] });
     expect(second).not.toHaveProperty("snapshot");
     expect(calls.some((call) => call.method === "Page.captureScreenshot")).toBe(false);
     const other = await runtime.createPage(4);
@@ -2500,8 +2503,8 @@ describe("AutomationRuntime", () => {
     const { runtime } = harness(metadata);
     const page = await runtime.createPage(3);
     const baseline = await page.inspect() as any;
-    const first = baseline.items.find((item: any) => item.line.includes('button "First"'));
-    const second = baseline.items.find((item: any) => item.line.includes('button "Second"'));
+    const first = baseline.items.find((item: any) => item.role === "button" && item.name === "First");
+    const second = baseline.items.find((item: any) => item.role === "button" && item.name === "Second");
     metadata[1]!.name = "Second updated";
     metadata.push({ role: "button", name: "Third" });
     const one = await page.inspect({ since: baseline.observationId, limit: 1 }) as any;
@@ -2523,7 +2526,7 @@ describe("AutomationRuntime", () => {
     ] } : original(source, method, params));
     const page = await runtime.createPage(3);
     const baseline = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
-    const buttons = baseline.items.filter((item: any) => item.line.includes('button "Same"'));
+    const buttons = baseline.items.filter((item: any) => item.role === "button" && item.name === "Same");
     expect(buttons).toHaveLength(2);
     expect(buttons[0].id).not.toBe(buttons[1].id);
     expect(buttons[0].ref).toBe(buttons[1].ref);
@@ -2552,13 +2555,13 @@ describe("AutomationRuntime", () => {
     const { runtime } = harness([{ role: "button", name: "Save", tag: "button" }]);
     const page = await runtime.createPage(3);
     const first = await page.inspect() as any;
-    expect(first.items.find((item: any) => item.line.includes('button "Save"'))).not.toHaveProperty("ref");
+    expect(first.items.find((item: any) => item.role === "button" && item.name === "Save")).not.toHaveProperty("ref");
     expect(inspectText(first)).not.toContain("[actions=");
     const delta = await page.inspect({ since: first.observationId, fields: ["text", "state"] }) as any;
     expect(delta).toMatchObject({ mode: "delta", items: [] });
     await expect(page.inspect({ since: first.observationId, fields: ["text", "state", "ref"] })).rejects.toMatchObject({ code: "stale-observation" });
     const explicit = await page.inspect({ fields: ["text", "state", "ref", "actions"] }) as any;
-    expect(explicit.items.find((item: any) => item.line.includes('button "Save"'))).toMatchObject({ ref: expect.any(String) });
+    expect(explicit.items.find((item: any) => item.role === "button" && item.name === "Save")).toMatchObject({ ref: expect.any(String) });
     expect(inspectText(explicit)).toContain("[actions=click,double_click,hover]");
     await runtime.abortSessions();
   });
@@ -2581,7 +2584,7 @@ describe("AutomationRuntime", () => {
       expect(next.observationId).toBe(first.observationId);
       expect(next.truncation.used).toBeLessThanOrEqual(240);
       for (const item of next.items ?? []) if (item.fragment?.index === 1) {
-        rebuilt += item.line;
+        rebuilt += item.name ?? "";
         ownedRef = item.ref;
       }
       cursor = next.nextCursor;
@@ -2594,7 +2597,7 @@ describe("AutomationRuntime", () => {
     expect(ownedRef).toMatch(/^t3s[a-f0-9]+d0e1$/);
     expect(calls.filter(({ method }) => method === "Accessibility.getFullAXTree")).toHaveLength(1);
     const delta = await page.inspect({ fields: ["text", "state", "ref"], since: first.observationId as string }) as any;
-    expect(delta).toMatchObject({ mode: "delta", items: expect.arrayContaining([expect.objectContaining({ change: "updated", line: expect.stringContaining("Changed after the initial snapshot") })]) });
+    expect(delta).toMatchObject({ mode: "delta", items: expect.arrayContaining([expect.objectContaining({ change: "updated", name: "Changed after the initial snapshot" })]) });
     expect(delta.items.every((item: any) => item.change === "updated" || item.change === "removed")).toBe(true);
     await runtime.abortSessions();
   });
@@ -2611,7 +2614,7 @@ describe("AutomationRuntime", () => {
     for (;;) {
       expect(new TextEncoder().encode(JSON.stringify({ ...current, evidenceId: wire.evidenceId })).byteLength).toBeLessThanOrEqual(wire.maxBytes);
       expect(current.truncation.budget).toBeLessThanOrEqual(30_000);
-      for (const item of current.items) rebuilt.set(item.id, (rebuilt.get(item.id) ?? "") + item.line);
+      for (const item of current.items) rebuilt.set(item.id, (rebuilt.get(item.id) ?? "") + (item.name ?? ""));
       deliver(current);
       pages++;
       if (!current.nextCursor) break;
@@ -2621,7 +2624,7 @@ describe("AutomationRuntime", () => {
       expect(pages).toBeLessThan(100);
     }
     expect(pages).toBeGreaterThan(1);
-    expect([...rebuilt]).toEqual(expected.items.map((item: any) => [item.id, item.line]));
+    expect([...rebuilt]).toEqual(expected.items.map((item: any) => [item.id, item.name ?? ""]));
     expect(current.truncation.baselineComplete).toBe(true);
     expect(await page.inspect({ since: observationId })).toMatchObject({ mode: "delta", items: [] });
     await runtime.abortSessions();
@@ -2647,7 +2650,7 @@ describe("AutomationRuntime", () => {
     expect(retry).not.toHaveProperty("title");
     deliver(retry);
     const reconstructed = new Map<string, string>();
-    for (const item of first.items) reconstructed.set(item.id, item.line);
+    for (const item of first.items) reconstructed.set(item.id, item.name ?? "");
     let cursor = first.nextCursor, last: any, pages = 0;
     do {
       last = await page.inspect({ cursor, budget: 700, wire }) as any;
@@ -2655,7 +2658,7 @@ describe("AutomationRuntime", () => {
       expect(last).not.toHaveProperty("url");
       expect(last).not.toHaveProperty("title");
       expect(new TextEncoder().encode(JSON.stringify({ ...last, evidenceId: wire.evidenceId })).byteLength).toBeLessThanOrEqual(wire.maxBytes);
-      for (const item of last.items) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + item.line);
+      for (const item of last.items) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + (item.name ?? ""));
       deliver(last);
       cursor = last.nextCursor;
       expect(++pages).toBeLessThan(50);
@@ -2699,7 +2702,7 @@ describe("AutomationRuntime", () => {
     metadata[0]!.name = "Continue"; metadata[0]!.text = "Continue";
     const delta = await page.inspect(options) as any;
     expect(delta).toMatchObject({ mode: "delta", baseObservationId: first.observationId,
-      items: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Continue") })] });
+      items: [expect.objectContaining({ change: "updated", name: "Continue" })] });
     runtime.resetSnapshotBaselines();
     expect(delta[SNAPSHOT_DELIVERY_COMMIT].begin()).toBe(false);
     await expect(page.inspect({ ...options, since: first.observationId })).rejects.toMatchObject({ code: "stale-observation" });
@@ -2804,7 +2807,7 @@ describe("AutomationRuntime", () => {
       await expect(page.inspect({ cursor: referenced.nextCursor })).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "snapshot-geometry-changed" } });
       const delta = await page.inspect({ since: historical.observationId }) as any;
       expect(delta.mode).toBe("delta");
-      expect(delta.items.some((item: any) => item.change === "updated" && item.line.includes("Updated"))).toBe(true);
+      expect(delta.items.some((item: any) => item.change === "updated" && item.name === "Updated")).toBe(true);
     } finally { await runtime.abortSessions(); }
   });
 
@@ -2922,10 +2925,10 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     const first = await page.inspect({ fields: ["text", "state", "ref"], limit: 1 }) as any;
     const second = await page.inspect({ cursor: first.nextCursor, limit: 1 }) as any;
-    expect(second.items[0].line).toContain('button "Item 0"');
+    expect(second.items[0]).toMatchObject({ role: "button", name: "Item 0" });
     await expect(page.ref(second.items[0].ref).count()).resolves.toBe(1);
     const third = await page.inspect({ cursor: second.nextCursor, limit: 1 }) as any;
-    expect(third.items[0].line).toContain('button "Item 1"');
+    expect(third.items[0]).toMatchObject({ role: "button", name: "Item 1" });
     await expect(page.ref(third.items[0].ref).count()).resolves.toBe(1);
     await runtime.abortSessions();
   });
@@ -3780,18 +3783,18 @@ it("reads and pages a changing document without publishing action refs or a comp
     }
     expect(captures).toBe(capturesBeforePaging); expect(samples).toBe(1);
     expect(items.every((item: any) => !item.ref)).toBe(true);
-    const text = items.map((item: any) => item.line).join("\n");
+    const text = inspectText({ items });
     expect(text).toContain("Current visible text"); expect(text).toContain("Second visible text");
     await expect(page.point(first.observationId, 1, 1, "click")).rejects.toMatchObject({ code: "stale-observation" });
     const next = await page.inspect({ since: first.observationId });
     expect(next).toMatchObject({ mode: "full", partial: true, reset: "current-output-partial" });
     const shallow: any = await page.inspect({ depth: 0 });
     expect(shallow.partial).toBe(true);
-    expect(shallow.items.map((item: any) => item.line).join("\n")).not.toContain("Current visible text");
+    expect(inspectText(shallow)).not.toContain("Current visible text");
     const stateOnly: any = await page.inspect({ fields: ["state"] });
     expect(stateOnly.partial).toBe(true);
-    expect(stateOnly.items.map((item: any) => item.line).join("\n")).toContain("expanded=false");
-    expect(stateOnly.items.map((item: any) => item.line).join("\n")).not.toContain("Second visible text");
+    expect(inspectText(stateOnly)).toContain("expanded=false");
+    expect(inspectText(stateOnly)).not.toContain("Second visible text");
     getZoom.mockResolvedValueOnce(1).mockResolvedValueOnce(1.25);
     await expect(page.inspect()).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "page-zoom-changed-during-read" } });
     runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root", loaderId: "new" } });
@@ -3845,7 +3848,7 @@ it("returns a fresh root sample when repeated document changes exhaust capture r
     const page = await runtime.createPage(3);
     const result: any = await page.inspect();
     expect(result).toMatchObject({ partial: true, limitations: expect.stringContaining("frame-tree-unstable") });
-    expect(result.items.map((item: any) => item.line).join("\n")).toContain("Independent visible text");
+    expect(inspectText(result)).toContain("Independent visible text");
     expect(result.items.every((item: any) => !item.ref)).toBe(true);
   } finally { clearTimeout(timeout); await runtime.abortSessions(); }
 });
@@ -3876,7 +3879,7 @@ it("selects the extension's isolated world and rejects its destruction during se
   try {
     const page = await runtime.createPage(3);
     const first: any = await page.inspect();
-    expect(first.items.map((item: any) => item.line).join("\n")).toContain("Independent visible text");
+    expect(inspectText(first)).toContain("Independent visible text");
     expect(command.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" && params.contextId === 405)).toBe(false);
     const before = sampleObservation.mock.calls.length;
     destroy = true;
@@ -3891,7 +3894,7 @@ it("fails an empty read-only recovery without treating a strictly empty page as 
   const blank = await empty.runtime.createPage(3);
   try {
     const result: any = await blank.inspect();
-    expect(result.items.every((item: any) => !item.line.includes("Sign in"))).toBe(true);
+    expect(inspectText(result)).not.toContain("Sign in");
     expect(result.partial).not.toBe(true);
   } finally { await empty.runtime.abortSessions(); }
 
@@ -3965,7 +3968,7 @@ it.each(["inspect", "semantic", "auto", "snapshot"] as const)("hands a fresh %s 
       const page = await runtime.createPage(3);
       const result: any = consumer === "inspect" ? await page.inspect({ limit: 2 }) : consumer === "snapshot" ? await page.snapshot() : await page.observe(consumer);
       expect(result.partial, `${consumer}/${name}`).toBe(true);
-      const text = result.snapshot ?? result.items.map((item: any) => item.line).join("\n");
+      const text = result.snapshot ?? inspectText(result);
       expect(text).toContain("Independent visible text");
       enabled = false;
       if (result.observationId) {

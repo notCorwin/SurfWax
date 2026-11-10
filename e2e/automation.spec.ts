@@ -9,6 +9,7 @@ import { PROGRAM_CATALOG_VERSION } from "../src/chrome/tool";
 
 
 import { test, p95, textResponse, assistantResponse, commandResponse, delayedResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, nativePanel, submitNative, readNativeEvents, type MockResponse } from './fixtures';
+import { itemLine } from "./snapshot-format";
 
 test("selects large tool output without creating another reference", async () => {
   const responses: MockResponse[] = [];
@@ -1039,7 +1040,7 @@ test("rejects detached snapshot references after the page replaces a node", asyn
     commandResponse("inspect_page", {}, "original-ref"),
     (request) => {
       const message = request.messages.findLast((message: any) => message.role === "tool");
-      ref = JSON.parse(message.content).items.find((item: any) => item.line.includes('button "Sign in"')).ref;
+      ref = JSON.parse(message.content).items.find((item: any) => itemLine(item).includes('button "Sign in"')).ref;
       return commandResponse("click", { target: { by: "css", value: "#replace-signin" } }, "replace-ref");
     },
     () => commandResponse("click", { target: { ref }, timeoutMs: 1000 }, "detached-ref"),

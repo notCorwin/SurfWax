@@ -9,7 +9,7 @@ import { selectSnapshotWirePage, SnapshotWireError, SNAPSHOT_DELIVERY_COMMIT, ty
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
 import { snapshotBounds } from "./snapshot-layout";
 import { compactSnapshot } from "./snapshot-presentation";
-import { expandSnapshot, packSnapshot, renderSnapshotLine } from "./snapshot-repeat";
+import { expandSnapshot, packSnapshot, projectSnapshotLine } from "./snapshot-repeat";
 import { stitchSnapshotFrames, type SnapshotLine } from "./snapshot-frame-tree";
 import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
 import { normalizeSnapshotText } from "./snapshot-preformatted";
@@ -115,6 +115,8 @@ type ObservationRecord = {
   url: string;
   title: string;
   lines: SnapshotLine[];
+  /** Structured inspect projection used as a delta baseline. */
+  wireItems?: SnapshotItem[];
   viewport: { x: number; y: number; width: number; height: number; scale: number };
   image?: { width: number; height: number; scale: number; origin?: { x: number; y: number } };
   scopeKey?: string;
@@ -1184,7 +1186,7 @@ export class AutomationRuntime {
         // No-ref pages continue the same historical observation. Only exposed
         // action references require current geometry before another page is
         // delivered; document, frame and run ownership remain pinned above.
-        if (saved.record.lines.some(({ ref }) => Boolean(ref))) {
+        if (saved.source.some(({ ref }) => Boolean(ref))) {
           const currentGeometry = await Promise.all(saved.geometrySources.map(async (debuggee) => ({ debuggee,
             snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...saved.geometryStyles], includeDOMRects: true, includePaintOrder: true }) })));
           guard();
@@ -1231,15 +1233,14 @@ export class AutomationRuntime {
         const independent = fields.includes("ref") || fields.includes("actions");
         const sourceLines = independent || options.depth !== undefined ? expandSnapshot(captured.lines) : captured.lines;
         const filtered = sourceLines.filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth);
-        const lines: SnapshotLine[] = (options.depth !== undefined && !independent ? packSnapshot(filtered) : filtered)
+        const wireItems: SnapshotItem[] = (options.depth !== undefined && !independent ? packSnapshot(filtered) : filtered)
           .map((row) => {
-            const { id, line, node } = row;
-            if (!node) return { id, line };
+            const { node } = row;
+            if (!node) return projectSnapshotLine(row, { fields, actionNames: "program", inlineRef: false });
             const owned = fields.includes("ref") && node.ref ? `t${tabId}s${session.token}d${generation}${node.ref}` : undefined;
             const refRecord = node.ref ? session.refs.get(node.ref) : undefined;
             if (owned && refRecord) session.refs.set(owned, refRecord);
-            const rendered = renderSnapshotLine({ ...row, node: { ...node, ...(owned ? { ref: owned } : {}) } }, { fields, actionNames: "program", inlineRef: false });
-            return { id, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}) };
+            return projectSnapshotLine({ ...row, node: { ...node, ...(owned ? { ref: owned } : {}) } }, { fields, actionNames: "program", inlineRef: false });
           });
         const viewport = captured.viewport ?? await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
         guard();
@@ -1247,12 +1248,12 @@ export class AutomationRuntime {
         const observationId = crypto.randomUUID();
         const baseline = previous && previous.regionIdentity === captured.regionIdentity && previous.frameRevision === captured.frameRevision
           && this.deliveredBaselines.has(previous) && !previous.incomplete && !previous.partial && !captured.partial ? previous : undefined;
-        const changes = baseline ? diffSnapshot(baseline.lines, lines) : undefined;
-        const source = changes ?? lines;
+        const changes = baseline?.wireItems ? diffSnapshot(baseline.wireItems, wireItems) : undefined;
+        const source = changes ?? wireItems;
         const index = options.offset ?? 0;
         if (!Number.isSafeInteger(index) || index < 0 || index > source.length) throw automationError("invalid-offset", { offset: index, total: source.length });
         position = { index, charOffset: 0 };
-        const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, lines, viewport, scopeKey, incomplete: true };
+        const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, lines: captured.lines, wireItems, viewport, scopeKey, incomplete: true };
         this.rememberObservation(record);
         saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", ...(changes ? { baseObservationId: baseline!.observationId } : {}), geometry: captured.geometry, geometrySources: captured.geometrySources, geometryStyles: captured.geometryStyles, geometryDynamicParents: captured.geometryDynamicParents,
           ...(captured.partial && previous ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 && !captured.partial };

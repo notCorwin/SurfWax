@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -46,15 +47,15 @@ const visibleEditors: Record<string, { text: string; role: string; state?: strin
 function visibleOwner(snapshot: any, label: string): any {
   const spec = visibleEditors[label], items = snapshot?.items as any[] | undefined;
   if (!spec || !items) return undefined;
-  const matches = (item: any) => typeof item.ref === "string" && new RegExp(`^\\s*- ${spec.role}(?:\\s|$)`).test(item.line)
-    && (!spec.state || item.line.includes(spec.state));
+  const matches = (item: any) => typeof item.ref === "string" && new RegExp(`^\\s*- ${spec.role}(?:\\s|$)`).test(itemLine(item))
+    && (!spec.state || itemLine(item).includes(spec.state));
   for (let index = 0; index < items.length; index++) {
     const item = items[index]!;
-    if (!item.line.includes(JSON.stringify(spec.text)) && !item.line.endsWith(`: ${spec.text}`)) continue;
+    if (!itemLine(item).includes(JSON.stringify(spec.text)) && !itemLine(item).endsWith(`: ${spec.text}`)) continue;
     if (matches(item)) return item;
-    let depth = item.line.match(/^ */)![0].length;
+    let depth = itemLine(item).match(/^ */)![0].length;
     for (let parent = index - 1; parent >= 0; parent--) {
-      const candidate = items[parent]!, candidateDepth = candidate.line.match(/^ */)![0].length;
+      const candidate = items[parent]!, candidateDepth = itemLine(candidate).match(/^ */)![0].length;
       if (candidateDepth >= depth) continue;
       if (matches(candidate)) return candidate;
       depth = candidateDepth;
@@ -142,7 +143,7 @@ test("exposes editable hosts and preserves their usable refs across regions and 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("EDITABLE_TEST_DONE", { timeout: 90_000 });
 
     expect(initial).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
-    const line = (name: string) => visibleOwner(initial, name)?.line as string | undefined;
+    const line = (name: string) => itemLine(visibleOwner(initial, name)) || undefined;
     expect(line("Rich editor")).toContain("[editable=richtext]");
     expect(line("Plain editor")).toContain("[editable=plaintext]");
     expect(line("Outer editor")).toContain("[editable=richtext]");
@@ -166,9 +167,9 @@ test("exposes editable hosts and preserves their usable refs across regions and 
     expect(line("Native button")).not.toContain("[editable=");
     expect(line("Inherited child")).not.toContain("[editable=");
     for (const text of ["Fixed text", "fixed text", "Locked text"]) {
-      const staticText = initial.items.find((item: any) => item.line.includes(`- StaticText ${JSON.stringify(text)}`));
-      expect(staticText?.line, text).toEqual(expect.any(String));
-      expect(staticText.line).not.toContain("[editable=");
+      const staticText = initial.items.find((item: any) => itemLine(item).includes(`- StaticText ${JSON.stringify(text)}`));
+      expect(staticText, text).toEqual(expect.any(Object));
+      expect(itemLine(staticText)).not.toContain("[editable=");
     }
     expect(line("Native textbox")).toContain("textbox");
     for (const name of ["Read-only editor", "AX hidden read-only", "CSS read-only editor", "AX hidden CSS read-only"]) {
@@ -182,14 +183,14 @@ test("exposes editable hosts and preserves their usable refs across regions and 
     expect(line("CSS-only editor")).not.toContain("editable=");
     for (const name of ["Rich editor", "Plain editor", "Frame editor", "AX hidden editor", "AX hidden inherited", "Article editor", "Button editor", "Heading editor", "AX hidden role editor", "ARIA textbox editor", "ARIA search editor", "ARIA spin editor", "CSS plaintext editor", "CSS rich editor", "AX hidden CSS plaintext", "AX hidden CSS rich", "open slot editor", "closed slot editor"]) {
       const item = visibleOwner(withActions, name);
-      expect(item?.line).toContain("[actions=click,fill,press_key,type_text]");
+      expect(itemLine(item)).toContain("[actions=click,fill,press_key,type_text]");
     }
     for (const name of ["Read-only editor", "AX hidden read-only", "Disabled editor", "AX hidden disabled", "CSS-only editor", "CSS read-only editor", "AX hidden CSS read-only"]) {
       const item = visibleOwner(withActions, name);
-      expect(item?.line).not.toContain("fill");
-      expect(item?.line).not.toContain("type_text");
+      expect(itemLine(item)).not.toContain("fill");
+      expect(itemLine(item)).not.toContain("type_text");
     }
-    expect(visibleOwner(withActions, "Native button")?.line).not.toContain("type_text");
+    expect(itemLine(visibleOwner(withActions, "Native button"))).not.toContain("type_text");
     expect(region).toMatchObject({ mode: "full" });
     expect(JSON.stringify(region.items)).toContain("[editable=richtext]");
     expect(JSON.stringify(region.items)).not.toContain("Initial plain");
@@ -221,7 +222,7 @@ test("handles designMode documents without treating the document node as an elem
     await target.evaluate(() => { document.body.innerHTML = "<p>DESIGN_MODE_INITIAL</p>"; document.designMode = "on"; });
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "design-mode-inspect"), (request) => {
       snapshot = lastTool(request);
-      const editor = snapshot.items?.find((item: any) => item.line.includes("generic") && item.line.includes("[editable=richtext]") && item.ref);
+      const editor = snapshot.items?.find((item: any) => itemLine(item).includes("generic") && itemLine(item).includes("[editable=richtext]") && item.ref);
       if (!editor?.ref) return textResponse("DESIGN_MODE_DONE");
       responses.unshift((next) => { filled = lastTool(next); return textResponse("DESIGN_MODE_DONE"); });
       return commandResponse("fill", { target: { ref: editor.ref }, value: "DESIGN_MODE_UPDATED" }, "design-mode-fill");

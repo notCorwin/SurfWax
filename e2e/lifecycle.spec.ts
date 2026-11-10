@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, textResponse, assistantResponse, delayedResponse, commandResponse, startProvider, openExtension, dispose, configure, readEvents, attachTarget, nativePanel, openNativeSidePanel, submitNative, readNativeEvents, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function nativeAssistantText(panel: Awaited<ReturnType<typeof attachTarget>>) {
   return panel.evaluate<string>(`Array.from(document.querySelectorAll('[data-role="assistant"]'))
@@ -63,7 +64,7 @@ test("uses a large observation from the real side panel before acting on its ref
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const items = JSON.parse(message.content).result;
-        const ref = items.find((item: any) => item.line.includes('button "Run exact action"'))?.ref;
+        const ref = items.find((item: any) => itemLine(item).includes('button "Run exact action"'))?.ref;
         if (!ref) throw new Error("The selected snapshot did not contain the target ref");
         return commandResponse("click", { target: { ref } }, "call-act-from-ref");
       },

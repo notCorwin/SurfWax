@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { itemLine } from "./snapshot-format";
 
 function lastTool(request: any): any {
   const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
@@ -32,7 +33,7 @@ test("captures rendered content omitted by the accessibility tree and can act on
       commandResponse("inspect_page", { budget: 12000 }, "ignored-inspect"),
       (request) => {
         snapshot = lastTool(request);
-        const button = snapshot.items?.find((item: any) => item.line.includes('button "AX ignored visible button"'));
+        const button = snapshot.items?.find((item: any) => itemLine(item).includes('button "AX ignored visible button"'));
         if (typeof button?.ref !== "string") return textResponse("AX_IGNORED_DONE");
         responses.unshift((nextRequest) => { click = lastTool(nextRequest); return textResponse("AX_IGNORED_DONE"); });
         return commandResponse("click", { target: { ref: button.ref } }, "ignored-click");

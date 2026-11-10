@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
 import { SemanticPages } from "./evaluation/semantic-state";
+import { itemLine } from "./snapshot-format";
 
 /** Read the actual tool message delivered to the scripted model provider. */
 function toolResult(request: any, id: string): any {
@@ -84,10 +85,10 @@ test("delivers snapshot pages inline even when the requested budget is oversized
     const normal = pages.result();
     expect(pageCount).toBeGreaterThan(1);
     expect(largestPageBytes).toBeGreaterThan(8192);
-    expect(normal.items.some((item) => item.line.includes("PAGE_ROW_079_") && item.line.includes("_FINAL_ROW"))).toBe(true);
+    expect(normal.items.some((item) => itemLine(item).includes("PAGE_ROW_079_") && itemLine(item).includes("_FINAL_ROW"))).toBe(true);
     expect(oversizedPageCount).toBeGreaterThan(1);
     const oversized = oversizedPages.result();
-    expect(oversized.items.some((item) => item.line.includes("PAGE_ROW_079_") && item.line.includes("_FINAL_ROW"))).toBe(true);
+    expect(oversized.items.some((item) => itemLine(item).includes("PAGE_ROW_079_") && itemLine(item).includes("_FINAL_ROW"))).toBe(true);
     expect(oversized.items).toEqual(normal.items);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
