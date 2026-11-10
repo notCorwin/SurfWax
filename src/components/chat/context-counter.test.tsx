@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import { EventLogger, type LogEvent } from "@/logging";
-import { testEventStore } from "@/test-event-store";
+import { createMemoryEventStore } from "@/memory-event-store";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { activeContext, ensureAutomaticContextSummary } from "@/agent/context-choice";
 import { contextPressure } from "@/agent/compaction";
@@ -28,7 +28,7 @@ afterEach(async () => { await act(async () => root.unmount()); host.remove(); ru
 
 it("counts hidden refreshes, model supplements and goal reminders, then applies the canonical summary", async () => {
   const events: LogEvent[] = [];
-  const logger = new EventLogger({ store: testEventStore(events) });
+  const logger = new EventLogger({ store: createMemoryEventStore(events) });
   await logger.appendMessage("one", { id: "u", role: "user", parts: [{ type: "text", text: "Preserve the requested outcome" }] }, { parentId: null });
   await logger.appendMessage("one", { id: "r", role: "user", metadata: { custom: { pageRefresh: true } }, parts: [{ type: "text", text: "<page-refresh>" + "visible page content ".repeat(6000) }] }, { parentId: "u" });
   await logger.appendMessage("one", { id: "a", role: "assistant", parts: [{ type: "text", text: "Progress" }] }, { parentId: "r" });
@@ -63,7 +63,7 @@ it("counts hidden refreshes, model supplements and goal reminders, then applies 
 });
 
 it("invalidates the canonical estimate after another writer commits without a UI loading change", async () => {
-  const storage = testEventStore();
+  const storage = createMemoryEventStore();
   const logger = new EventLogger({ store: storage });
   const other = new EventLogger({ store: storage });
   await logger.appendMessage('remote', { id: 'u', role: 'user', parts: [{ type: 'text', text: 'start' }] });

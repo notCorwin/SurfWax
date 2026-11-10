@@ -3,7 +3,7 @@ import { applyModelPreset, contextUsedPercent, inputBudget, loadModelCatalog, ma
 import { modelConfigErrors, sdkFor } from "./model-sdks";
 import { metadata as bundledMetadata } from "../data/models-dev-api";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
-import { testEventStore } from "../test-event-store";
+import { createMemoryEventStore } from "../memory-event-store";
 import { modelDiagnosticContext } from "./diagnostics";
 
 const catalog = {
@@ -357,7 +357,7 @@ describe("models.dev limit matching", () => {
 describe("model catalog diagnostics", () => {
   it("links concurrent consumers to the same shared operation without duplicating its request", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     logger.beginRun("one", "run-one"); logger.beginRun("two", "run-two");
     const fetch = vi.fn(async () => { throw new Error("offline"); });
     vi.stubGlobal("fetch", fetch);

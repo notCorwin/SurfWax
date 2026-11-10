@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { testEventStore } from "./test-event-store";
+import { createMemoryEventStore } from "./memory-event-store";
 import { EventLogger, IndexedDbEventStore, fromLogValue, nextArtifactBucket, rebuildConversation, stringifyLogSafe, toLogValue, upgradeEventStore, rebuildConversationRepository, type LogEvent } from "./logging";
 
 function memoryStore(onBatch?: (size: number) => void) {
@@ -1112,7 +1112,7 @@ it("loads model timing only for display restoration", async () => {
 describe("canonical message changes and commit cursors", () => {
   it("stores only changed parts and reconstructs the same message for every reader", async () => {
     const events: LogEvent[] = [];
-    const store = testEventStore(events);
+    const store = createMemoryEventStore(events);
     const logger = new EventLogger({ store });
     const observed: unknown[] = [];
     logger.subscribe((event) => { if (event.type === "conversation.message") observed.push(fromLogValue(event.content, event.valueEncoding)); });
@@ -1135,7 +1135,7 @@ describe("canonical message changes and commit cursors", () => {
 
   it("detects in-place message changes without retaining mutable caller objects", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const part = { type: "text", text: "before" };
     await logger.appendMessage("c", { id: "a", role: "assistant", parts: [part] });
     part.text = "after";
@@ -1147,7 +1147,7 @@ describe("canonical message changes and commit cursors", () => {
 
   it("starts a new full message after another writer clears the log", async () => {
     const events: LogEvent[] = [];
-    const store = testEventStore(events);
+    const store = createMemoryEventStore(events);
     const logger = new EventLogger({ store }), other = new EventLogger({ store });
     await logger.appendMessage("c", { id: "a", role: "assistant", parts: [{ type: "text", text: "old" }] });
     await other.clear();
@@ -1158,7 +1158,7 @@ describe("canonical message changes and commit cursors", () => {
   });
 
   it("notifies other writers with IDs only and supports incremental summary replay and disposal", async () => {
-    const store = testEventStore();
+    const store = createMemoryEventStore();
     const logger = new EventLogger({ store }), other = new EventLogger({ store });
     const updates: unknown[] = [];
     other.subscribeCommits((commit) => updates.push(commit));
@@ -1187,7 +1187,7 @@ describe("canonical message changes and commit cursors", () => {
         close() { endpoint.closed = true; endpoints.delete(endpoint); },
       };
     };
-    const shared = testEventStore();
+    const shared = createMemoryEventStore();
     const logger = new EventLogger({ store: { ...shared }, channelFactory: factory });
     const other = new EventLogger({ store: { ...shared }, channelFactory: factory });
     const updates: unknown[] = [];
@@ -1201,7 +1201,7 @@ describe("canonical message changes and commit cursors", () => {
   });
 
   it("queries each terminal identity without reading all prior run results", async () => {
-    const base = testEventStore();
+    const base = createMemoryEventStore();
     const terminalEvents = vi.fn(base.terminalEvents);
     const all = vi.fn(base.all);
     const logger = new EventLogger({ store: { ...base, terminalEvents, all, latestByType: async (type: string) => (await base.all()).filter((event) => event.type === type).at(-1) } });
@@ -1244,7 +1244,7 @@ it.each(["full", "sparse"])("decodes only the latest cumulative payload during %
 
 it("reuses an already materialized message revision across projection reads", async () => {
   const events: LogEvent[] = [];
-  const store = testEventStore(events);
+  const store = createMemoryEventStore(events);
   const writer = new EventLogger({ store });
   await writer.appendMessage("c", { id: "a", role: "assistant", parts: [{ type: "text", text: "before" }] });
   await writer.appendMessage("c", { id: "a", role: "assistant", parts: [{ type: "text", text: "after" }] });

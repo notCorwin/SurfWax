@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EventLogger, toLogValue, type LogEvent } from "../logging";
-import { testEventStore } from "../test-event-store";
+import { createMemoryEventStore } from "../memory-event-store";
 import { completedProgramOperations, toolLifecycleEvidence } from "../../e2e/evaluation/tool-lifecycle";
 
 const event = (type: string, toolCallId: string, runId = "run", conversationId = "conversation") => ({ type, toolCallId, runId, conversationId });
@@ -13,7 +13,7 @@ const message = (id: number, parts: unknown[], runId = "run", conversationId = "
 describe("evaluation tool lifecycle evidence", () => {
   it("uses canonical sparse message changes without losing earlier declarations", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const first = tool("one"), second = tool("two");
     await logger.appendMessage("conversation", { id: "assistant", role: "assistant", parts: [first, second] }, { runId: "run" });
     await logger.append({ type: "tool.started", conversationId: "conversation", runId: "run", toolCallId: "one" });

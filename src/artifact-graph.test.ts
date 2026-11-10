@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { partitionArtifact, readPartitionedArtifact, type ArtifactPart } from "./artifact-graph";
 import { decodeLogGraph, encodeLogGraph } from "./log-graph";
 import { EventLogger, type LogEvent } from "./logging";
-import { testEventStore } from "./test-event-store";
+import { createMemoryEventStore } from "./memory-event-store";
 
 function fixture(value: unknown) {
   const { graph, parts } = partitionArtifact(value);
@@ -26,7 +26,7 @@ describe("partitioned artifact graphs", () => {
     const bytes = Uint8Array.from([1, 2, 3, 4]);
     const data = { array: [1, 2, 3, 4], text: "abcd", map: new Map([[1, "a"], [2, "b"], [3, "c"]]),
       set: new Set([1, 2, 3]), buffer: bytes.buffer, view: new Uint8Array(bytes.buffer), dataView: new DataView(bytes.buffer) };
-    const store = testEventStore();
+    const store = createMemoryEventStore();
     const logger = new EventLogger({ store });
     const ordinary = await logger.append({ type: "tool.result.data", conversationId: "c", output: data });
     const partitioned = await logger.append({ type: "tool.result.data", conversationId: "c", output: { ...data, padding: "x".repeat(300_000) } });

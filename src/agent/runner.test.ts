@@ -8,7 +8,7 @@ import { ContextCompactor, estimatePromptInput, summarizeContext } from "./compa
 import { createPromptSnapshot, PROMPT_TOOLS } from "./prompt";
 import { createAgent, DEFAULT_INSTRUCTIONS } from "./runner";
 import type { ModelConfig } from "../types";
-import { testEventStore } from "../test-event-store";
+import { createMemoryEventStore } from "../memory-event-store";
 
 const usage = { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } };
 const text = (text = "done") => ({ content: [{ type: "text" as const, text }], finishReason: { unified: "stop" as const, raw: "stop" }, usage, warnings: [] });
@@ -198,7 +198,7 @@ describe("createAgent", () => {
 
   it("compacts newly appended browser state after restoring a committed checkpoint before sending it", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     logger.beginRun("conversation", "run");
     const modelConfig = { ...config, contextWindowOverride: 100_000 };
     const branchIds = ["u", "a"];

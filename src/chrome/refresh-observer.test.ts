@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventLogger, type ConversationMessage } from "../logging";
-import { testEventStore } from "../test-event-store";
+import { createMemoryEventStore } from "../memory-event-store";
 import { observePageRefreshes } from "./refresh-observer";
 import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
 import { ChromeExecutor } from "./executor";
@@ -12,7 +12,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function harness(inspect = vi.fn<() => Promise<unknown>>(async () => ({ snapshot: "loaded page" })), logger = new EventLogger({ store: testEventStore() })) {
+function harness(inspect = vi.fn<() => Promise<unknown>>(async () => ({ snapshot: "loaded page" })), logger = new EventLogger({ store: createMemoryEventStore() })) {
   let updated: ((tabId: number, change: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => void) | undefined;
   let removed: ((tabId: number, info: chrome.tabs.OnRemovedInfo) => void) | undefined;
   const onUpdated = {
@@ -206,7 +206,7 @@ describe("observePageRefreshes", () => {
   });
 
   it("does not deliver a snapshot if its complete metadata could not be stored", async () => {
-    const logger = new EventLogger({ store: testEventStore() });
+    const logger = new EventLogger({ store: createMemoryEventStore() });
     vi.spyOn(logger, "append").mockResolvedValueOnce(undefined);
     const lease = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
     const page = { tabId: 1, title: "海".repeat(2000), items: [{ id: "x", line: "secret-free page" }] };

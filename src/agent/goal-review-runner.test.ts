@@ -63,11 +63,11 @@ it("reviews an answer delivered alongside completion without requiring a summary
 it("returns a canonical timeout result when independent completion review never returns", async () => {
   const { vi } = await import("vitest");
   const { GOAL_TOOL_TIMEOUT_MS } = await import("./runner");
-  const { testEventStore } = await import("../test-event-store");
+  const { createMemoryEventStore } = await import("../memory-event-store");
   vi.useFakeTimers();
   try {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     let reviewSignal: AbortSignal | undefined;
     let actions = 0;
     const model = new MockLanguageModelV4({ doGenerate: async ({ prompt, abortSignal }) => {

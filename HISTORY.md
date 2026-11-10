@@ -398,7 +398,9 @@ CDP `Extensions.loadUnpacked` 重新加载扩展不能当成持久安装后的�
 
 独立运行使用会话内存中的追加事件日志维护运行身份、工具结果和产物引用，不承诺跨进程恢复。依赖扩展原生 API 的能力明确返回 `extension-required`，由扩展测试验证；独立测试通过不等于扩展生命周期、持久恢复或真实模型任务能力已经验收。
 
-来源：`src/standalone/runtime.ts`、`src/standalone/chrome-adapter.ts`、`src/chrome/program-host.ts`、`src/chrome/program-worker.ts`、`scripts/tools.mjs`、`src/standalone/runtime.test.ts`。
+2026-11-11 将已有内存事件存储提升为独立入口与测试共用的 `createMemoryEventStore`。内存存储必须支持生产日志契约中的批量追加、分块产物写入与范围读取，以及产物和作业终态的原子关联；不能只实现 `append` / `all`，让小结果通过而在较大截图越过分块阈值时失败。真实 Chrome 回归明确制造超过阈值的图像，确认产物进入分块路径、工具可读取其图像数据，且作业终态仍引用同一产物。
+
+来源：`src/standalone/runtime.ts`、`src/standalone/chrome-adapter.ts`、`src/chrome/program-host.ts`、`src/chrome/program-worker.ts`、`scripts/tools.mjs`、`src/standalone/runtime.test.ts`、`src/memory-event-store.ts`。
 
 ### 动态页面的独立只读采样保持 Shadow DOM 证据完整
 

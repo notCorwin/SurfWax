@@ -399,9 +399,9 @@ it("never reuses missing or mismatched response timing in live updates or restor
 
 
 it("rejects a competing submission before any durable conversation change", async () => {
-  const { testEventStore } = await import("../test-event-store");
+  const { createMemoryEventStore } = await import("../memory-event-store");
   const events: LogEvent[] = [];
-  const logger = new EventLogger({ store: testEventStore(events) });
+  const logger = new EventLogger({ store: createMemoryEventStore(events) });
   const transport = vi.fn();
   const runtime = new ConversationStore(logger, transport);
   const owner = await claimConversationRun("other");
@@ -415,9 +415,9 @@ it("rejects a competing submission before any durable conversation change", asyn
 });
 
 it("replays another writer's new head under the lease before appending", async () => {
-  const { testEventStore } = await import("../test-event-store");
+  const { createMemoryEventStore } = await import("../memory-event-store");
   const events: LogEvent[] = [];
-  const storage = testEventStore(events);
+  const storage = createMemoryEventStore(events);
   const logger = new EventLogger({ store: storage });
   const other = new EventLogger({ store: storage });
   await logger.append({ type: "conversation.created", conversationId: "shared", content: { title: "Shared" } });
@@ -439,9 +439,9 @@ it("replays another writer's new head under the lease before appending", async (
 });
 
 it("retains the draft and rejects a deleted session before any new write even without commit delivery", async () => {
-  const { testEventStore } = await import("../test-event-store");
+  const { createMemoryEventStore } = await import("../memory-event-store");
   const events: LogEvent[] = [];
-  const storage = testEventStore(events);
+  const storage = createMemoryEventStore(events);
   const logger = new EventLogger({ store: storage });
   const other = new EventLogger({ store: storage });
   await logger.append({ type: "conversation.created", conversationId: "deleted", content: { title: "Deleted" } });
@@ -462,8 +462,8 @@ it("retains the draft and rejects a deleted session before any new write even wi
 });
 
 it("does not lose a commit arriving between list drain completion and promise cleanup", async () => {
-  const { testEventStore } = await import("../test-event-store");
-  const logger = new EventLogger({ store: testEventStore() });
+  const { createMemoryEventStore } = await import("../memory-event-store");
+  const logger = new EventLogger({ store: createMemoryEventStore() });
   let committed: Parameters<Parameters<EventLogger['subscribeCommits']>[0]>[0] | undefined;
   let notify!: Parameters<EventLogger['subscribeCommits']>[0];
   vi.spyOn(logger, 'subscribeCommits').mockImplementation(listener => { notify = listener; return () => {}; });

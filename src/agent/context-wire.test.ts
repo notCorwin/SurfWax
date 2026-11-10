@@ -2,7 +2,7 @@ import { expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import type { LanguageModelV4CallOptions } from "@ai-sdk/provider";
 import { EventLogger, type LogEvent } from "../logging";
-import { testEventStore } from "../test-event-store";
+import { createMemoryEventStore } from "../memory-event-store";
 import type { ChromeExecutor } from "../chrome/executor";
 import { createAgent } from "./runner";
 import { createChatTransport, type SidePanelMessage } from "./transport";
@@ -13,7 +13,7 @@ const config = { baseURL: "https://test/v1", model: "test", imageInput: "enabled
 
 it.each(["inline", "artifact"])("retains exact model input prefixes and %s images across user turns and restoration", async (kind) => {
   const events: LogEvent[] = [];
-  const logger = new EventLogger({ store: testEventStore(events) });
+  const logger = new EventLogger({ store: createMemoryEventStore(events) });
   const image = await logger.append({ type: "tool.result.data", conversationId: "one", output: { nested: { screenshot: { data: "aGVsbG8=", mediaType: "image/png" } } } });
   const screenshot = kind === "inline" ? { data: "aGVsbG8=", mediaType: "image/png" }
     : { artifactId: image!.id, artifactPath: ["nested", "screenshot"], mediaType: "image/png" };

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
-import { testEventStore } from "../test-event-store";
+import { createMemoryEventStore } from "../memory-event-store";
 import { parseLocatorTarget, ChromeExecutor } from "./executor";
 import { compactToolResult, createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY, PROGRAM_TOOL_CONTEXT } from "./tool";
 import { callUserScript } from "./script-client";
@@ -23,7 +23,7 @@ describe("browser tools", () => {
   it("bounds direct tools by default and records one terminal result even after a late reply", async () => {
     vi.useFakeTimers();
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     let reply!: (value: unknown) => void;
     const listTabs = vi.fn(() => new Promise((resolve) => { reply = resolve; }));
     const tools = createProgramTools({ listTabs } as unknown as ChromeExecutor, { logger, conversationId: "c" }) as Record<string, any>;
@@ -41,7 +41,7 @@ describe("browser tools", () => {
   it("times out a scheduled call before dispatch instead of borrowing the preceding call's lifetime", async () => {
     vi.useFakeTimers();
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     let reply!: (value: unknown) => void;
     const listTabs = vi.fn(() => new Promise((resolve) => { reply = resolve; }));
     const inspect = vi.fn(async (_input: unknown) => mockSnapshot(1));
@@ -64,7 +64,7 @@ describe("browser tools", () => {
   });
   it("keeps the original exception chain in the tool failure event", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const cause = new Error("debugger detached");
     const error = new Error("command failed", { cause });
     const executor = { runProgram: async () => { throw error; } } as unknown as ChromeExecutor;
@@ -77,7 +77,7 @@ describe("browser tools", () => {
 
   it("does not persist credentials from a failed browser command", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const cause = new Error("request https://example.test/path?token=secret123 failed");
     const executor = { runProgram: async () => { throw new Error("Authorization: Bearer secret456", { cause }); } } as unknown as ChromeExecutor;
     const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
@@ -89,7 +89,7 @@ describe("browser tools", () => {
   });
   it("persists and delivers directly readable snapshot lines after acquiring its snapshot lease", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const delivery = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
     const page = mockSnapshot(4, Array(12).fill("  - StaticText [name=unknown]"), undefined, delivery);
     const executor = { inspect: vi.fn(async () => page) } as unknown as ChromeExecutor;
@@ -115,7 +115,7 @@ describe("browser tools", () => {
 
   it("returns a budgeted inspection page inline with its continuation and fragments intact", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const items = [{ id: "node-1", depth: 0, role: "button", name: "海".repeat(3100), fragment: { index: 0, field: "name", start: 0, end: 3100, total: 4000 } }];
     const page = { observationId: "obs", tabId: 4, documentId: 1, url: "https://example.test/", title: "Page",
       viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items, nextCursor: "obs:0:3100",
@@ -158,7 +158,7 @@ describe("browser tools", () => {
         budget: 12000, used: 31, baselineComplete: true } };
     Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: delivery });
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const executor = { inspect: vi.fn(async () => page) } as unknown as ChromeExecutor;
     const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
     const result = await tools.inspect_page.execute({}, { toolCallId: "inspect" });
@@ -223,7 +223,7 @@ describe("browser tools", () => {
   });
 
   it("keeps a successful screenshot artifact when the automatic semantic snapshot fails", async () => {
-    const events: LogEvent[] = [], logger = new EventLogger({ store: testEventStore(events) });
+    const events: LogEvent[] = [], logger = new EventLogger({ store: createMemoryEventStore(events) });
     const image = { observationId: "pixels", screenshot: { mediaType: "image/png", artifactId: 7, width: 100, height: 50, scale: 1 }, artifact: { id: 7, mimeType: "image/png" } };
     const executor = { runProgram: vi.fn(async () => ({ ok: true, result: image })),
       inspect: vi.fn(async () => { throw new Error('AutomationError[snapshot-unavailable]: {"reason":"dom-unstable"}'); }),
@@ -239,7 +239,7 @@ describe("browser tools", () => {
     const delivery = { begin: vi.fn(() => false), finish: vi.fn(), cancel: vi.fn() };
     const page = mockSnapshot(4, ["- button Save"], "next", delivery);
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const executor = { runProgram: vi.fn(async () => ({ ok: true, result: "saved" })), inspect: vi.fn(async () => page), pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
     const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
     const result = await tools.click.execute({ target: { id: "one" }, tabId: 4 }, { toolCallId: "click" });
@@ -309,7 +309,7 @@ describe("browser tools", () => {
   });
   it.each(["screenshot", "pdf", "save"])("retains a %s artifact when the abort race settles before its underlying work", async (operation) => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const metadata = { filename: operation === "screenshot" ? "screen.png" : "page.pdf", mimeType: operation === "screenshot" ? "image/png" : "application/pdf", byteLength: 1 };
     const stored = operation === "save" ? await logger.append({ type: "tool.result.data", conversationId: "conversation", runId: "previous-run", content: metadata,
       output: { ...metadata, base64: "eA==" } }) : undefined;
@@ -375,7 +375,7 @@ describe("browser tools", () => {
   });
   it("reads a conversation-owned artifact while browser work is blocked", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const artifact = await logger.append({ type: "tool.result.data", conversationId: "c", output: { text: "partial result" } });
     const foreign = await logger.append({ type: "tool.result.data", conversationId: "other", output: { text: "secret" } });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
@@ -391,7 +391,7 @@ describe("browser tools", () => {
 
   it("reports absent artifact paths and preserves the distinction between undefined, null and objects", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const artifact = await logger.append({ type: "tool.result.data", conversationId: "c", output: {
       rows: ["first", null, undefined], object: { result: null, resultType: "undefined" }, literal: { $type: "undefined", value: null },
     } });
@@ -410,7 +410,7 @@ describe("browser tools", () => {
 
   it("sends nested undefined and sparse array holes as paths relative to the returned slice", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const rows = ["a", undefined, , null, { undefinedPaths: undefined, holePaths: [undefined, null] }];
     const artifact = await logger.append({ type: "tool.result.data", conversationId: "c", output: { rows } });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
@@ -467,7 +467,7 @@ describe("browser tools", () => {
 
   it("retains native values and paged type paths after compaction", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: { date: new Date("2020-01-01Z"), bytes: new Uint8Array([1, 2]), large: "x".repeat(10000) } });
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
@@ -483,7 +483,7 @@ describe("browser tools", () => {
 
   it("offers directly usable pages for large native collections and binary views", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     const run = vi.spyOn(executor, "runProgram");
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
@@ -509,7 +509,7 @@ describe("browser tools", () => {
 
   it("retains original native values and paged type sidecars after compaction", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     const value = { nan: NaN, big: 123n, zero: -0, literal: { $type: "bigint", value: "123" }, large: "x".repeat(10000) };
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: value });
@@ -527,7 +527,7 @@ describe("browser tools", () => {
 
   it("wraps conflicting outer metadata without losing job data or its identity", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const job = { id: "job", state: "succeeded", terminal: true, ok: true, result: { value: undefined }, undefinedPaths: ["user data"], resultType: "user type" };
     const tools = createProgramTools({ queryJobs: vi.fn(async () => job), acknowledgeBackgroundJob: vi.fn() } as unknown as ChromeExecutor, { logger, conversationId: "c" }) as Record<string, any>;
     const output = await tools.get_job.execute({ jobId: "job" }, { toolCallId: "job-call" });
@@ -550,7 +550,7 @@ describe("browser tools", () => {
 
   it("keeps wrapped job event pagination accessible after compaction", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const job = { id: "job", state: "running", terminal: false, nextCursor: 42, hasMore: true,
       events: [{ cursor: 42, output: { value: undefined, text: "x".repeat(10000) } }] };
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
@@ -568,7 +568,7 @@ describe("browser tools", () => {
 
   it("keeps the conflicting outer envelope and sidecar accessible after failure compaction", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const failed = { ok: false, state: "failed", error: { code: "timeout", message: "interrupted", effectUnknown: true },
       result: { before: undefined, large: "x".repeat(10000) }, undefinedPaths: ["user data"] };
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
@@ -586,7 +586,7 @@ describe("browser tools", () => {
 
   it("preserves failed verification metadata when an envelope conflict is compacted", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: { verified: false, present: true, large: "x".repeat(10000) }, undefinedPaths: ["ordinary"] });
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
@@ -597,7 +597,7 @@ describe("browser tools", () => {
 
   it("preserves screenshots when an envelope conflicts with sidecar names", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true,
       result: { screenshot: { artifactId: 7, mediaType: "image/png" }, optional: undefined, large: "y".repeat(10000) },
@@ -614,7 +614,7 @@ describe("browser tools", () => {
     const failure = { ok: false, state: "failed", error: { code: "timeout", message: "interrupted", effectUnknown: true }, result: { before: undefined, large: "x".repeat(10000) } };
     const visual = { ok: true, result: { screenshot: { artifactId: 7, mediaType: "image/png" }, optional: undefined, large: "y".repeat(10000) } };
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValueOnce(failure).mockResolvedValueOnce(visual);
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
@@ -635,7 +635,7 @@ describe("browser tools", () => {
     const rows = new Array(3000); for (let index = 1; index < rows.length; index += 2) rows[index] = undefined;
     rows[0] = 123n; rows[2] = NaN;
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: rows });
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
@@ -651,7 +651,7 @@ describe("browser tools", () => {
 
   it("stores large sparse values before creating sidecars and normalizes only the requested slice", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const rows = new Array(100_000);
     for (let i = 1; i < rows.length; i += 2) rows[i] = undefined;
     rows[2] = NaN; rows[4] = 123n; rows[6] = null;
@@ -673,7 +673,7 @@ describe("browser tools", () => {
 
   it.each([3, 20_000])("provides readable collection paths when compacting %i nested items", async (count) => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     const items = Array.from({ length: count }, (_, index) => ({ text: count === 3 ? "x".repeat(4000) : `row ${index}` }));
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: { total: count, items } });
@@ -693,7 +693,7 @@ describe("browser tools", () => {
 
   it("retains background job identity when its result exceeds the normalization budget", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const acknowledge = vi.fn();
     const job = { id: "job", state: "succeeded", terminal: true, ok: true, result: new Array(100_000) };
     const tools = createProgramTools({ queryJobs: vi.fn(async () => job), acknowledgeBackgroundJob: acknowledge } as unknown as ChromeExecutor, { logger, conversationId: "c" }) as Record<string, any>;
@@ -704,7 +704,7 @@ describe("browser tools", () => {
 
   it("reads an unbounded suffix of a huge sparse result without losing holes or undefined", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const rows = new Array(1_000_000_000);
     rows[3] = undefined; rows[8] = NaN; rows[999_999_999] = 123n;
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
@@ -746,7 +746,7 @@ describe("browser tools", () => {
 
   it("retains paginated sidecar access when a large artifact read is compacted", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const values = new Array(3000); for (let index = 1; index < values.length; index += 2) values[index] = undefined;
     const artifact = await logger.append({ type: "tool.result.data", conversationId: "c", output: { values } });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
@@ -974,7 +974,7 @@ describe("browser tools", () => {
     });
   });
   it.each([20, 10000])("preserves result data that collides with canonical evidence metadata (%i bytes)", async (length) => {
-    const logger = new EventLogger({ store: testEventStore() });
+    const logger = new EventLogger({ store: createMemoryEventStore() });
     logger.beginRun("thread", "run");
     logger.setRunPhase("run", 2);
     const source = { evidenceId: "page-data", text: "x".repeat(length) };
@@ -1085,7 +1085,7 @@ describe("browser tools", () => {
 
   it("bounds page-controlled visual and error metadata while retaining the original paths", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const huge = "x".repeat(120_000);
     const visual = { ok: true, result: { screenshot: { artifactId: 2, mediaType: "image/png", origin: { x: 2, y: 3, extra: huge } },
       observationId: "obs", tabId: 4, viewport: { width: 100, height: 50, extra: huge }, page: { url: huge, title: huge, extra: huge }, artifact: { id: 2, filename: huge, mimeType: "image/png", extra: huge } } };
@@ -1172,7 +1172,7 @@ describe("browser tools", () => {
 
   it("fails explicitly instead of hiding an oversized inspection page in an artifact", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: testEventStore(events) });
+    const logger = new EventLogger({ store: createMemoryEventStore(events) });
     const lookahead = { nonAuthoritative: true, items: [{ index: 2, id: "later", depth: 0, role: "button", name: "Later" }] };
     const items = [{ id: "first", depth: 0, role: "button", name: "x".repeat(600), fragment: { index: 0, field: "name", start: 0, end: 600, total: 1000 } }];
     const withLookahead = new TextEncoder().encode(JSON.stringify({ items, lookahead })).byteLength;
@@ -1321,7 +1321,7 @@ it("bounds a hung canonical terminal rather than leaving a tool pending forever"
 });
 
 it.each([false, true])("delivers partial read-only limitations through the tool protocol (continuation=%s)", async (continuation) => {
-  const events: LogEvent[] = [], logger = new EventLogger({ store: testEventStore(events) });
+  const events: LogEvent[] = [], logger = new EventLogger({ store: createMemoryEventStore(events) });
   const delivery = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
   const page: any = mockSnapshot(1, ['- text "Visible"'], undefined, delivery);
   page.partial = true; page.limitations = "Read-only root viewport; uncertain paint and refs omitted";

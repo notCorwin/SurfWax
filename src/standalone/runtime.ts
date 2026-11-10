@@ -1,6 +1,7 @@
 import { ChromeExecutor } from "../chrome/executor";
 import { createProgramTools, PROGRAM_TOOL_CONTEXT, PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import { EventLogger, type LogEvent } from "../logging";
+import { createMemoryEventStore } from "../memory-event-store";
 import { CdpConnection } from "./cdp";
 import { createChromeAdapter, OBSERVATION_WORLD } from "./chrome-adapter";
 import { executeNodeProgram } from "./program-host";
@@ -12,10 +13,7 @@ export async function connectToolRuntime(endpoint: string) {
   const cdp = await CdpConnection.connect(endpoint);
   const controller = new AbortController();
   const events: LogEvent[] = [];
-  const logger = new EventLogger({ store: {
-    async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
-    async all() { return [...events]; }, async clear() { events.length = 0; },
-  } });
+  const logger = new EventLogger({ store: createMemoryEventStore(events) });
   let executor: ChromeExecutor | undefined;
   try {
     const chromeApi = await createChromeAdapter(cdp);

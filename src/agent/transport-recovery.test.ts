@@ -8,7 +8,7 @@ import { PROGRAM_CATALOG_VERSION } from "../chrome/tool";
 import { restoreConversationRepository } from "../conversations";
 import { browserJobsSettled } from "../../e2e/evaluation/job-evidence";
 import { toolLifecycleEvidence } from "../../e2e/evaluation/tool-lifecycle";
-import { testEventStore } from "../test-event-store";
+import { createMemoryEventStore } from "../memory-event-store";
 import { canAutoDispatchFollowup, rebuildFollowups } from "./followups";
 
 vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({ runId: crypto.randomUUID(), conversationId: _id, signal: signal ?? new AbortController().signal, finish: vi.fn() }) }));
@@ -49,7 +49,7 @@ describe("complete-response transport", () => {
     report.mockRestore();
   });
   it("leaves a follow-up queued when its atomic submission fails, then dispatches it once on retry", async () => {
-    const store = testEventStore();
+    const store = createMemoryEventStore();
     const batch = store.appendMany.bind(store);
     let rejectSubmission = true;
     const guardedStore = { ...store, async appendMany(events: readonly Omit<LogEvent, "id">[]) {
@@ -83,7 +83,7 @@ describe("complete-response transport", () => {
   });
 
   it("recovers an interrupted run after the follow-up transaction without redispatching the message", async () => {
-    const store = testEventStore();
+    const store = createMemoryEventStore();
     const log = new EventLogger({ store });
     const queued = { id: "followup", text: "Next step", createdAt: "2026-01-01T00:00:00Z" };
     await log.append({ type: "conversation.followup.queued", conversationId: "thread", content: queued });
@@ -104,7 +104,7 @@ describe("complete-response transport", () => {
   });
 
   it("refuses a follow-up submission when the store cannot commit it atomically", async () => {
-    const store = testEventStore();
+    const store = createMemoryEventStore();
     const { appendMany: _batch, ...nonAtomicStore } = store;
     const log = new EventLogger({ store: nonAtomicStore });
     await log.append({ type: "conversation.followup.queued", conversationId: "thread", content: { id: "f", text: "next", createdAt: "2026-01-01T00:00:00Z" } });
@@ -114,7 +114,7 @@ describe("complete-response transport", () => {
   });
 
   it("prevents two loggers from dispatching the same queued message", async () => {
-    const store = testEventStore();
+    const store = createMemoryEventStore();
     const first = new EventLogger({ store });
     const second = new EventLogger({ store });
     await first.append({ type: "conversation.followup.queued", conversationId: "thread", content: { id: "f", text: "next", createdAt: "2026-01-01T00:00:00Z" } });

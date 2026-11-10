@@ -1,7 +1,7 @@
 import { fromLogValue, toLogValue, type LogEvent } from "./logging";
 
-/** In-memory canonical log for tests, including atomic artifact transactions. */
-export function testEventStore(events: LogEvent[] = []) {
+/** In-memory canonical log, including atomic artifact transactions. */
+export function createMemoryEventStore(events: LogEvent[] = []) {
   let nextId = (events.at(-1)?.id ?? 0) + 1;
   const terminals = new Map<string, LogEvent[]>();
   const terminalKey = (event: Pick<LogEvent, "type" | "runId" | "toolCallId" | "content" | "valueEncoding">) => {

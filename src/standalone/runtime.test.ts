@@ -222,3 +222,40 @@ it("keeps short IDs bound to the correct node past alphabetic IDs resembling pri
     expect(await page.locator("body").getAttribute("data-clicked")).toBe("0");
   } finally { await runtime?.close(); await context.close(); await rm(profile, { recursive: true, force: true }); }
 }, 120_000);
+
+it("captures and reads partitioned screenshots through standalone production tools", async () => {
+  vi.unstubAllGlobals();
+  const profile = await mkdtemp(join(tmpdir(), "surf-wax-visual-"));
+  const context = await chromium.launchPersistentContext(profile, {
+    channel: "chrome", headless: true, viewport: null, args: ["--remote-debugging-port=0", "--window-size=1280,900"],
+  });
+  let runtime: Awaited<ReturnType<typeof connectToolRuntime>> | undefined;
+  try {
+    const page = context.pages()[0]!;
+    const [port] = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split("\n");
+    runtime = await connectToolRuntime(`http://127.0.0.1:${port}`);
+    await page.setContent('<canvas width="400" height="300"></canvas>');
+    await page.evaluate(() => {
+      const canvas = document.querySelector("canvas")!;
+      const ctx = canvas.getContext("2d")!, image = ctx.createImageData(canvas.width, canvas.height);
+      let seed = 17;
+      for (let index = 0; index < image.data.length; index++) {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        image.data[index] = index % 4 === 3 ? 255 : seed >>> 24;
+      }
+      ctx.putImageData(image, 0, 0);
+    });
+    const screenshot = await runtime.call("take_screenshot", { target: { by: "css", value: "canvas" } }) as any;
+    expect(screenshot, JSON.stringify(screenshot)).toMatchObject({ ok: true, state: "succeeded" });
+    const artifactId = screenshot.result.screenshot.artifactId;
+    expect(runtime.events.find(event => event.id === artifactId)?.artifactGraph).toBeDefined();
+    const bytes = await runtime.call("read_artifact", { artifactId, path: ["base64"], offset: 0, limit: 32 }) as any;
+    expect(bytes).toMatchObject({ ok: true, result: expect.stringMatching(/^iVBORw0KGgo/) });
+    const length = Math.ceil(screenshot.result.artifact.byteLength / 3) * 4;
+    const tail = await runtime.call("read_artifact", { artifactId, path: ["base64"], offset: length - 32, limit: 32 }) as any;
+    expect(tail.ok).toBe(true);
+    expect(Buffer.from(tail.result, "base64").subarray(-12)).toEqual(Buffer.from([0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]));
+    const job = await runtime.call("get_job", { jobId: screenshot.jobId }) as any;
+    expect(job).toMatchObject({ state: "succeeded", result: { screenshot: { artifactId } } });
+  } finally { await runtime?.close(); await context.close(); await rm(profile, { recursive: true, force: true }); }
+}, 60_000);
