@@ -7,6 +7,7 @@ export const NATIVE_OBSERVATION_SOURCE = `function(pageZoom,...nativeRoots){
   /* surf-wax:semantic-native-observation */
   if(this!==document || !this.defaultView || this.readyState!=="complete") return null;
   return (${sampleReadableSnapshot.toString()})(pageZoom,nativeRoots,{
+    shadowRoots:nativeRoots,
     placeholder:(${PLACEHOLDER_EVIDENCE_SOURCE}),
     controls:(${SNAPSHOT_CONTROL_PAINT_SOURCE})
   });

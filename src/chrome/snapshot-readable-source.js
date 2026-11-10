@@ -1,7 +1,9 @@
 /** One synchronous, read-only sample in an extension content world. */
 export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeProofs) {
   /* surf-wax:read-only-snapshot */
-  if (document.readyState !== "complete" || document.fonts.status !== "loaded" || typeof chrome?.dom?.openOrClosedShadowRoot !== "function")
+  const extensionShadowRoot = globalThis.chrome?.dom?.openOrClosedShadowRoot;
+  if (document.readyState !== "complete" || document.fonts.status !== "loaded"
+    || typeof extensionShadowRoot !== "function" && !Array.isArray(nativeProofs?.shadowRoots))
     return null;
   const viewport = {
     x: scrollX,
@@ -106,6 +108,15 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
       } else if (!conflictingNativeHosts.has(host)) nativeRootByHost.set(host, root);
     } catch {}
   }
+  // CDP supplies live author roots when extension APIs are unavailable. Never
+  // substitute element.shadowRoot: it would silently omit closed roots.
+  const suppliedAuthorRoots = new Map();
+  for (const root of nativeProofs?.shadowRoots ?? []) {
+    const host = root?.host;
+    if (host instanceof HTMLElement && root.nodeType === Node.DOCUMENT_FRAGMENT_NODE
+      && root.isConnected && host.isConnected && root.ownerDocument === document
+      && root.getRootNode({ composed: true }) === document && !nativeRootByHost.has(host)) suppliedAuthorRoots.set(host, root);
+  }
   let hasAuthorShadowRoots = false;
   const authorHosts = new Set(["article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", "span"]);
   const roots = [document];
@@ -116,7 +127,8 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     for (const element of root.querySelectorAll("*")) {
       // Native field roots still use the shared local text and field proofs.
       const authorHost = element instanceof HTMLElement && (element.localName.includes("-") || authorHosts.has(element.localName));
-      const authorRoot = authorHost ? chrome.dom.openOrClosedShadowRoot(element) : null;
+      const authorRoot = authorHost ? typeof extensionShadowRoot === "function"
+        ? extensionShadowRoot.call(globalThis.chrome.dom, element) : suppliedAuthorRoots.get(element) : null;
       if (authorRoot) hasAuthorShadowRoots = true;
       const shadow = nativeRootByHost.get(element) || authorRoot;
       if (shadow) {

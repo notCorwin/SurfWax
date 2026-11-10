@@ -369,3 +369,13 @@ CDP `Extensions.loadUnpacked` 重新加载扩展不能当成持久安装后的�
 独立运行使用会话内存中的追加事件日志维护运行身份、工具结果和产物引用，不承诺跨进程恢复。依赖扩展原生 API 的能力明确返回 `extension-required`，由扩展测试验证；独立测试通过不等于扩展生命周期、持久恢复或真实模型任务能力已经验收。
 
 来源：`src/standalone/runtime.ts`、`src/standalone/chrome-adapter.ts`、`src/chrome/program-host.ts`、`src/chrome/program-worker.ts`、`scripts/tools.mjs`、`src/standalone/runtime.test.ts`。
+
+### 动态页面的独立只读采样保持 Shadow DOM 证据完整
+
+2026-11-10 在 Polymarket 的真实页面上，批量快照因动态布局或文字绘制不稳定而进入只读采样，暴露出该路径仍依赖扩展专属 `chrome.dom.openOrClosedShadowRoot`。独立模式改为通过 CDP 获取当前根文档的 ShadowRoot 拓扑，并将开放、闭合和原生根解析为同一隔离世界内的真实对象；采样只在最终同步读取中使用它们当前的内容、样式和几何，不把早先 DOM 抓取的文字拼入结果，也不以 `element.shadowRoot` 代替闭合根的证据。
+
+ShadowRoot 在拓扑采集和对象解析期间被添加或移除时，使当前根文档读取失效，返回 `stale-observation`；后续读取重新采集当前根，避免已被 Shadow DOM 遮蔽的 Light DOM 字符串进入结果。动态页面恢复仍明确标记 `partial=true`、覆盖缺口和未知名称，不把有内容输出视为完整页面证据，也不为单个网站放宽可见性约束。
+
+回归测试保留真实浏览器中的开放/闭合根、隐藏与视口外内容排除，以及采样中途新增闭合根后的拒绝与重采。这些断言能分别发现扩展依赖回流、隐藏内容泄漏和跨读取拓扑竞态，具有独立回归价值。
+
+来源：`src/chrome/automation.ts`、`src/chrome/snapshot-native-runtime.ts`、`src/chrome/snapshot-readable-source.js`、`src/standalone/runtime.test.ts`。

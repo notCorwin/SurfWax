@@ -27,6 +27,8 @@ export type SampledSnapshotNode = {
 };
 /** Internal same-read evaluators supplied by the CDP caller, never tool parameters. */
 export type NativeSnapshotProofs = {
+  /** Complete CDP census of live roots, guarded against shadow-tree mutation. */
+  shadowRoots?: readonly ShadowRoot[];
   placeholder: (this: HTMLInputElement | HTMLTextAreaElement, text: Text | null, expected: string) => unknown;
   controls: (this: Document, groups: { native: Array<{ expected: string }>; selects: Array<{ expected: string }>; selectHosts: object[] },
     frameUnobscured: boolean, noAuthorShadowRoots: boolean, ...objects: Node[]) => unknown;

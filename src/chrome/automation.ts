@@ -753,6 +753,14 @@ export class AutomationRuntime {
       }
       if (destroyed) session.observationContexts.delete(destroyed.id);
     }
+    if (session && this.options.observationWorldName && !source.sessionId
+      && (method === "DOM.shadowRootPushed" || method === "DOM.shadowRootPopped"
+        || method === "DOM.childNodeInserted" && params?.node?.nodeType === 1)) {
+      // Roots may be attached in place, or arrive inside a previously detached
+      // subtree (only childNodeInserted). Both invalidate a closed-root census
+      // before its sample can expose light DOM hidden by an uncollected root.
+      session.rootDocumentRevision++;
+    }
     const chooser = this.fileChoosers.get(tabId!);
     const preserveChooser = !chooser || !this.chooserAffected(source, method, params, { frameId: chooser.frameId, source: chooser.debuggee });
     if (method === "Target.attachedToTarget" && params?.targetInfo?.type === "iframe" && session) {
@@ -3658,9 +3666,29 @@ export class AutomationRuntime {
       const root = described?.node;
       if (root?.nodeType !== 9 || !Number.isSafeInteger(root.backendNodeId) || root.backendNodeId <= 0)
         throw automationError("snapshot-unavailable", { reason: "invalid-observation-document" });
+      let rootIds: number[] | undefined;
+      if (this.options.observationWorldName) {
+        // No chrome.dom API outside an extension. Fetch the shadow topology
+        // once for this read, including closed roots; never read their old text.
+        // DOM.getDocument also subscribes shadowRootPushed/Popped for these nodes.
+        const census = await command("DOM.getDocument", { depth: -1, pierce: true });
+        if (census.root?.backendNodeId !== root.backendNodeId)
+          throw automationError("stale-observation", { reason: "observation-document-changed-during-read" });
+        rootIds = [];
+        const pending = [census.root];
+        while (pending.length) {
+          const node = pending.pop();
+          for (const shadow of node.shadowRoots ?? []) {
+            rootIds.push(shadow.backendNodeId); pending.push(shadow);
+          }
+          pending.push(...node.children ?? []);
+          // Embedded documents have their own evidence scope, not this census.
+        }
+      }
       const cached = session.nativeControlCandidates;
       let hosts: Array<{ backendNodeId: number } | { nodeId: number }>;
-      if (cached?.frameId === frameId && cached.loaderId === session.frameLoaders.get(frameId)
+      if (rootIds) hosts = [];
+      else if (cached?.frameId === frameId && cached.loaderId === session.frameLoaders.get(frameId)
         && cached.documentBackendNodeId === root.backendNodeId) hosts = cached.hosts.map((backendNodeId) => ({ backendNodeId }));
       else {
         // A capture can fail before obtaining a DOMSnapshot. Discover only
@@ -3680,6 +3708,17 @@ export class AutomationRuntime {
         hosts = selected.nodeIds.map((nodeId: number) => ({ nodeId }));
       }
       const roots: Array<{ objectId: string }> = [], seen = new Set<number>();
+      for (let offset = 0; rootIds && offset < rootIds.length; offset += 32) {
+        const resolved = await Promise.allSettled(rootIds.slice(offset, offset + 32).map(async backendNodeId => {
+          const response = await command("DOM.resolveNode", { backendNodeId, executionContextId: context.id, objectGroup });
+          if (typeof response?.object?.objectId !== "string")
+            throw automationError("stale-observation", { reason: "observation-shadow-root-unavailable" });
+          return { objectId: response.object.objectId as string };
+        }));
+        const failure = resolved.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        if (failure) throw failure.reason;
+        for (const result of resolved) if (result.status === "fulfilled") roots.push(result.value);
+      }
       for (let offset = 0; offset < hosts.length; offset += 32) {
         const resolved = await Promise.allSettled(hosts.slice(offset, offset + 32).map(async (host) => {
           try {
@@ -3712,7 +3751,7 @@ export class AutomationRuntime {
         functionDeclaration: NATIVE_OBSERVATION_SOURCE, returnByValue: true,
       });
       if (response?.exceptionDetails)
-        throw automationError("snapshot-unavailable", { reason: "semantic-observation-failed", detail: response.exceptionDetails.text });
+        throw automationError("snapshot-unavailable", { reason: "semantic-observation-failed", detail: response.exceptionDetails.exception?.description ?? response.exceptionDetails.text });
       return response?.result?.value ?? null;
     } finally {
       // The enclosing capture races cancellation. This task settles all
@@ -3754,8 +3793,8 @@ export class AutomationRuntime {
       guardRoot();
       let lines: SnapshotLine[];
       try { lines = readableSnapshot(sample!); }
-      catch { throw automationError("snapshot-unavailable", { reason: "read-only-sampling-unavailable", after: error.detail.reason,
-        guidance: "The extension could not inspect this page safely. Retry when stable, use read_elements, or take_screenshot." }); }
+      catch (cause) { throw automationError("snapshot-unavailable", { reason: "read-only-sampling-unavailable", after: error.detail.reason,
+        detail: cause instanceof Error ? cause.message : String(cause), guidance: "The extension could not inspect this page safely. Retry when stable, use read_elements, or take_screenshot." }); }
       const ready = await waitForCapture(this.pageValue(session.tabId, "document.readyState === 'complete'"));
       guardRoot();
       if (!ready) throw automationError("stale-observation", { reason: "root-document-not-ready-after-read" });

@@ -2067,7 +2067,7 @@ describe("AutomationRuntime", () => {
       const result = await (await runtime.createPage(3)).inspect();
       const text = inspectText(result);
       expect(text).not.toContain("PRIVATE_HINT");
-      if (value) expect(text).toContain(": typed");
+      if (value) expect(text).toContain(': "typed"');
       expect(text).toContain("StaticText [name=unknown]");
       await runtime.abortSessions();
     }
