@@ -28,7 +28,7 @@ type DebuggerApi = {
   detach(debuggee: Debuggee): Promise<void>;
   sendCommand(debuggee: Debuggee, method: string, commandParams?: object): Promise<object>;
 };
-type ExecutorChrome = typeof chrome & { debugger: DebuggerApi };
+export type ExecutorChrome = typeof chrome & { debugger: DebuggerApi };
 
 const BRIDGE_KEY = "__surfWaxDebugger";
 const DEFAULT_INSPECT_TIMEOUT_MS = 15_000;
@@ -154,9 +154,10 @@ export class ChromeExecutor {
   private programScope?: ProgramScope;
   private readonly programEvaluations = new Map<string, { debuggee: Debuggee; count: number }>();
   private readonly programHost: typeof executeSandboxProgram;
+  private unsubscribeDebuggerEvents?: () => void;
   private readonly unsubscribeSnapshotReset?: () => void;
 
-  constructor(options: { chromeApi?: ExecutorChrome; logger?: EventLogger; programHost?: typeof executeSandboxProgram; runIdentity?: () => RunIdentity | undefined } = {}) {
+  constructor(options: { chromeApi?: ExecutorChrome; observationWorldName?: string; logger?: EventLogger; programHost?: typeof executeSandboxProgram; runIdentity?: () => RunIdentity | undefined } = {}) {
     this.readRunIdentity = options.runIdentity ?? getRunIdentity;
     this.chromeApi = options.chromeApi ?? globalThis.chrome as ExecutorChrome;
     this.logger = options.logger;
@@ -232,6 +233,7 @@ export class ChromeExecutor {
     };
     this.automation = new AutomationRuntime({
       chromeApi: this.chromeApi,
+      observationWorldName: options.observationWorldName,
       pressChord: (debuggee, chord, signal, assertFocus) => this.pressChord(debuggee, chord, signal, assertFocus),
       command: (debuggee, method, params) => {
         const releaseInput = method === "Input.dispatchMouseEvent" && (params as { type?: string } | undefined)?.type === "mouseReleased"
@@ -298,6 +300,16 @@ export class ChromeExecutor {
         else this.diagnostics.remove(source.tabId!);
       }
     });
+    if (typeof this.chromeApi.runtime?.connect !== "function") {
+      const forwardEvent = (...args: any[]) => { for (const listener of listeners.onEvent) listener(...args); };
+      const forwardDetach = (...args: any[]) => { for (const listener of listeners.onDetach) listener(...args); };
+      this.chromeApi.debugger.onEvent?.addListener(forwardEvent);
+      this.chromeApi.debugger.onDetach?.addListener(forwardDetach);
+      this.unsubscribeDebuggerEvents = () => {
+        this.chromeApi.debugger.onEvent?.removeListener(forwardEvent);
+        this.chromeApi.debugger.onDetach?.removeListener(forwardDetach);
+      };
+    }
     (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
   }
 
@@ -1467,6 +1479,7 @@ export class ChromeExecutor {
       delete (globalThis as Record<string, unknown>)[BRIDGE_KEY];
     }
     this.unsubscribeSnapshotReset?.();
+    this.unsubscribeDebuggerEvents?.();
     this.automation.dispose();
     this.port?.disconnect();
   }

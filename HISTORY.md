@@ -359,3 +359,13 @@ CDP `Extensions.loadUnpacked` 重新加载扩展不能当成持久安装后的�
 快照可见性/证据边界、原生输入与 MV3 生命周期，以及评估器拒绝不完整或失真证据的负控具有独立保护价值，不因用例规模、Mock 数量或同主题浏览器关卡而删除。用途或替代覆盖尚不明确的测试保留；单测与收集通过不能表述为全量 E2E 或真实模型能力已验收。
 
 来源：`src/agent/sdk-generate-contract.test.ts`、`src/agent/cloudflare-model-routing.test.ts`、`src/logging.test.ts`、`src/chrome/executor.test.ts`、`scripts/validate-build.mjs`、`e2e/userscripts.spec.ts`，以及本次测试维护审计。
+
+### 独立工具测试复用生产执行链
+
+2026-11-10 为无扩展测试增加 Node 工具入口，通过 CDP 连接已运行的 Chrome，复用生产工具注册表、Schema、执行器、可见快照和结果归一化；不另建一套测试专用工具实现，也不向 Node 全局伪造 `chrome`。独立入口仅用于开发测试，不改变扩展不桥接本地程序的产品架构。
+
+程序宿主按通信传输拆分，浏览器沙盒和 Node Worker 共用能力 RPC、值编解码和程序 Worker 逻辑。取消必须能终止不让出执行权的程序。快照辅助函数在独立模式下使用明确命名的隔离世界，仍通过同一可见性与可访问性证据链生成结果。
+
+独立运行使用会话内存中的追加事件日志维护运行身份、工具结果和产物引用，不承诺跨进程恢复。依赖扩展原生 API 的能力明确返回 `extension-required`，由扩展测试验证；独立测试通过不等于扩展生命周期、持久恢复或真实模型任务能力已经验收。
+
+来源：`src/standalone/runtime.ts`、`src/standalone/chrome-adapter.ts`、`src/chrome/program-host.ts`、`src/chrome/program-worker.ts`、`scripts/tools.mjs`、`src/standalone/runtime.test.ts`。

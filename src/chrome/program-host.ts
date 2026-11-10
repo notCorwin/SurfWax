@@ -9,32 +9,29 @@ export type ProgramHostState = {
   pendingOperations: number;
 };
 
-/** Control stays in the Side Panel. Arbitrary program computation runs only in a disposable sandbox worker. */
-export async function executeSandboxProgram(
+export type ProgramTransport = {
+  port: Pick<MessagePort, "postMessage" | "close" | "start" | "onmessage">;
+  start(initializing: () => void): void;
+  close(): void;
+  onTabRemoved?: (listener: (tabId: number) => void) => () => void;
+};
+export async function executeProgramWithTransport(
   code: string,
   capabilities: Record<string, unknown>,
   signal: AbortSignal,
-  onState?: (state: ProgramHostState) => void,
+  onState: ((state: ProgramHostState) => void) | undefined,
+  transport: ProgramTransport,
 ): Promise<unknown> {
   signal.throwIfAborted();
   let stage: ProgramHostState["stage"] = "iframe-loading";
   let receivedRpc = false, pendingBindings = 0, pendingOperations = 0;
   const report = () => onState?.({ stage, receivedRpc, pendingBindings, pendingOperations });
   report();
-  const frame = document.createElement("iframe");
-  const token = crypto.randomUUID();
-  frame.hidden = true;
-  // Chrome 151 crashes an extension renderer when a Vite-served extension page
-  // embeds a manifest sandbox. In development, host the same opaque worker
-  // bridge in Vite's separate localhost renderer; production remains on the
-  // packaged manifest sandbox with no network access.
-  frame.src = import.meta.env.DEV
-    ? `${__SURF_WAX_DEV_SERVER__}/@surf-wax/program-sandbox#${token}`
-    : `${chrome.runtime.getURL("program-sandbox.html")}#${token}`;
-  const channel = new MessageChannel();
+  const { port, close, onTabRemoved: tabRemoved } = transport;
+  const channel = { port1: port };
   const objects = new ProgramHandles();
   const onTabRemoved = (tabId: number) => objects.closeTab(tabId);
-  chrome.tabs.onRemoved.addListener(onTabRemoved);
+  const unsubscribe = tabRemoved?.(onTabRemoved);
   const inflight = new Set<Promise<unknown>>();
   const idOf = (value: object, tabId?: number) => objects.remember(value, tabId);
   const { encode, decode } = createProgramCodec((value) => {
@@ -105,9 +102,9 @@ export async function executeSandboxProgram(
     if (abortTimer) clearTimeout(abortTimer);
     channel.port1.postMessage({ type: "dispose" });
     channel.port1.close();
-    frame.remove();
+    close();
     objects.clear();
-    chrome.tabs.onRemoved.removeListener(onTabRemoved);
+    unsubscribe?.();
     signal.removeEventListener("abort", abort);
   };
   let reject!: (error: unknown) => void;
@@ -134,16 +131,6 @@ export async function executeSandboxProgram(
     return await new Promise<unknown>((accept, fail) => {
       reject = fail;
       signal.addEventListener("abort", abort, { once: true });
-      frame.onerror = () => fail(new Error("Program sandbox could not load"));
-      frame.onload = () => {
-        if (disposed) return;
-        stage = "sandbox-initializing"; report();
-        frame.contentWindow!.postMessage(
-          { type: "surf-wax:program-init", token },
-          "*",
-          [channel.port2],
-        );
-      };
       channel.port1.onmessage = (event) => {
         const message = event.data;
         if (disposed) return;
@@ -222,10 +209,35 @@ export async function executeSandboxProgram(
         if (message.type === "done") accept(decode(message.value));
       };
       channel.port1.start();
-      document.body.append(frame);
+      transport.start(() => { stage = "sandbox-initializing"; report(); });
       if (signal.aborted) abort();
     });
   } finally {
     cleanup();
   }
+}
+
+/** Extension programs run in a disposable opaque-origin sandbox worker. */
+export async function executeSandboxProgram(code: string, capabilities: Record<string, unknown>, signal: AbortSignal,
+  onState?: (state: ProgramHostState) => void): Promise<unknown> {
+  signal.throwIfAborted();
+  const frame = document.createElement("iframe");
+  const token = crypto.randomUUID();
+  frame.hidden = true;
+  // Development uses a separate localhost renderer to avoid Chrome 151's
+  // extension-renderer crash when embedding a manifest sandbox.
+  frame.src = import.meta.env.DEV
+    ? `${__SURF_WAX_DEV_SERVER__}/@surf-wax/program-sandbox#${token}`
+    : `${chrome.runtime.getURL("program-sandbox.html")}#${token}`;
+  const channel = new MessageChannel();
+  return executeProgramWithTransport(code, capabilities, signal, onState, {
+    port: channel.port1,
+    start(initializing) {
+      frame.onerror = () => channel.port2.postMessage({ type: "failed", error: { message: "Program sandbox could not load" } });
+      frame.onload = () => { initializing(); frame.contentWindow!.postMessage({ type: "surf-wax:program-init", token }, "*", [channel.port2]); };
+      document.body.append(frame);
+    },
+    close() { frame.remove(); channel.port2.close(); },
+    onTabRemoved(listener) { chrome.tabs.onRemoved.addListener(listener); return () => chrome.tabs.onRemoved.removeListener(listener); },
+  });
 }

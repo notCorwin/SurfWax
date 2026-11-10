@@ -586,6 +586,7 @@ export class AutomationRuntime {
 
   constructor(private readonly options: {
     chromeApi: typeof chrome;
+    observationWorldName?: string;
     command: Command;
     pressChord: (debuggee: Debuggee, chord: string, signal?: AbortSignal, assertFocus?: () => Promise<void>) => Promise<void>;
     atomicClick?: (debuggee: Debuggee, params: Record<string, unknown>) => Promise<unknown>;
@@ -725,7 +726,8 @@ export class AutomationRuntime {
     if (session && !source.sessionId && method === "Runtime.executionContextCreated") {
       const context = params?.context, auxiliary = context?.auxData, extensionId = this.options.chromeApi.runtime?.id;
       if (typeof auxiliary?.frameId === "string" && Number.isSafeInteger(context?.id) && typeof context.uniqueId === "string") {
-        const extension = Boolean(extensionId && typeof context.origin === "string"
+        const extension = Boolean(this.options.observationWorldName && context.name === this.options.observationWorldName
+          && auxiliary.type === "isolated" && auxiliary.isDefault === false) || Boolean(extensionId && typeof context.origin === "string"
           && context.origin.replace(/\/$/, "") === `chrome-extension://${extensionId}`
           && auxiliary.type === "isolated" && auxiliary.isDefault === false);
         const previous = session.observationContexts.get(context.id);

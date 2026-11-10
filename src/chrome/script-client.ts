@@ -18,6 +18,7 @@ export async function callUserScript(method: string, args: unknown[], signal?: A
   if (signal?.aborted) throw new DOMException("Operation aborted", "AbortError");
   if (onDispatch) await onDispatch();
   if (signal?.aborted) throw new DOMException("Operation aborted", "AbortError");
+  if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) throw new Error("CommandError[extension-required]: User scripts require Chrome extension APIs; test them with the extension harness.");
   const pending = chrome.runtime.sendMessage({ type: "surf-wax:user-scripts", method, args, ...getRunIdentity(), operationId: crypto.randomUUID() });
   let onAbort: (() => void) | undefined;
   const interrupted = signal && new Promise<never>((_, reject) => {
