@@ -42,6 +42,8 @@ const button = snapshot.items.find(item => item.actionable && item.role === "but
 await runtime.call("click", { target: { id: button.id } });
 ```
 
+ID 使用递增的短 36 进制编号，例如 `1`、`2`、`a`、`10`；归属信息保存在内部。扩展持久保存分配进度，独立 Node 入口在进程内共享分配进度；清理绑定不重置编号。
+
 ID 限定所属标签页、文档与运行；点击前重新核验节点身份和可操作状态。只读采样通过隔离世界内的弱引用绑定实际节点，并校验原始标签证据（包括闭合 Shadow DOM）。旧 ID 失效后返回 `stale-id`，不会重新按名称查找或按旧坐标猜测点击。保留角色、文本、CSS 等定位器，便于寻找尚未出现在快照中的具体元素。
 
 ## 测试与边界

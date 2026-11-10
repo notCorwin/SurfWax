@@ -1220,8 +1220,8 @@ describe("browser tools", () => {
     expect(JSON.stringify(result)).not.toContain("x".repeat(100));
   });
 
-  it("accepts refs, CSS, documented locators, and structured targets", () => {
-    expect(parseLocatorTarget("e15")).toEqual({ ref: "e15" });
+  it("accepts CSS, documented locators, and structured targets without guessing IDs from CSS", () => {
+    expect(parseLocatorTarget("e15")).toEqual({ by: "css", value: "e15" });
     expect(parseLocatorTarget("#main > button")).toEqual({ by: "css", value: "#main > button" });
     expect(parseLocatorTarget("getByRole('button', { name: 'Submit', exact: true })")).toEqual({ by: "role", value: "button", name: "Submit", exact: true });
     expect(parseLocatorTarget('getByText("Login")')).toEqual({ by: "text", value: "Login" });

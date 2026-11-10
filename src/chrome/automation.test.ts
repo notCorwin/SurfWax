@@ -755,7 +755,7 @@ describe("AutomationRuntime", () => {
       expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "ref-root")).toBe(false);
       return "child";
     });
-    const spec = { ref: "e1", queries: [{ kind: "css", value: "span" }] };
+    const spec = { ref: "_e1", queries: [{ kind: "css", value: "span" }] };
     await expect((runtime as any).resolveOnce(session, spec)).resolves.toBe("child");
     expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "ref-root")).toBe(true);
     expect((runtime as any).objectDebuggees.has("ref-root")).toBe(false);
@@ -778,7 +778,7 @@ describe("AutomationRuntime", () => {
     const waiting = new Promise<void>((resolve) => { entered = resolve; });
     const result = new Promise<string>((resolve) => { finish = resolve; });
     vi.spyOn(runtime as any, "resolveDomOnce").mockImplementation(async () => { entered(); return result; });
-    const pending = (runtime as any).resolveOnce(session, { ref: "e1", queries: [{ kind: "css", value: "span" }] });
+    const pending = (runtime as any).resolveOnce(session, { ref: "_e1", queries: [{ kind: "css", value: "span" }] });
     await waiting; controller.abort();
     expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "ref-root")).toBe(true);
     expect((runtime as any).objectDebuggees.has("ref-root")).toBe(false);
@@ -2324,7 +2324,7 @@ describe("AutomationRuntime", () => {
     expect(first).not.toHaveProperty("screenshot");
     const referenced = await page.inspect({ fields: ["text", "state", "ref"] });
     const ref = (referenced.items as any[]).find((item) => item.role === "button" && item.name === "Save")?.id;
-    expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    expect(ref).toMatch(/^[0-9a-z]+$/);
     metadata[0]!.name = "Continue"; metadata[0]!.text = "Continue";
     const second = await page.inspect({ since: first.observationId as string });
     expect(second).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "removed" }), expect.objectContaining({ change: "added", name: "Continue" })] });
@@ -2371,7 +2371,7 @@ describe("AutomationRuntime", () => {
     expect(first.nextCursor).toBeTypeOf("string");
     const second = await page.inspect({ cursor: first.nextCursor }) as any;
     expect(second.documentId).toBe(1);
-    expect(second.items.find((item: any) => item.actionable)?.id).toMatch(/^t3s[a-f0-9]+d1e/);
+    expect(second.items.find((item: any) => item.actionable)?.id).toMatch(/^[0-9a-z]+$/);
     runtime.handleEvent({ tabId: 3 }, "Page.frameDetached", { frameId: "another", reason: "remove" });
     await expect(page.inspect({ cursor: first.nextCursor })).rejects.toMatchObject({ code: "stale-observation" });
     await runtime.abortSessions();
@@ -2490,11 +2490,11 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     const first = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
     const second = await page.inspect({ fields: ["text", "state", "ref"], since: first.observationId }) as any;
-    expect(first.items.map((item: any) => item.id)).toEqual([expect.stringMatching(/^t3s[a-f0-9]+d0:1.aroot$/), expect.stringMatching(/^t3s[a-f0-9]+d0e1$/)]);
+    expect(first.items.map((item: any) => item.id)).toEqual([expect.stringMatching(/^[0-9a-z]+$/), expect.stringMatching(/^[0-9a-z]+$/)]);
     expect(first.items.every((item: any) => !item.id.includes(frameId))).toBe(true);
     expect(second).toMatchObject({ mode: "delta", items: [] });
     const ref = first.items.find((item: any) => item.actionable)?.id;
-    expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    expect(ref).toMatch(/^[0-9a-z]+$/);
     await expect(page.ref(ref).count()).resolves.toBe(1);
     await runtime.abortSessions();
   });
@@ -2599,7 +2599,7 @@ describe("AutomationRuntime", () => {
     expect(rebuilt).toContain("Start long😀");
     expect(rebuilt).toContain(" end");
     expect(rebuilt).not.toContain("Changed after the initial snapshot");
-    expect(ownedRef).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    expect(ownedRef).toMatch(/^[0-9a-z]+$/);
     expect(calls.filter(({ method }) => method === "Accessibility.getFullAXTree")).toHaveLength(1);
     const delta = await page.inspect({ fields: ["text", "state", "ref"], since: first.observationId as string }) as any;
     expect(delta).toMatchObject({ mode: "delta", items: expect.arrayContaining([expect.objectContaining({ change: "added", name: "Changed after the initial snapshot" })]) });
@@ -2944,12 +2944,12 @@ describe("AutomationRuntime", () => {
     const { runtime } = harness(metadata); const page = await runtime.createPage(3);
     const full = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
     expect(inspectText(full)).toContain("[ref=e999] [checked=true] [actions=click]");
-    expect(full.items.find((item: any) => item.actionable)?.id).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    expect(full.items.find((item: any) => item.actionable)?.id).toMatch(/^[0-9a-z]+$/);
     const textOnly = await page.inspect({ fields: ["text"] }) as any;
     expect(inspectText(textOnly)).toContain("[ref=e999] [checked=true] [actions=click]");
     expect(textOnly.items.every((item: any) => item.ref === undefined)).toBe(true);
     const refOnly = await page.inspect({ fields: ["ref"] }) as any;
-    expect(refOnly.items.find((item: any) => item.actionable)?.id).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    expect(refOnly.items.find((item: any) => item.actionable)?.id).toMatch(/^[0-9a-z]+$/);
     expect(inspectText(refOnly)).not.toContain("Fake");
     await runtime.abortSessions();
   });
@@ -3080,7 +3080,7 @@ describe("AutomationRuntime", () => {
     const firstInspection = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
     const secondInspection = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
     const ref = firstInspection.items.find((item: any) => item.actionable)?.id;
-    expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    expect(ref).toMatch(/^[0-9a-z]+$/);
     expect(secondInspection.items.find((item: any) => item.actionable)?.id).toBe(ref);
     await expect(page.ref(ref).count()).resolves.toBe(1);
     expect(calls.filter(({ method }) => method === "Page.enable")).toHaveLength(1);
@@ -3291,7 +3291,7 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     await page.snapshot();
     runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "new-root" } });
-    await expect(page.ref("e1").click()).rejects.toThrow("stale-ref");
+    await expect(page.ref("_e1").click()).rejects.toThrow("stale-ref");
   });
 
   it("refuses to heal a detached snapshot ref to a similar element", async () => {
@@ -3300,7 +3300,7 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     await page.snapshot();
 
-    await expect(page.ref("e1").click()).rejects.toThrow("AutomationError[detached]");
+    await expect(page.ref("_e1").click()).rejects.toThrow("AutomationError[detached]");
   });
 
   it("aborts pending locators and detaches the automation session", async () => {
@@ -3638,7 +3638,7 @@ describe("AutomationRuntime", () => {
       if (method === "DOM.resolveNode") throw new Error("node removed");
       return original(source, method, params);
     });
-    await expect(page.ref("e1").click()).rejects.toThrow("detached");
+    await expect(page.ref("_e1").click()).rejects.toThrow("detached");
     expect(command.mock.calls.filter(([, method]) => method === "Accessibility.queryAXTree")).toHaveLength(0);
   });
 

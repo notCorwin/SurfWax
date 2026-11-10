@@ -75,7 +75,6 @@ export function parseLocatorTarget(value: unknown): BrowserTarget {
   if (value && typeof value === "object") return value as BrowserTarget;
   if (typeof value !== "string" || !value.trim()) throw new Error("AutomationError[invalid-target]: target is required");
   const input = value.trim();
-  if (/^(?:t\d+s[a-f0-9]+d\d+)?e\d+$/.test(input)) return { ref: input };
   const locator = /^locator\((.+)\)$/.exec(input);
   if (locator) return { by: "css", value: readQuoted(locator[1]!) };
   const simple = /^getBy(Text|Label|Placeholder|AltText|Title|TestId)\((['"][\s\S]*?['"])(?:\s*,\s*\{([\s\S]*)\})?\)$/.exec(input);

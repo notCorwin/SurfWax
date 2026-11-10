@@ -56,7 +56,7 @@ test("continues a frozen long semantic line without interpreting page text as a 
       .map((event) => event.output).filter((output) => output?.observationId === observationId && Array.isArray(output.items));
     const fragments = outputs.flatMap((output) => output.items);
     const start = fragments.find((fragment) => itemLine(fragment).includes("SURF_LONG_START"));
-    expect(start?.id).toMatch(/^t\d+s[a-f0-9]+d\d+e\d+$/);
+    expect(start?.id).toMatch(/^[0-9a-z]+$/);
     const pieces = fragments.filter((fragment) => fragment.id === start.id).sort((a, b) => a.fragment.start - b.fragment.start);
     const reconstructed = pieces.map((fragment) => fragment.name ?? "").join("");
     expect(reconstructed).toContain(original);

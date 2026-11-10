@@ -885,7 +885,7 @@ describe("frame tree discovery", () => {
     const page = await runtime.createPage(3);
     const initial: any = await page.inspect({ fields: ["text", "state", "ref"] });
     const root = initial.items.find((item: any) => itemLine(item).includes('button "Root control"'));
-    expect(root.id).toMatch(/^t3s[a-f0-9]+d0e\d+$/);
+    expect(root.id).toMatch(/^[0-9a-z]+$/);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "old-child", targetInfo: { type: "iframe", targetId: "cross" } });
     await expect(page.inspect({ fields: ["text", "state", "ref"], since: initial.observationId })).rejects.toMatchObject({ code: "stale-observation" });
     const attached: any = await page.inspect({ fields: ["text", "state", "ref"] });
@@ -894,7 +894,7 @@ describe("frame tree discovery", () => {
     expect(attached.items.some((item: any) => item.id === root.id)).toBe(true);
     const old = attached.items.find((item: any) => itemLine(item).includes('button "Cross control"'));
     expect(old).toMatchObject({ id: expect.any(String), actionable: true });
-    expect(old.id).toMatch(/^t3s[a-f0-9]+d0e\d+$/);
+    expect(old.id).toMatch(/^[0-9a-z]+$/);
     expect(old.id).not.toBe(root.id);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "replacement-child", targetInfo: { type: "iframe", targetId: "cross" } });
     await expect(page.inspect({ fields: ["text", "state", "ref"], since: attached.observationId })).rejects.toMatchObject({ code: "stale-observation" });
@@ -904,7 +904,6 @@ describe("frame tree discovery", () => {
     expect(changed.items.some((item: any) => item.id === old.id)).toBe(false);
     const replacement = changed.items.find((item: any) => itemLine(item).includes('button "Cross control"'));
     expect(replacement).toMatchObject({ id: expect.any(String), actionable: true });
-    expect(replacement.id).not.toBe(old.id);
     expect(replacement.id).not.toBe(old.id);
     await expect(page.ref(replacement.id).count()).resolves.toBe(1);
     await expect(page.ref(old.id).count()).rejects.toMatchObject({ code: "stale-ref" });
@@ -930,18 +929,21 @@ describe("frame tree discovery", () => {
     const page = await runtime.createPage(3);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "cross" } });
     const capture: any = await page.inspect();
-    const owner = capture.items.find((item: any) => ignored ? item.id.endsWith(".d102") : item.id.endsWith(".aowner"));
+    const owners = capture.items.filter((item: any) => /^iframe$/i.test(item.role) && typeof item.frameRef === "string");
+    // The fixture's same-origin owner precedes the cross-origin owner.
+    expect(owners).toHaveLength(2);
+    const owner = owners[1];
     expect(owner).toEqual(expect.any(Object));
     // The iframe's accessible title is private metadata, not painted text.
     if (!ignored) { expect(owner.nameUnknown).toBe(true); expect(inspectText({ items: [owner] })).not.toContain("Work item"); }
-    const root = capture.items.find((item: any) => item.id.endsWith(".a102"));
+    const root = capture.items.find((item: any) => item.role === "RootWebArea");
     expect(root).toEqual(expect.any(Object));
     expect(owner.id).not.toBe(root.id);
     const ref = owner.frameRef;
     expect(ref).toEqual(expect.any(String));
     expect(itemLine(owner)).not.toContain("[frame=");
     const marker = capture.items.find((item: any) => item.role === "frame-document" && item.frameRef === ref);
-    expect(marker.id).toMatch(/^t3s[a-f0-9]+d\d+:[0-9a-z]+\.m$/);
+    expect(marker.id).toMatch(/^[0-9a-z]+$/);
     expect(new Set([root.id, owner.id, marker.id]).size).toBe(3);
     const listed: any = await runtime.listFrames(3);
     expect(listed.frames.find((frame: any) => frame.url === "https://cross.test/").frameRef).toBe(ref);
@@ -978,7 +980,7 @@ describe("frame tree discovery", () => {
     runtime.setContext({ conversationId: "c", runId: "other-run" });
     release();
     const capture: any = await pending;
-    const marker = capture.items.find((item: any) => item.id.endsWith(".m"));
+    const marker = capture.items.find((item: any) => item.role === "frame-document");
     const ref = marker.frameRef;
     expect(ref).toEqual(expect.any(String));
     await expect(page.frameRef(ref!).getByRole("button").count()).rejects.toMatchObject({ code: "stale-frame" });

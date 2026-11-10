@@ -81,6 +81,27 @@ function harness() {
 }
 
 describe("findElements", () => {
+  it("reports changed when a concurrent search retires a node while IDs are allocated", async () => {
+    const h = harness(); const page = await h.runtime.createPage(3);
+    const registry = (h.runtime as any).elementIds;
+    const assign = registry.assign.bind(registry);
+    let release!: () => void, entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const spy = vi.spyOn(registry, "assign").mockImplementationOnce(async (entries) => {
+      entered(); await blocked; return assign(entries);
+    });
+    try {
+      const pending = h.runtime.findElements(3, page.locator("button"), { limit: 1 });
+      await started;
+      h.nodes.get(1)!.name = "Replacement";
+      const current: any = await h.runtime.findElements(3, page.locator("button"), { limit: 1 });
+      expect(current.elements[0]).toHaveProperty("name", "Replacement");
+      release();
+      expect((await pending as any).elements).toEqual([{ status: "changed" }]);
+    } finally { release(); spy.mockRestore(); await h.runtime.abortSessions(); }
+  });
+
   it("does not reclaim earlier search refs just because the search is continued", async () => {
     const h = harness(); const page = await h.runtime.createPage(3); const target = page.getByRole("button");
     const first: any = await h.runtime.findElements(3, target, { limit: 1 });
@@ -177,7 +198,7 @@ describe("findElements", () => {
   it("paginates the original DOM nodes after reordering, removal and insertion", async () => {
     const h = harness(); const page = await h.runtime.createPage(3); const target = page.locator("button");
     const first: any = await h.runtime.findElements(3, target, { limit: 1 });
-    expect(first).toMatchObject({ tabId: 3, documentId: 0, total: 3, hasMore: true, elements: [{ name: "First", ref: expect.stringMatching(/^t3s[a-f0-9]+d0e\d+$/) }] });
+    expect(first).toMatchObject({ tabId: 3, documentId: 0, total: 3, hasMore: true, elements: [{ name: "First", ref: expect.stringMatching(/^[0-9a-z]+$/) }] });
     h.nodes.get(2)!.connected = false; h.nodes.set(4, { id: 4, name: "Replacement", role: "button", connected: true }); h.setOrder([3, 4, 1]);
     const second: any = await h.runtime.findElements(3, target, { cursor: first.nextCursor, limit: 1 });
     expect(second).toMatchObject({ total: 3, elements: [{ status: "detached" }], hasMore: true });
@@ -192,12 +213,14 @@ describe("findElements", () => {
 
   it("reuses inspect references for the same backend node and truncates long metadata", async () => {
     const h = harness(); const page = await h.runtime.createPage(3);
+    h.runtime.setContext({ conversationId: "conversation", runId: "direct-run" });
     h.nodes.get(1)!.name = "x".repeat(500);
     const inspection = await page.inspect({ fields: ["text", "state", "ref"] });
     const inspectedRef = (inspection.items as any[]).find((item) => item.actionable)?.id;
     const result: any = await h.runtime.findElements(3, page.getByRole("button"), { limit: 1 });
     expect(result.elements[0]).toMatchObject({ name: "x".repeat(160), nameTruncated: true, text: "x".repeat(120), textTruncated: true, ref: inspectedRef });
-    expect(result.elements[0].ref).toMatch(/^t3s[a-f0-9]+d0e\d+$/);
+    expect(result.elements[0].ref).toMatch(/^[0-9a-z]+$/);
+    await expect(page.elementById(result.elements[0].ref).count()).resolves.toBe(1);
     expect(h.command.mock.calls.filter(([, method]) => method === "Accessibility.queryAXTree")).toHaveLength(1);
     await h.runtime.abortSessions();
   });

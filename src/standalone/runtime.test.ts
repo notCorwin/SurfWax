@@ -37,8 +37,8 @@ describe("standalone tools", () => {
       const [port] = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split("\n");
       runtime = await connectToolRuntime(`http://127.0.0.1:${port}`);
       const snapshot = await runtime.call("inspect_page");
-      expect(snapshot).not.toHaveProperty("ok", false);
-      expect(snapshot).not.toHaveProperty("partial", true);
+      expect(snapshot, JSON.stringify(snapshot)).not.toHaveProperty("ok", false);
+      expect(snapshot, JSON.stringify(snapshot)).not.toHaveProperty("partial", true);
       expect(JSON.stringify((snapshot as any).items)).toContain("Save");
       expect(JSON.stringify((snapshot as any).items)).not.toContain("Invisible sentinel");
       const saveItem = (snapshot as any).items.find((item: any) => item.role === "button" && item.name === "Save");
@@ -184,7 +184,7 @@ describe("standalone tools", () => {
         const otherRun = await samePage.inspect({ full: true });
         const otherRunItem = otherRun.items.find((item: any) => item.role === "button" && item.name === "Sample action");
         expect(otherRunItem.id).not.toBe(originalRunItem.id);
-        await expect(samePage.elementById(originalRunItem.id).count()).rejects.toMatchObject({ code: "stale-id" });
+        expect(() => samePage.elementById(originalRunItem.id)).toThrow("stale-id");
         await expect(samePage.elementById(otherRunItem.id).count()).resolves.toBe(1);
       } finally { command.mockRestore(); }
       await runtime.close();
@@ -194,3 +194,31 @@ describe("standalone tools", () => {
     }
   }, 60_000);
 });
+
+it("keeps short IDs bound to the correct node past alphabetic IDs resembling private references", async () => {
+  vi.unstubAllGlobals();
+  const profile = await mkdtemp(join(tmpdir(), "surf-wax-short-ids-"));
+  const context = await chromium.launchPersistentContext(profile, {
+    channel: "chrome", headless: true, viewport: { width: 1280, height: 800 }, args: ["--remote-debugging-port=0"],
+  });
+  let runtime: Awaited<ReturnType<typeof connectToolRuntime>> | undefined;
+  try {
+    const page = context.pages()[0]!;
+    await page.goto("about:blank");
+    await page.setContent(`<!doctype html><style>
+      body{margin:0;display:grid;grid-template-columns:repeat(30,32px)}button{width:32px;height:20px;padding:0;font:10px Arial}
+      </style>${Array.from({ length: 600 }, (_, index) => `<button onclick="document.body.dataset.clicked='${index}'">Same</button>`).join("")}`);
+    const [port] = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split("\n");
+    runtime = await connectToolRuntime(`http://127.0.0.1:${port}`);
+    const first = await runtime.call("inspect_page", { full: true, timeoutMs: 60_000 }) as any;
+    expect(first, JSON.stringify(first)).not.toHaveProperty("ok", false);
+    const button = first.items.find((item: any) => item.role === "button");
+    expect(first.truncation.total).toBeGreaterThanOrEqual(600);
+    expect(button).toHaveProperty("actionable", true);
+    const refreshed = await runtime.call("inspect_page", { full: true, timeoutMs: 60_000 }) as any;
+    expect(refreshed, JSON.stringify(refreshed)).not.toHaveProperty("ok", false);
+    expect(refreshed.items.find((item: any) => item.role === "button").id).toBe(button.id);
+    expect(await runtime.call("click", { target: { id: button.id } })).not.toHaveProperty("ok", false);
+    expect(await page.locator("body").getAttribute("data-clicked")).toBe("0");
+  } finally { await runtime?.close(); await context.close(); await rm(profile, { recursive: true, force: true }); }
+}, 120_000);
