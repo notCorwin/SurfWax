@@ -1118,7 +1118,6 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     const unbounded =
       element.namespaceURI !== "http://www.w3.org/1999/xhtml" ||
       markerPaint(element, s) ||
-      foregroundEffect ||
       (shadowEffect && !shadowRect) ||
       nonNone(s, "-webkit-box-reflect") ||
       s.borderImageOutset !== "0" ||
@@ -1130,15 +1129,24 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     const border = ["Top", "Right", "Bottom", "Left"].some((side) => parseFloat(s["border" + side + "Width"]) > 0);
     // Even unverified foreground text can cover another text run. Its own
     // eligibility must not decide whether it is a potential occluder.
+    let outlineRect=viewportRect;
+    const outlineWidth=parseFloat(s.outlineWidth),outlineOffset=parseFloat(s.outlineOffset);
+    if(nativeRootByHost.has(element) && ["auto","solid","dotted","dashed","double"].includes(s.outlineStyle)
+      && Number.isFinite(outlineWidth) && outlineWidth>=0 && Number.isFinite(outlineOffset)
+      && effects.every(key=>noGeometryEffect(s,key))){
+      const margin=2*outlineWidth+Math.abs(outlineOffset)+4;
+      outlineRect={left:rect.left-margin,top:rect.top-margin,right:rect.right+margin,bottom:rect.bottom+margin};
+    }
     if (s.outlineStyle !== "none") {
-      // CSS leaves some outline paint order unspecified. Only a distinct,
-      // enclosing lower context can bound it; never assume ordinary level 0.
+      // Keep outline order uncertain, even when a native field gives it
+      // finite bounds. A foreign outline can still cover native text.
       const parent = parentOf(element);
       addCover({
         element,
-        rect: viewportRect,
+        rect: outlineRect,
         path: appendContext(parent ? stack(parent) : null, element, null),
         foregroundEffect: true,
+        outline: true,
       });
     }
     const path = paintPath(element);
@@ -1503,13 +1511,46 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     }
     return uncertain;
   };
+  // An opaque, later in-flow native field paints over earlier content in
+  // the same stacking context. This also bounds otherwise unbounded ink
+  // (such as an outside list marker) without assuming its glyph geometry.
+  const ordinaryFlow = new Map();
+  const inFlow = (element) => {
+    const pending = [];
+    let current = element;
+    while (current && !ordinaryFlow.has(current)) { pending.push(current); current = parentOf(current); }
+    let valid = !current || ordinaryFlow.get(current);
+    while (pending.length) {
+      const item = pending.pop(), s = style(item);
+      valid = valid && s.position === "static" && s.cssFloat === "none" && !/flex|grid/.test(s.display) && !stack(item)?.unknown;
+      ordinaryFlow.set(item, valid);
+    }
+    return ordinaryFlow.get(element);
+  };
+  const behindNativeBackdrop = (parent, foreign, path, foregroundEffect) => {
+    const host = nativeOwners.get(parent);
+    if (!host || foregroundEffect || stack(host) !== path || path?.unknown || paintContains(foreign,host)
+      || !inFlow(host) || !inFlow(foreign)
+      || !(foreign.compareDocumentPosition(host) & Node.DOCUMENT_POSITION_FOLLOWING)) return false;
+    const s = style(host), color = rgba(s.backgroundColor);
+    return color?.[3] === 255 && s.backgroundImage === "none" && s.backgroundClip === "border-box"
+      && [s.borderTopLeftRadius,s.borderTopRightRadius,s.borderBottomLeftRadius,s.borderBottomRightRadius].every(v=>v==="0px");
+  };
+  const nativeOwnOutline = (parent, element, rects) => {
+    const host=nativeOwners.get(parent);
+    if(!host || element!==host)return false;
+    const s=style(host), box=host.getBoundingClientRect(), width=parseFloat(s.outlineWidth), offset=parseFloat(s.outlineOffset);
+    const inset=width;
+    return ["auto","solid"].includes(s.outlineStyle) && Number.isFinite(width) && width>=0 && offset>=0
+      && rects.every(r=>r.left>=box.left+inset && r.top>=box.top+inset && r.right<=box.right-inset && r.bottom<=box.bottom-inset);
+  };
   const foreignCover = (parent, rects, presence = false) =>
     covers.some(
-      ({ element, rect, path, foregroundEffect, directText }) =>
+      ({ element, rect, path, foregroundEffect, directText, outline }) =>
         !(presence && paintContains(parent, element)) &&
         (!paintContains(element, parent) || foregroundEffect || (directText && element !== parent)) &&
         rects.some((r) => overlaps(r, rect)) &&
-        !strictlyAbove(stack(parent), path),
+        !strictlyAbove(stack(parent), path) && !behindNativeBackdrop(parent, element, path, foregroundEffect) && !(outline && nativeOwnOutline(parent, element, rects)),
     );
   for (const element of topLayers) {
     const p = getComputedStyle(element, "::backdrop");
@@ -1565,7 +1606,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     // Start with an explicit LTR text subset; unsupported scripts and bidi
     // controls retain unknown regions instead of implying a glyph order.
     if (!/^[\x09\x0a\x0c\x0d\x20-\x7e\u00a0\p{Unified_Ideograph}]*$/u.test(node.nodeValue)
-      || selection?.rangeCount && selection.containsNode(node, true)) return null;
+      || selection?.rangeCount && !selection.isCollapsed && selection.containsNode(node, true)) return null;
     let root = parent;
     while (root && !svgPaintEvidence.has(root)) root = parentOf(root);
     if (!root) return null;
@@ -1644,11 +1685,11 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
         break;
       }
     }
-    if (!valid || (selection?.rangeCount && selection.containsNode(node, true))) {
+    if (!valid || (selection?.rangeCount && !selection.isCollapsed && selection.containsNode(node, true))) {
       // Background or generated-content uncertainty does not make text
       // visible outside a proven clip. Expanding text effects and selections
       // cannot use this early exclusion.
-      if (!(selection?.rangeCount && selection.containsNode(node, true)) && boundedTextClip(parent)
+      if (!(selection?.rangeCount && !selection.isCollapsed && selection.containsNode(node, true)) && boundedTextClip(parent)
         && clippedRects(parent, rects) === "hidden") continue;
       gap("text-paint", node, region);
       continue;
@@ -1682,7 +1723,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     if (overlap) gap("text-overlap", item.node, item.region);
     return !overlap;
   });
-  if (textEvidence) { textEvidence.accept(new Set(accepted.map(item => item.node)), new Set([...uncertainLabels, ...shadowRoots.keys()])); return null; }
+  if (textEvidence) { textEvidence.accept(new Set(accepted.map(item => item.node)), new Set([...uncertainLabels, ...shadowRoots.keys()]), accepted); return null; }
   const interactiveRoles = new Set([
     "button",
     "checkbox",
@@ -1897,7 +1938,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
       }
     } else if (host.value && (host.localName === "textarea" || /^(?:text|search|email|tel|url)$/.test(host.type))) {
       const content = texts.filter((node) => node.parentElement?.getAttribute("pseudo") !== "-webkit-input-placeholder"
-        && node.parentElement?.parentNode === root);
+        && node.getRootNode() === root);
       const matches = host.localName === "textarea" ? content.filter((node) => node.data) : content.filter((node) => node.data === host.value);
       if (matches.length && (host.localName === "textarea" || matches.length === 1)) {
         nativeRequests.push({ expected: host.value }); nativeObjects.push(matches[0]); nativeRequestHosts.push(host);
@@ -1906,10 +1947,11 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     }
   }
   let nativeControlProof;
+  const painted=new Map(accepted.map(item=>[item.node,item.text]));
   if (nativeRequests.length || selectRequests.length || selectHosts.length) {
     try {
       if (typeof nativeProofs?.controls === "function") nativeControlProof = nativeProofs.controls.call(document,
-        { native: nativeRequests, selects: selectRequests, selectHosts: selectHosts.map(() => ({})) }, true, !hasAuthorShadowRoots,
+        { painted, native: nativeRequests, selects: selectRequests, selectHosts: selectHosts.map(() => ({})) }, true, !hasAuthorShadowRoots,
         ...nativeObjects, ...selectObjects, ...selectHosts);
     } catch {}
   }

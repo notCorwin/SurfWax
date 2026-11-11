@@ -1,3 +1,4 @@
+import { sampleReadableSnapshot } from "./snapshot-readable";
 import { SNAPSHOT_PAINT_SCENE_SOURCE } from "./snapshot-paint-scene";
 import { SNAPSHOT_NATIVE_VALUE_EVALUATOR_SOURCE } from "./snapshot-native-value";
 import { SNAPSHOT_SELECT_PAINT_EVALUATOR_SOURCE } from "./snapshot-select-paint";
@@ -23,9 +24,19 @@ export const SNAPSHOT_CONTROL_PAINT_SOURCE = `function(groups, frameUnobscured, 
     }catch{return null;}
   });
   const failures = () => ({scene:null, nativeValues:groups.native.map(() => null), selectValues:groups.selects.map(() => null), selectStates});
-  const scene = (${SNAPSHOT_PAINT_SCENE_SOURCE})(this, frameUnobscured, noAuthorShadowRoots);
-  if (!scene) return failures();
-  return {scene:scene.fingerprint,
-    nativeValues:(${SNAPSHOT_NATIVE_VALUE_EVALUATOR_SOURCE})(scene, groups.native, objects.slice(0, count)),
+  if(frameUnobscured!==true || noAuthorShadowRoots!==true)return failures();
+  let painted=groups.painted;
+  if(!painted && (count || groups.selects.length)){
+    const texts=[...objects.slice(0,count),...groups.selects.map((_,i)=>objects[count+i*2])];
+    const roots=[...new Set(texts.map(text=>text.getRootNode()))];
+    (${sampleReadableSnapshot.toString()})(1,roots,{shadowRoots:roots},{scope:{contains:()=>true},
+      accept:(_nodes,_uncertain,items)=>{painted=new Map(items.map(item=>[item.node,item.text]));}});
+  }
+  if(!painted)return failures();
+  const nativeValues=(${SNAPSHOT_NATIVE_VALUE_EVALUATOR_SOURCE})(this,groups.native,objects.slice(0,count),painted);
+  const scene = groups.selects.length ? (${SNAPSHOT_PAINT_SCENE_SOURCE})(this, frameUnobscured, noAuthorShadowRoots,painted) : null;
+  if (!scene) return {...failures(),nativeValues};
+  return {scene:null,
+    nativeValues,
     selectValues:(${SNAPSHOT_SELECT_PAINT_EVALUATOR_SOURCE})(scene, groups.selects, objects.slice(count, stateOffset)), selectStates};
 }`;

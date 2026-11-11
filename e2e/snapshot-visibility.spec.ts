@@ -543,3 +543,88 @@ test("duplicate text queries share current paint work and preserve strictness an
     await test.info().attach('duplicate-text', { path, contentType: 'application/json' });
   } finally { await dispose(opened.context, opened.userDataDirectory, server); }
 });
+
+test("native values retain exact UTF-8 through fill, focus, blur and replacement without exposing unpainted values", async () => {
+  test.setTimeout(120_000);
+  const responses: MockResponse[] = [], wires = new Map<string, any>();
+  const provider = await startProvider(responses), opened = await openExtension();
+  const initial = ["probe+雪@example.invalid", "FAKE-SSN 000-00-0000", "第一行\nSecond line"];
+  const filled = "filled+雪@example.invalid";
+  const inspect = (id: string) => commandResponse("inspect_page", { full: true, budget: 16000 }, id);
+  const record = (next: any) => (request: any) => {
+    for (const message of request.messages.filter((m: any) => m.role === "tool" && ["native-initial","native-focused","native-blurred","native-replaced","native-textarea","native-selection"].includes(m.tool_call_id))) wires.set(message.tool_call_id, JSON.parse(message.content));
+    return next;
+  };
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(([email, ssn, textarea]) => {
+      document.body.innerHTML = `<style>body{margin:16px;font:16px Arial;background:white;color:black}input,textarea{width:340px;font:16px Arial}textarea{height:60px}</style>
+      <h1>Native values</h1><ul><li>Ordinary outside marker</li></ul>
+      <p><label>Email <input id="email" type="text"></label></p>
+      <p><label>Fake SSN <input id="ssn" type="text"></label></p>
+      <p><label>Notes <textarea id="notes"></textarea></label></p>
+      <p><input type="search" aria-label="Search" value="search雪"><input type="email" aria-label="Email type" value="雪@example.invalid"></p>
+      <p><input type="tel" aria-label="Telephone" value="123雪"><input type="url" aria-label="URL" value="https://example.invalid/雪"></p>
+      <select aria-label="Choice" style="font:16px Arial"><option>CHOICE_LABEL</option><option>UNSELECTED_OPTION_SECRET</option></select>
+      <input aria-label="Unproven font" style="font-family:cursive" value="FONT_SECRET">
+      <input aria-label="Password" type="password" value="PASSWORD_SECRET">
+      <input aria-label="Transparent" style="opacity:0" value="OPACITY_SECRET">
+      <input aria-label="Hidden" style="display:none" value="HIDDEN_SECRET">
+      <input aria-label="Clipped" style="width:25px" value="CLIPPED_SECRET_TOO_LONG">
+      <input aria-label="Masked" style="-webkit-text-security:disc" value="MASKED_SECRET">
+      <div style="position:relative"><input aria-label="Covered" value="COVERED_SECRET"><div style="position:absolute;inset:0;background:white;z-index:1"></div></div>`;
+      (document.querySelector("#email") as HTMLInputElement).value=email!;
+      (document.querySelector("#ssn") as HTMLInputElement).value=ssn!;
+      (document.querySelector("#notes") as HTMLTextAreaElement).value=textarea!;
+      (window as any).nativeFocusEvents=[];
+      for(const event of ["focusin","focusout"]) document.addEventListener(event,e=>(window as any).nativeFocusEvents.push([event,(e.target as HTMLElement).id]));
+    }, initial);
+    const ax = await opened.context.newCDPSession(target);
+    const axBefore = await ax.send("Accessibility.getFullAXTree");
+    expect(initial.every(value => axBefore.nodes.some(node => node.value?.value === value))).toBe(true);
+    await ax.detach();
+    responses.push(inspect("native-initial"), record(commandResponse("fill", {target:{by:"css",value:"#email"},value:filled}, "native-fill")),
+      inspect("native-focused"), record(commandResponse("blur_element",{target:{by:"css",value:"#email"}},"native-blur")),
+      inspect("native-blurred"), record(commandResponse("fill",{target:{by:"css",value:"#notes"},value:"更新\nTextarea filled"},"native-fill-notes")),
+      inspect("native-textarea"),record(textResponse("NATIVE_FIRST_DONE")),textResponse("Native values"));
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    const submit = async (text: string, done: string) => {
+      await opened.page.getByTestId("composer-input").fill(text);
+      await opened.page.getByTestId("composer-input").press("Enter");
+      await expect(opened.page.locator(".markdown-body").last()).toContainText(done,{timeout:80_000});
+    };
+    await submit("Inspect, fill, inspect focused, blur and inspect.","NATIVE_FIRST_DONE");
+    expect(await target.evaluate(()=>(window as any).nativeFocusEvents)).toEqual([["focusin","email"],["focusout","email"],["focusin","notes"]]);
+    await target.locator("#email").evaluate(element=>{const replacement=element.cloneNode() as HTMLInputElement;replacement.value="replacement+雪@example.invalid";element.replaceWith(replacement);});
+    responses.push(inspect("native-replaced"), record(textResponse("NATIVE_REPLACED_DONE")));
+    await submit("Inspect replacement.","NATIVE_REPLACED_DONE");
+    await target.locator("#notes").evaluate(element=>(element as HTMLTextAreaElement).setSelectionRange(0,2));
+    responses.push(inspect("native-selection"),record(textResponse("NATIVE_SELECTION_DONE")));
+    await submit("Inspect the selected textarea.","NATIVE_SELECTION_DONE");
+    const events = await readEvents(opened.page);
+    const projected: any[] = await opened.page.evaluate(async ({dev,events})=>{
+      const {projectConversationMessageEntries}=await import(`${dev}/src/logging.ts`);
+      return [...projectConversationMessageEntries(events).values()];
+    },{dev:process.env.SURFWAX_DEV_SERVER_URL!,events});
+    for(const [id, expected] of [["native-initial",initial],["native-focused",[filled,...initial.slice(1)]],["native-blurred",[filled,...initial.slice(1)]],["native-textarea",[filled,initial[1],"更新\nTextarea filled"]],["native-replaced",["replacement+雪@example.invalid",initial[1],"更新\nTextarea filled"]]] as const){
+      const terminal=events.find(e=>e.type==="tool.finished"&&e.toolCallId===id);
+      const part=projected.flatMap(e=>e.message.parts).find(p=>p.toolCallId===id);
+      for(const output of [terminal?.output,part?.output,wires.get(id)]){
+        expect(output, id).toBeTruthy();
+        for(const value of [...expected,"search雪","雪@example.invalid","123雪","https://example.invalid/雪"])expect(output.items.some((item:any)=>item.value===value&&!item.valueUnknown),`${id}: ${value}`).toBe(true);
+        expect(JSON.stringify(output.items)).toContain("CHOICE_LABEL");
+        for(const secret of ["UNSELECTED_OPTION_SECRET","FONT_SECRET","PASSWORD_SECRET","OPACITY_SECRET","HIDDEN_SECRET","CLIPPED_SECRET_TOO_LONG","MASKED_SECRET","COVERED_SECRET"])
+          expect(JSON.stringify(output.items),`${id}: ${secret}`).not.toContain(secret);
+      }
+    }
+    const selection=events.find(e=>e.type==="tool.finished"&&e.toolCallId==="native-selection");
+    const selectionPart=projected.flatMap(e=>e.message.parts).find(p=>p.toolCallId==="native-selection");
+    for(const output of [selection?.output,selectionPart?.output,wires.get("native-selection")]){
+      expect(output.items.some((item:any)=>item.role==="textbox"&&item.name==="Notes"&&item.valueUnknown&& !item.value)).toBe(true);
+      expect(JSON.stringify(output.items)).not.toContain("Textarea filled");
+    }
+    await test.info().attach("native-value-chain",{contentType:"application/json",body:Buffer.from(JSON.stringify({axBefore,events,wires:[...wires]},null,2))});
+  } finally { await dispose(opened.context,opened.userDataDirectory,provider.server); }
+});
