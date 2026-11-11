@@ -211,3 +211,166 @@ test("a recoverable complete-response failure retries without repeating a comple
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
+
+test("debugger cleanup quarantines delayed native calls without blocking another resource", async () => {
+  const opened = await openExtension();
+  await opened.page.waitForLoadState("networkidle");
+  const worker = opened.context.serviceWorkers().find(worker => new URL(worker.url()).hostname === opened.extensionId)!;
+  try {
+    const targets = await opened.page.evaluate(async () => {
+      const tabs = await Promise.all([chrome.tabs.create({ url: "about:blank", active: false }), chrome.tabs.create({ url: "about:blank", active: false })]);
+      const targets = await chrome.debugger.getTargets();
+      return tabs.map(tab => ({ tabId: tab.id!, targetId: targets.find(target => target.tabId === tab.id)!.id }));
+    });
+    await worker.evaluate(() => {
+      // Only the external native API is delayed. Production ports, ownership,
+      // cleanup deadlines, IndexedDB and telemetry remain untouched.
+      const gate = (globalThis as any).__debuggerGate = {
+        method: "", tabId: -1, entered: 0, settled: 0, release: () => {},
+      };
+      for (const method of ["attach", "detach", "sendCommand"] as const) {
+        const native = chrome.debugger[method].bind(chrome.debugger) as (...args: any[]) => Promise<void>;
+        (chrome.debugger as any)[method] = async (...args: any[]) => {
+          const held = gate.method === method && args[0].tabId === gate.tabId;
+          if (held) {
+            gate.entered++;
+            await new Promise<void>(resolve => { gate.release = resolve; });
+          }
+          try { return await native(...args); }
+          finally { if (held) gate.settled++; }
+        };
+      }
+    });
+    await opened.page.evaluate(() => {
+      const harness = (globalThis as any).__debuggerLifecycle = {
+        owners: new Map(), bridges: new Map(), aborted: false,
+        async claim(name: string) {
+          const owner = chrome.runtime.connect({ name: "surf-wax-run-owner" });
+          harness.owners.set(name, owner);
+          const identity = await new Promise<any>((resolve, reject) => {
+            owner.onMessage.addListener(message => {
+              if (message.type === "abort") harness.aborted = true;
+              if (message.type === "claimed") message.error ? reject(new Error(message.error)) : resolve(message);
+            });
+            owner.postMessage({ type: "claim", runId: crypto.randomUUID(), ownerId: crypto.randomUUID(), conversationId: crypto.randomUUID() });
+          });
+          const port = chrome.runtime.connect({ name: "surf-wax-debugger" });
+          const pending = new Map<string, (message: any) => void>();
+          port.onMessage.addListener(message => {
+            if (!message.id) return;
+            pending.get(message.id)?.(message);
+            pending.delete(message.id);
+          });
+          port.onDisconnect.addListener(() => {
+            for (const resolve of pending.values()) resolve({ disconnected: true });
+            pending.clear();
+          });
+          harness.bridges.set(name, { port, pending, identity });
+        },
+        request(name: string, method: string, args: unknown[]) {
+          const { port, pending, identity } = harness.bridges.get(name);
+          const id = crypto.randomUUID();
+          return new Promise<any>(resolve => {
+            pending.set(id, resolve);
+            port.postMessage({ ...identity, id, method, args, operationId: crypto.randomUUID() });
+          });
+        },
+        finish(name: string) { harness.owners.get(name).postMessage({ type: "finished" }); },
+      };
+    });
+    const claim = (name: string) => opened.page.evaluate(name => (globalThis as any).__debuggerLifecycle.claim(name), name);
+    const request = (name: string, method: string, args: unknown[]) => opened.page.evaluate(({ name, method, args }) => (globalThis as any).__debuggerLifecycle.request(name, method, args), { name, method, args });
+    const finish = (name: string) => opened.page.evaluate(name => (globalThis as any).__debuggerLifecycle.finish(name), name);
+    const idle = () => expect.poll(() => opened.page.evaluate(async () => (await chrome.runtime.sendMessage({ type: "surf-wax:run-status" })).identity ?? null)).toBeNull();
+    const setGate = (method: string) => worker.evaluate(({ method, tabId }) => {
+      const gate = (globalThis as any).__debuggerGate;
+      Object.assign(gate, { method, tabId, entered: 0, settled: 0 });
+    }, { method, tabId: targets[0].tabId });
+    const release = () => worker.evaluate(() => {
+      const gate = (globalThis as any).__debuggerGate;
+      gate.method = "";
+      gate.release();
+    });
+    const assertAlive = async (name: string, tabId: number) => {
+      const reply = await request(name, "sendCommand", [{ tabId }, "Runtime.evaluate", { expression: "6 * 7", returnByValue: true }]);
+      expect(reply.error).toBeUndefined();
+      expect(reply.result.result.value).toBe(42);
+    };
+
+    await claim("old");
+    for (const { tabId } of targets) expect((await request("old", "attach", [{ tabId }, "1.3"])).error).toBeUndefined();
+    await setGate("detach");
+    const cancelledAt = Date.now();
+    await opened.page.evaluate(() => (globalThis as any).__debuggerLifecycle.owners.get("old").postMessage({ type: "cancelled" }));
+    await expect.poll(() => opened.page.evaluate(() => (globalThis as any).__debuggerLifecycle.aborted)).toBe(true);
+    expect((await request("old", "sendCommand", [{ tabId: targets[0].tabId }, "Runtime.evaluate", { expression: "1" }])).error).toContain("取消");
+    const cancellationMs = Date.now() - cancelledAt;
+    expect(cancellationMs).toBeLessThan(1_000);
+    await opened.page.evaluate(() => (globalThis as any).__debuggerLifecycle.owners.get("old").disconnect());
+    await expect.poll(() => worker.evaluate(() => (globalThis as any).__debuggerGate.entered)).toBe(1);
+    await idle();
+    const ownerReleaseMs = Date.now() - cancelledAt;
+    expect(ownerReleaseMs).toBeLessThan(4_000);
+    await expect.poll(async () => (await readEvents(opened.page)).filter(event => event.type === "run.cleanup.failed" && event.content?.step === "cleanup-timeout").length).toBe(1);
+    expect(await worker.evaluate(() => (globalThis as any).__debuggerGate.settled)).toBe(0);
+    await claim("next");
+    for (const debuggee of [{ tabId: targets[0].tabId }, { targetId: targets[0].targetId }]) {
+      expect((await request("next", "attach", [debuggee, "1.3"])).error).toContain("resource-cleaning");
+    }
+    expect((await request("next", "attach", [{ tabId: targets[1].tabId }, "1.3"])).error).toBeUndefined();
+    await assertAlive("next", targets[1].tabId);
+    await release();
+    await expect.poll(() => worker.evaluate(() => (globalThis as any).__debuggerGate.settled)).toBe(1);
+    await expect.poll(async () => (await request("next", "attach", [{ tabId: targets[0].tabId }, "1.3"])).error ?? null).toBeNull();
+    await assertAlive("next", targets[0].tabId);
+
+    // A normal detach must also exclude an overlapping reattach on this port,
+    // including the targetId alias of the same tab.
+    await setGate("detach");
+    const detaching = request("next", "detach", [{ tabId: targets[0].tabId }]);
+    await expect.poll(() => worker.evaluate(() => (globalThis as any).__debuggerGate.entered)).toBe(1);
+    expect((await request("next", "attach", [{ targetId: targets[0].targetId }, "1.3"])).error).toContain("resource-busy");
+    await release();
+    expect((await detaching).error).toBeUndefined();
+    expect((await request("next", "attach", [{ targetId: targets[0].targetId }, "1.3"])).error).toBeUndefined();
+    await assertAlive("next", targets[0].tabId);
+    await setGate("sendCommand");
+    const delayedCommand = request("next", "sendCommand", [{ tabId: targets[0].tabId }, "Runtime.evaluate", { expression: "globalThis.__lateCommand = true" }]);
+    await expect.poll(() => worker.evaluate(() => (globalThis as any).__debuggerGate.entered)).toBe(1);
+    expect((await request("next", "detach", [{ targetId: targets[0].targetId }])).error).toBeUndefined();
+    expect((await request("next", "attach", [{ tabId: targets[0].tabId }, "1.3"])).error).toContain("resource-busy");
+    await release();
+    expect((await delayedCommand).error).toBeTruthy();
+    await expect.poll(async () => (await request("next", "attach", [{ tabId: targets[0].tabId }, "1.3"])).error ?? null).toBeNull();
+    const untouched = await request("next", "sendCommand", [{ tabId: targets[0].tabId }, "Runtime.evaluate", { expression: "Boolean(globalThis.__lateCommand)", returnByValue: true }]);
+    expect(untouched.result.result.value).toBe(false);
+    await finish("next");
+    await idle();
+
+    // Cancellation can beat native attachment. Its late success still belongs
+    // to the old lease and must be detached before the next run can reuse it.
+    await claim("pending");
+    await setGate("attach");
+    const attaching = request("pending", "attach", [{ tabId: targets[0].tabId }, "1.3"]);
+    await expect.poll(() => worker.evaluate(() => (globalThis as any).__debuggerGate.entered)).toBe(1);
+    expect((await request("pending", "attach", [{ targetId: targets[0].targetId }, "1.3"])).error).toContain("resource-busy");
+    await finish("pending");
+    await idle();
+    await claim("after-pending");
+    expect((await request("after-pending", "attach", [{ targetId: targets[0].targetId }, "1.3"])).error).toContain("resource-cleaning");
+    expect((await request("after-pending", "attach", [{ tabId: targets[1].tabId }, "1.3"])).error).toBeUndefined();
+    await release();
+    expect(await attaching).toEqual({ disconnected: true });
+    await expect.poll(async () => (await request("after-pending", "attach", [{ tabId: targets[0].tabId }, "1.3"])).error ?? null).toBeNull();
+    await assertAlive("after-pending", targets[0].tabId);
+    await finish("after-pending");
+    await idle();
+    await test.info().attach("debugger-cleanup-timing", {
+      body: JSON.stringify({ cancellationMs, ownerReleaseMs, resources: targets, delayedDetachSettledBeforeOwnerRelease: false,
+        scenarios: ["delayed teardown", "tab/target aliases", "independent resource", "normal detach", "late command", "pending attach"] }, null, 2),
+      contentType: "application/json",
+    });
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
