@@ -27,8 +27,8 @@ if (process.argv.length !== 3 || process.argv[2] !== '--build') throw new Error(
 const repository = realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
 const gitDirectory = realpathSync(execFileSync('git', ['rev-parse', '--absolute-git-dir'], { encoding: 'utf8' }).trim());
 const gitEntry = resolve(repository, '.git');
-const outputRequested = resolve(process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
-const buildDirectoryRequested = resolve(process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
+const outputRequested = resolve(repository, process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
+const buildDirectoryRequested = resolve(repository, process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
 if (isInside(gitEntry, outputRequested)) throw new Error('SURFWAX_RELEASE_DIR must not be inside the Git metadata directory.');
 if (isInside(gitEntry, buildDirectoryRequested)) throw new Error('SURFWAX_DEV_OUT_DIR must not be inside the Git metadata directory because Vite clears the build directory.');
 const output = canonicalPath(outputRequested);
@@ -36,7 +36,7 @@ const buildDirectory = canonicalPath(buildDirectoryRequested);
 if (isInside(gitDirectory, output)) throw new Error('SURFWAX_RELEASE_DIR must not be inside the Git metadata directory.');
 if (isInside(gitDirectory, buildDirectory)) throw new Error('SURFWAX_DEV_OUT_DIR must not be inside the Git metadata directory because Vite clears the build directory.');
 const outputIsInsideRepository = isInside(repository, output);
-if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${output}${sep}`]).status !== 0) {
+if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${output}${sep}`], { cwd: repository }).status !== 0) {
   throw new Error('SURFWAX_RELEASE_DIR must be outside the Git worktree or ignored by Git so generated artifacts cannot make the worktree dirty.');
 }
 if (isInside(buildDirectory, repository)) throw new Error('SURFWAX_DEV_OUT_DIR must not equal or contain the Git worktree because Vite clears the build directory.');
@@ -46,19 +46,20 @@ const publicDirectory = canonicalPath(resolve(repository, 'public'));
 const outputIsInsidePublic = isInside(publicDirectory, output);
 if (outputIsInsidePublic) throw new Error('SURFWAX_RELEASE_DIR must not equal or be nested under public because Vite copies that directory into every build.');
 if (isInside(publicDirectory, buildDirectory)) throw new Error('SURFWAX_DEV_OUT_DIR must not equal or be nested under public because Vite copies that directory into every build.');
-const ignoredPublicInputs = execFileSync('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--', 'public'], { encoding: 'utf8' });
+const ignoredPublicInputs = execFileSync('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--', 'public'], { cwd: repository, encoding: 'utf8' });
 if (ignoredPublicInputs.trim()) throw new Error(`Release packaging refuses ignored files under public because Vite copies them into the build:\n${ignoredPublicInputs.trim()}`);
 const ignoredEnvInputs = execFileSync('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--', '.env', '.env.*'], { cwd: repository, encoding: 'utf8' });
 if (ignoredEnvInputs.trim()) throw new Error(`Release packaging refuses ignored Vite environment files:\n${ignoredEnvInputs.trim()}`);
 const buildIsInsideRepository = isInside(repository, buildDirectory);
-if (buildIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${buildDirectory}${sep}`]).status !== 0) {
+if (buildIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${buildDirectory}${sep}`], { cwd: repository }).status !== 0) {
   throw new Error('SURFWAX_DEV_OUT_DIR must be outside the Git worktree or ignored by Git so the build cannot make the worktree dirty.');
 }
 const assertCleanWorktree = () => {
-  const status = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' });
+  const status = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { cwd: repository, encoding: 'utf8' });
   if (status.trim()) throw new Error('Release packaging requires a clean Git worktree; commit or remove all staged, unstaged, and untracked changes first.');
 };
 assertCleanWorktree();
+const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim();
 
 const packageVersion = JSON.parse(await readFile(join(repository, 'package.json'), 'utf8')).version;
 const expectedTag = `v${packageVersion}`;
@@ -78,14 +79,15 @@ if (mismatchedVersionTags.length > 0) throw new Error(`Checked-out version tag $
   delete installEnvironment.NPM_CONFIG_PRODUCTION;
   delete installEnvironment.npm_config_production;
   execFileSync(npm, ['ci', '--include=dev'], { cwd: repository, stdio: 'inherit', env: installEnvironment });
-  execFileSync(npm, ['exec', '--', 'vite', 'build', '--mode', 'production'], { cwd: repository, stdio: 'inherit', env: { ...process.env, NODE_ENV: 'production' } });
+  execFileSync(npm, ['exec', '--', 'vite', 'build', '--mode', 'production'], { cwd: repository, stdio: 'inherit', env: { ...process.env, NODE_ENV: 'production', SURFWAX_DEV_OUT_DIR: buildDirectory } });
   assertCleanWorktree();
 }
 
 const { version, files, directory } = await validateBuild(buildDirectory);
 if (version !== packageVersion) throw new Error(`Built version ${version} differs from package version ${packageVersion}`);
 await mkdir(output, { recursive: true });
-const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+assertCleanWorktree();
+if (execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim() !== commit) throw new Error('Release packaging requires HEAD to remain unchanged during the build.');
 const archive = join(output, `surf-wax-${version}.zip`);
 // Staging shares the destination filesystem so a completed file can be published atomically.
 const staging = await mkdtemp(join(output, `.surf-wax-${version}-`));
@@ -127,7 +129,7 @@ try {
     if (await readFile(`${archive}.sha256`, 'utf8') !== checksumText) throw new Error(`Existing checksum differs for version ${version}; refusing to overwrite ${archive}.sha256`);
   }
   const notes = join(staging, 'release-notes.md');
-  await writeFile(notes, `# Surf Wax ${version}\n\nSource checkout: ${commit}\n\nThe script installed dependencies from the lockfile, built from a clean Git worktree, checked the built manifest, entrypoints and asset size limits, and generated this ZIP and its SHA-256 checksum. These checks do not constitute browser or performance testing.\n\nDownload the ZIP and checksum, verify SHA-256, extract it, and use Chrome's Load unpacked on the directory containing manifest.json. Chrome Web Store installations update through the store; unpacked installations must be updated manually.\n\nRequired permissions: debugger, downloads, scripting, sidePanel, storage, tabs, unlimitedStorage, userScripts; website access: all URLs.\n`);
+  await writeFile(notes, `# Surf Wax ${version}\n\nSource checkout: ${commit}\n\nChrome 138+; Manifest V3.\n\nThe script installed dependencies from the lockfile, built from a clean Git worktree, checked the built manifest, entrypoints and asset size limits, and generated this ZIP and its SHA-256 checksum. This description assumes trusted local tools and no concurrent source modifications. These checks do not constitute browser or performance testing.\n\nDownload the ZIP and checksum, verify SHA-256, extract it, and use Chrome's Load unpacked on the directory containing manifest.json. Chrome Web Store installations update through the store; unpacked installations must be updated manually.\n\nRequired permissions: debugger, downloads, scripting, sidePanel, storage, tabs, unlimitedStorage, userScripts; website access: all URLs. Downloads are created when you explicitly choose to save a file.\n\nConversation data and full browser/tool results stay in the local canonical event log and are sent to your configured model endpoint when used as model context. See PRIVACY.md in the repository for details.\n`);
   // The unversioned notes describe this invocation; immutable versioned assets above never replace files.
   await rename(notes, join(output, 'release-notes.md'));
 } finally { await rm(staging, { recursive: true, force: true }); }
