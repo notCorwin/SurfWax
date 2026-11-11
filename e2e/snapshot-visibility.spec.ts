@@ -373,10 +373,20 @@ test("text tools require rendered evidence rather than hidden source", async () 
         <div id="translated" style="transform:translateX(1px)">Translated</div>
         <div id="covered" style="position:absolute;top:600px">Covered</div>
         <div style="position:absolute;top:600px;width:300px;height:50px;background:white;z-index:2"></div>
+        <div id="custom-empty">Unknown parent<x-empty></x-empty></div>
+        <div id="custom-open">Open parent<x-open></x-open></div>
+        <div id="custom-closed">Closed parent<x-closed></x-closed></div>
+        <div id="custom-hidden">Hidden parent<x-hidden style="display:none"></x-hidden></div>
         <p id="empty"></p><p id="offscreen" style="position:absolute;top:2500px">Offscreen text</p>
         <button id="start">Start real stamp</button>
         <iframe id="child" srcdoc="<p id='frame-status'>Frame ready</p>"></iframe>
         <iframe id="hidden-child" style="opacity:0" srcdoc="<p id='frame-status'>Hidden frame text</p>"></iframe>`;
+      document.querySelector('x-open')!.attachShadow({ mode: 'open' }).innerHTML = 'Unknown shadow';
+      document.querySelector('x-closed')!.attachShadow({ mode: 'closed' }).innerHTML = 'Unknown shadow';
+      document.querySelector('x-hidden')!.attachShadow({ mode: 'closed' }).innerHTML = 'Hidden shadow';
+      const generated = document.createElement('button'); generated.id = 'show-generated'; generated.textContent = 'Show generated';
+      generated.onclick = () => { const style = document.createElement('style'); style.textContent = 'x-empty::before{content:"additional"}'; document.head.append(style); };
+      document.body.append(generated);
       document.querySelector('#start')!.addEventListener('click', () => {
         setTimeout(() => { document.querySelector('#status')!.textContent = 'Ready'; }, 500);
       });
@@ -399,6 +409,11 @@ test("text tools require rendered evidence rather than hidden source", async () 
         { name: "read_text", input: { target: css(value!) }, expected: { ok: true, result: text } },
         { name: "verify_state", input: { target: css(value!), textEquals: text }, expected: { ok: true, result: { verified: true, actual: text } } },
       ]),
+      { name: "find_elements", input: { target: { by: "text", value: "Unknown parent", exact: true } }, expected: { total: 1 } },
+      { name: "find_elements", input: { target: { by: "text", value: "Hidden parent", exact: true } }, expected: { total: 1 } },
+      ...["#custom-open", "#custom-closed"].map(value => ({
+        name: "read_text", input: { target: css(value) }, expected: { ok: false, error: { code: "text-unavailable" } },
+      })),
       { name: "read_text", input: { target: css("#covered") }, expected: { ok: false, error: { code: "text-unavailable" } } },
       { name: "verify_state", input: { target: css("#covered"), textEquals: "Covered" }, expected: { ok: true, result: { verified: false, actual: null } } },
       { name: "read_text", input: { target: css("#offscreen") }, expected: { ok: true, result: "Offscreen text" } },
@@ -407,10 +422,13 @@ test("text tools require rendered evidence rather than hidden source", async () 
       { name: "verify_state", input: { target: { ...css("#frame-status"), frame: css("#hidden-child") }, textEquals: "Hidden frame text" }, expected: { ok: true, result: { verified: false, actual: null } } },
       { name: "click", input: { target: css("#start") }, expected: { ok: true } },
       { name: "verify_state", input: { target: { by: "text", value: "Ready" }, textEquals: "Ready", timeoutMs: 5000 }, expected: { ok: true, result: { verified: true, actual: "Ready", present: true } } },
+      { name: "click", input: { target: css("#show-generated") }, expected: { ok: true } },
+      { name: "read_text", input: { target: css("#custom-empty") }, expected: { ok: false, error: { code: "text-unavailable" } } },
+      { name: "find_elements", input: { target: { by: "text", value: "Unknown parent", exact: true } }, expected: { total: 0 } },
     ];
     responses.push(commandResponse(steps[0]!.name, steps[0]!.input, "rendered-0"));
     steps.forEach((step, index) => responses.push(request => {
-      expect(lastTool(request)).toMatchObject(step.expected);
+      expect(lastTool(request), JSON.stringify(lastTool(request))).toMatchObject(step.expected);
       const next = steps[index + 1];
       return next ? commandResponse(next.name, next.input, `rendered-${index + 1}`) : textResponse("RENDERED_TEXT_OK");
     }));
@@ -421,4 +439,98 @@ test("text tools require rendered evidence rather than hidden source", async () 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RENDERED_TEXT_OK", { timeout: 100_000 });
     expect(await target.locator("#status").innerText()).toBe("Ready");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+test("duplicate text queries share current paint work and preserve strictness and paging", async () => {
+  test.setTimeout(180_000);
+  const { createServer } = await import('node:http');
+  const { writeFile } = await import('node:fs/promises');
+  let effects = 0;
+  const server = createServer((request, response) => {
+    if (request.url === '/effects') { response.setHeader('access-control-allow-origin', '*'); response.end(String(effects)); return; }
+    if (request.url === '/effect') { effects++; response.end('ok'); return; }
+    const n = Number(new URL(request.url!, 'http://fixture').searchParams.get('n'));
+    response.setHeader('content-type', 'text/html');
+    response.end(`<!doctype html><style>body{margin:8px;background:white;color:black}.grid{display:grid;grid-template-columns:repeat(25,48px)}button{font:10px Arial;height:25px;padding:0;border:1px solid gray}</style><div class="grid">${'<button onclick="fetch(\'/effect\')">Process</button>'.repeat(n)}</div><button id="unique" onclick="fetch('/effect')">Unique</button>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const opened = await openExtension(undefined, { viewport: { width: 1400, height: 900 } });
+  try {
+    await expect(opened.page.getByTestId('open-settings')).toBeVisible();
+    const evidence = await opened.page.evaluate(async ({ dev, origin }) => {
+      const { EventLogger } = await import(`${dev}/src/logging.ts`);
+      const { createMemoryEventStore } = await import(`${dev}/src/memory-event-store.ts`);
+      const { ChromeExecutor } = await import(`${dev}/src/chrome/executor.ts`);
+      const { createProgramTools } = await import(`${dev}/src/chrome/tool.ts`);
+      const { claimConversationRun } = await import(`${dev}/src/agent/coordinator.ts`);
+      const conversationId = crypto.randomUUID();
+      const lease = await claimConversationRun(conversationId, undefined, conversationId);
+      const logger = new EventLogger({ store: createMemoryEventStore([]) });
+      logger.beginRun(conversationId, conversationId);
+      const executor = new ChromeExecutor({ logger }); await executor.beginRun();
+      const tools = createProgramTools(executor, { logger, conversationId, runSignal: lease.signal });
+      const records: any[] = [];
+      const check = (v: any, message: string) => { if (!v) throw new Error(message); };
+      const originalInspect = executor.inspect.bind(executor);
+      let snapshotMs = 0;
+      executor.inspect = async (...args: any[]) => {
+        const started = performance.now();
+        try { return await originalInspect(...args); }
+        finally { snapshotMs += performance.now() - started; }
+      };
+      const call = async (name: string, input: any) => {
+        snapshotMs = 0; const start = performance.now();
+        const output = await tools[name].execute(input, { toolCallId: crypto.randomUUID(), messages: [] });
+        const elapsedMs = performance.now() - start;
+        records.push({ name, input, elapsedMs, snapshotMs, nonSnapshotMs: elapsedMs - snapshotMs, output });
+        return output;
+      };
+      const raw = async (output: any) => {
+        if (!output.$ref && !output.resultAccess) return output.result ?? output;
+        const base = output.resultAccess ?? { artifactId: output.$ref, path: [] };
+        const read = (path: any[], offset?: number) => tools.read_artifact.execute({ artifactId: base.artifactId, path: [...base.path, ...path], ...(offset === undefined ? {} : {offset, limit: 100}) }, { toolCallId: crypto.randomUUID(), messages: [] });
+        const data: any = {};
+        for (const key of ['total', 'hasMore', 'nextCursor']) data[key] = (await read([key])).result;
+        data.elements = [];
+        let part: any;
+        do { part = await read(['elements'], data.elements.length); check(part.ok, JSON.stringify(part)); data.elements.push(...part.result); } while (part.hasMore);
+        return data;
+      };
+      try {
+        for (const n of [500]) {
+          const tab = await chrome.tabs.create({ url: `${origin}/?n=${n}`, active: false }); const tabId = tab.id!;
+          // The real tool chain waits for document load and delivers its snapshot.
+          for (const by of ['text', 'role']) for (const limit of [25, 100]) {
+            const target = by === 'text' ? { by, value: 'Process', exact: true } : { by, value: 'button', name: 'Process', exact: true };
+            let page = await call('find_elements', { tabId, target, limit });
+            check(page.ok !== false, JSON.stringify(page));
+            let data = await raw(page); check(data.total === n, JSON.stringify(data));
+            let count = data.elements.length; const ids = new Set(data.elements.map((item: any) => item.id));
+            while (data.hasMore) {
+              page = await call('find_elements', { tabId, target, limit, cursor: data.nextCursor });
+              check(page.ok !== false, JSON.stringify(page)); data = await raw(page);
+              check(data.total === n, JSON.stringify(data)); count += data.elements.length;
+              data.elements.forEach((item: any) => ids.add(item.id));
+            }
+            check(count === n && ids.size === n, `paging ${n}: ${count}/${ids.size}: ${JSON.stringify(page)}`);
+          }
+          const result = await call('click', { tabId, target: { by: 'text', value: 'Process', exact: true } });
+          check(result.error?.code === 'strict-mode' && result.error.effectUnknown === false, JSON.stringify(result));
+          check(await (await fetch(`${origin}/effects`)).text() === '0', 'ambiguous click must not dispatch');
+          {
+            check(result.error.message.includes(`"count":${n}`), result.error.message);
+            const followup = await call('click', { tabId, target: { by: 'text', value: 'Unique', exact: true } });
+            check(followup.ok, JSON.stringify(followup));
+            check(await (await fetch(`${origin}/effects`)).text() === '1', 'unique click dispatches exactly once');
+          }
+          await chrome.tabs.remove(tabId);
+        }
+        return records;
+      } finally { await executor.endRun(); executor.dispose(); logger.dispose(); lease.finish(); }
+    }, { dev: process.env.SURFWAX_DEV_SERVER_URL!, origin: `http://127.0.0.1:${(server.address() as any).port}` });
+    expect(effects).toBe(1);
+    const path = test.info().outputPath('duplicate-text.json');
+    await writeFile(path, JSON.stringify({ effects, records: evidence }, null, 2));
+    await test.info().attach('duplicate-text', { path, contentType: 'application/json' });
+  } finally { await dispose(opened.context, opened.userDataDirectory, server); }
 });

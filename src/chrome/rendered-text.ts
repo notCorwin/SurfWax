@@ -11,7 +11,25 @@ export function createRenderedTextReader(
   const styles = new WeakMap<Element, CSSStyleDeclaration>();
   const excluded = new WeakMap<Element, boolean>();
   const proven = new WeakMap<Element, boolean>();
-  const textProofs = new WeakMap<Text, boolean>();
+  // One page-wide topology/paint pass serves every candidate in this query.
+  // Do not retain this closure across an await, mutation, frame or epoch change.
+  let sampled = false;
+  let accepted = new Set<Text>();
+  let unknown = new Set<Element>();
+  const ensureProof = () => {
+    if (sampled) return;
+    sampled = true;
+    install(true);
+    sample(NaN, [], { shadowRoots: [], placeholder: () => null, controls: () => null },
+      { scope: document.documentElement, accept: (nodes, unsafe) => { accepted = nodes; unknown = unsafe; } });
+  };
+  const composedUnknown = (el: Element) => {
+    if (el.localName === "slot" || el.shadowRoot) return true;
+    if (!el.localName.includes("-")) return false;
+    // Only the extension API can prove absence of closed author roots.
+    const dom = (globalThis as any).chrome?.dom;
+    return typeof dom?.openOrClosedShadowRoot !== "function" || !!dom.openOrClosedShadowRoot(el) || unknown.has(el);
+  };
   const style = (el: Element) => {
     let value = styles.get(el);
     if (!value) { value = el.ownerDocument.defaultView!.getComputedStyle(el); styles.set(el, value); }
@@ -29,38 +47,19 @@ export function createRenderedTextReader(
     if (results.has(root)) return results.get(root)!;
     if (!view || !root.isConnected || !(root instanceof view.HTMLElement) || omitted(root)
       || !root.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return null;
-    let valid = true;
-    const nodes: Text[] = [];
-    const visit = (el: Element) => {
-      if (omitted(el)) return;
-      if (proven.has(el)) { valid = valid && proven.get(el)!; return; }
-      // This local reader does not claim composed-tree serialization.
-      if (el.shadowRoot || el.localName.includes("-") || el.localName === "slot") valid = false;
-      for (const node of el.childNodes) {
-        if (node.nodeType === 1) visit(node as Element);
-        else if (node.nodeType === 3 && node.nodeValue?.trim() && style(el).visibility === "visible") nodes.push(node as Text);
-      }
-    };
-    visit(root);
-    let accepted = new Set<Text>();
-    if (valid && nodes.some(node => !textProofs.has(node))) {
-      install(true);
-      sample(NaN, [], { shadowRoots: [], placeholder: () => null, controls: () => null },
-        { scope: root, accept: value => { accepted = value; } });
-      for (const node of nodes) textProofs.set(node, accepted.has(node));
-    }
+    ensureProof();
     const summarize = (el: Element): boolean => {
       if (omitted(el)) return true;
       if (proven.has(el)) return proven.get(el)!;
-      let complete = !el.shadowRoot && !el.localName.includes("-") && el.localName !== "slot";
+      let complete = !composedUnknown(el) && !unknown.has(el);
       for (const node of el.childNodes) {
         if (node.nodeType === 1) complete = summarize(node as Element) && complete;
         else if (node.nodeType === 3 && node.nodeValue?.trim() && style(el).visibility === "visible")
-          complete = textProofs.get(node as Text) === true && complete;
+          complete = accepted.has(node as Text) && complete;
       }
       proven.set(el, complete); return complete;
     };
-    valid = summarize(root) && valid;
+    const valid = summarize(root);
     const value = valid && root.isConnected ? root.innerText : null;
     results.set(root, value); return value;
   };

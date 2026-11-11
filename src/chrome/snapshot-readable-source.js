@@ -1682,7 +1682,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     if (overlap) gap("text-overlap", item.node, item.region);
     return !overlap;
   });
-  if (textEvidence) { textEvidence.accept(new Set(accepted.map(item => item.node))); return null; }
+  if (textEvidence) { textEvidence.accept(new Set(accepted.map(item => item.node)), new Set([...uncertainLabels, ...shadowRoots.keys()])); return null; }
   const interactiveRoles = new Set([
     "button",
     "checkbox",

@@ -485,7 +485,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
   return result.map(el => ({ role: roleOf(el), name: nameOf(el), tag: el.tagName.toLowerCase(), text: visibleText(el)?.slice(0, 120) ?? null }));
 }`;
 
-const SEARCH_META_SOURCE = String.raw`function(includeIdentity) {
+const SEARCH_META_SOURCE = String.raw`function(includeIdentity, readText) {
   const el = this;
   const normalize = value => String(value ?? "").replace(/\s+/g, " ").trim();
   const role = el.getAttribute("role") || ({
@@ -493,7 +493,7 @@ const SEARCH_META_SOURCE = String.raw`function(includeIdentity) {
     H1:"heading", H2:"heading", H3:"heading", H4:"heading", H5:"heading", H6:"heading", NAV:"navigation", MAIN:"main", ARTICLE:"article", ASIDE:"complementary", FOOTER:"contentinfo", HEADER:"banner", UL:"list", OL:"list", LI:"listitem", DIALOG:"dialog", PROGRESS:"progressbar"
   }[el.tagName] || (el.tagName === "INPUT" ? ({checkbox:"checkbox",radio:"radio",range:"slider",number:"spinbutton",search:"searchbox",button:"button",submit:"button",reset:"button"}[el.type] || "textbox") : "generic"));
   const name = normalize(el.getAttribute("aria-label") || (() => { const ids = el.getAttribute("aria-labelledby"); return ids && ids.split(/\s+/).map(id => el.getRootNode().getElementById?.(id)?.textContent || "").join(" "); })() || (el.labels ? [...el.labels].map(label => label.textContent).join(" ") : "") || el.getAttribute("alt") || el.getAttribute("title") || el.textContent || el.value);
-  const renderedText = (${RENDERED_TEXT_SOURCE}).call(el);
+  const renderedText = (readText || ${RENDERED_TEXT_READER_SOURCE}).call(el);
   const text = renderedText === null ? null : normalize(renderedText);
   const identityTooLarge = String(role).length + name.length > 2_000_000;
   return { connected: el.isConnected, role: String(role).slice(0, 80), name: name.slice(0, 160), ...(includeIdentity ? identityTooLarge ? { identityTooLarge: true } : { identityRole: String(role), identityName: name } : {}), text: text?.slice(0, 120) ?? null, tag: el.tagName.toLowerCase(),
@@ -2259,7 +2259,7 @@ export class AutomationRuntime {
           const byIndex = new Map((properties.result ?? []).filter((property: any) => /^(0|[1-9]\d*)$/.test(property.name)).map((property: any) => [Number(property.name), property.value?.objectId]));
           objects = Array.from({ length: end - offset }, (_, index) => ({ objectId: byIndex.get(index) as string | undefined }));
         }
-        const results = await Promise.allSettled(objects.map(async ({ objectId, candidate }) => {
+        const resolvedObjects = await Promise.allSettled(objects.map(async ({ objectId, candidate }) => {
           pageGuard();
           let nodeObject = objectId;
           if (candidate) {
@@ -2275,11 +2275,26 @@ export class AutomationRuntime {
           }
           if (!nodeObject) throw automationError("search-unavailable", { reason: "missing-node-object" });
           temporary.add(nodeObject);
-          const description = await this.options.command(current.debuggee, "Runtime.callFunctionOn", { objectId: nodeObject,
-            functionDeclaration: SEARCH_META_SOURCE, arguments: [{ value: !candidate }], returnByValue: true });
+          return { objectId: nodeObject, candidate };
+        }));
+        const nodes = resolvedObjects.flatMap(result => result.status === "fulfilled" && result.value.objectId ? [result.value.objectId] : []);
+        const metadataByObject = new Map<string, any>();
+        if (nodes.length) {
           pageGuard();
-          if (description.exceptionDetails) throw new Error(description.exceptionDetails.exception?.description || description.exceptionDetails.text);
-          const metadata = description.result?.value;
+          // Describe the page in one task; paint evidence must not cross the
+          // asynchronous identity/frame checks below or survive to another page.
+          const response = await this.options.command(current.debuggee, "Runtime.callFunctionOn", { objectId: nodes[0],
+            functionDeclaration: `function(includeIdentity,...nodes){const readText=${RENDERED_TEXT_READER_SOURCE};return nodes.map(node => (${SEARCH_META_SOURCE}).call(node,includeIdentity,readText))}`,
+            arguments: [{ value: !current.candidates }, ...nodes.map(objectId => ({ objectId }))], returnByValue: true });
+          pageGuard();
+          if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+          nodes.forEach((node, index) => metadataByObject.set(node, response.result?.value?.[index]));
+        }
+        const results = await Promise.allSettled(resolvedObjects.map(async result => {
+          if (result.status === "rejected") throw result.reason;
+          if (!result.value.objectId) return result.value;
+          const { objectId: nodeObject, candidate } = result.value;
+          const metadata = metadataByObject.get(nodeObject);
           if (metadata?.connected === false) return { status: "detached" };
           if (metadata?.connected !== true) throw automationError("search-unavailable", { reason: "missing-node-state" });
           let backendNodeId = candidate?.backendNodeId;
@@ -2783,7 +2798,7 @@ export class AutomationRuntime {
       if (!Number.isSafeInteger(count) || count < 0) throw automationError("state-unavailable", { reason: "invalid-result-count" });
       if (count > 1) {
         const details = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
-          functionDeclaration: `function(){return this.slice(0,10).map(element => (${SEARCH_META_SOURCE}).call(element, false))}`, returnByValue: true });
+          functionDeclaration: `function(){const readText=${RENDERED_TEXT_READER_SOURCE};return this.slice(0,10).map(element => (${SEARCH_META_SOURCE}).call(element, false, readText))}`, returnByValue: true });
         if (details.exceptionDetails) throw new Error(details.exceptionDetails.exception?.description || details.exceptionDetails.text);
         throwIfAborted(this.context.signal);
         const candidates = Array.isArray(details.result?.value) ? details.result.value : [];
@@ -3150,11 +3165,20 @@ export class AutomationRuntime {
         if (temporaryRoot) void this.options.command(debuggee, "Runtime.releaseObject", { objectId: temporaryRoot }).catch(() => undefined);
       }
     }
+    // The extension world supplies current closed-shadow topology to the
+    // shared paint reader. Never infer an empty composed subtree from tag names.
+    let contextId: number | undefined;
+    if (!rootObjectId && session && !debuggee.sessionId && !this.options.observationWorldName) {
+      await this.prepareObservationPrimitives(session);
+      await this.options.command(debuggee, "Runtime.evaluate", { expression: "void 0", returnByValue: true });
+      contextId = this.extensionObservationContext(session, session.rootFrameId!)?.id;
+      if (!contextId) throw automationError("text-unavailable", { reason: "missing-extension-observation-context" });
+    }
     const response = rootObjectId
       ? await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: rootObjectId,
           functionDeclaration: `function(spec, metadata){return (${RESOLVER_SOURCE})(spec, metadata, this)}`,
           arguments: [{ value: spec }, { value: metadata }], returnByValue, objectGroup })
-      : await this.options.command(debuggee, "Runtime.evaluate", { expression: `(${RESOLVER_SOURCE})(${JSON.stringify(spec)}, ${JSON.stringify(metadata)})`, returnByValue, objectGroup });
+      : await this.options.command(debuggee, "Runtime.evaluate", { expression: `(${RESOLVER_SOURCE})(${JSON.stringify(spec)}, ${JSON.stringify(metadata)})`, ...(contextId === undefined ? {} : { contextId }), returnByValue, objectGroup });
     if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
     return response.result;
   }
