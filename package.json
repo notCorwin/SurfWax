@@ -13,16 +13,14 @@
     "test:watch": "vitest",
     "test:e2e": "node scripts/run-browser-tests.mjs e2e",
     "release:package": "node scripts/package-release.mjs --build",
-    "test:performance": "node scripts/run-browser-tests.mjs performance",
     "measure:tools": "node scripts/measure-tool-budget.mjs",
-    "eval:real-model": "playwright test e2e/real-model-evaluation.spec.ts --retries=0",
+    "eval:real-model": "SURFWAX_REAL_MODEL_EVAL=1 node scripts/run-browser-tests.mjs e2e e2e/real-model-evaluation.spec.ts",
     "eval:suite": "node --experimental-strip-types e2e/evaluation/suite-cli.ts",
     "sdk:check": "node scripts/check-sdk-coverage.mjs",
     "catalog:update": "node scripts/update-model-catalog.mjs",
     "catalog:check": "node scripts/update-model-catalog.mjs --check",
     "verify:local": "node scripts/verify-local.mjs",
-    "tools": "node scripts/tools.mjs",
-    "test:tools": "vitest run --config vitest.tools.config.ts"
+    "tools": "node scripts/tools.mjs"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^5.0.90",

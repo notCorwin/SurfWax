@@ -23,7 +23,7 @@ export async function runCommand(command, args, options = {}) {
 
 /** Keep Vite responsive while Playwright exercises the development extension. */
 export async function runBrowserTests(kind, options = {}) {
-  if (kind !== 'e2e' && kind !== 'performance') throw new Error(`Unknown browser test kind: ${kind}`);
+  if (kind !== 'e2e') throw new Error(`Unknown browser test kind: ${kind}`);
   const cwd = resolve(options.cwd ?? process.cwd());
   const sourceEnv = options.env ?? process.env;
   const executablePath = (options.systemChromePath ?? systemChromePath)(sourceEnv);
@@ -39,7 +39,7 @@ export async function runBrowserTests(kind, options = {}) {
     env.SURFWAX_TEST_OUTPUT_DIR = resolve(artifacts.directory, 'results');
     env.PLAYWRIGHT_HTML_OUTPUT_DIR = resolve(artifacts.directory, 'html');
     await (options.runCommand ?? runCommand)(options.node ?? process.execPath,
-      ['node_modules/@playwright/test/cli.js', 'test', kind === 'e2e' ? '--grep-invert' : '--grep', '@performance', ...(options.args ?? [])], { cwd, env });
+      ['node_modules/@playwright/test/cli.js', 'test', ...(options.args ?? [])], { cwd, env });
     status = 'passed';
   } finally {
     try { await development.close(); } finally { await artifacts?.finish(status); }

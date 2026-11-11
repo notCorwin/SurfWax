@@ -35,10 +35,7 @@ export async function verifyLocal(options = {}) {
     }
   }
   try {
-    await run('Script regression tests', ['--test', 'scripts/tests/sdk-coverage.test.mjs', 'scripts/tests/browser-tests.test.mjs', 'scripts/tests/dev-storage.test.mjs']);
-    await run('Live Models.dev SDK coverage', ['scripts/check-sdk-coverage.mjs']);
-    await run('Bundled Models.dev freshness', ['scripts/update-model-catalog.mjs', '--check']);
-    await run('Type checking', ['node_modules/typescript/bin/tsc', '--noEmit']);
+    await run('Type checking', ['node_modules/typescript/lib/tsc.js', '--noEmit']);
     await run('Unit and SDK request contracts', ['node_modules/vitest/vitest.mjs', 'run', '--reporter=default', '--reporter=json', `--outputFile.json=${resolve(verification, 'unit-results.json')}`]);
     env.SURFWAX_TEST_OUTPUT_DIR = resolve(artifacts.directory, 'e2e/results');
     env.PLAYWRIGHT_HTML_OUTPUT_DIR = resolve(artifacts.directory, 'e2e/html');
@@ -46,11 +43,7 @@ export async function verifyLocal(options = {}) {
     env.SURFWAX_EXTENSION_PATH = development.extensionPath;
     env.SURFWAX_DEV_SERVER_URL = development.url;
     env.PLAYWRIGHT_JSON_OUTPUT_FILE = resolve(verification, 'e2e-results.json');
-    await run('Installed Chrome development E2E', ['node_modules/@playwright/test/cli.js', 'test', '--grep-invert', '@performance', '--reporter=list,html,json']);
-    env.SURFWAX_TEST_OUTPUT_DIR = resolve(artifacts.directory, 'performance/results');
-    env.PLAYWRIGHT_HTML_OUTPUT_DIR = resolve(artifacts.directory, 'performance/html');
-    env.PLAYWRIGHT_JSON_OUTPUT_FILE = resolve(verification, 'performance-results.json');
-    await run('120Hz rendering traces and interaction performance', ['node_modules/@playwright/test/cli.js', 'test', '--grep', '@performance', '--reporter=list,html,json']);
+    await run('Installed Chrome development E2E', ['node_modules/@playwright/test/cli.js', 'test', '--reporter=list,html,json']);
     status = 'passed';
   } finally {
     try {

@@ -1,408 +1,213 @@
 import { expect } from "@playwright/test";
-import { test, textResponse, assistantResponse, delayedResponse, commandResponse, startProvider, openExtension, dispose, configure, readEvents, attachTarget, nativePanel, openNativeSidePanel, submitNative, readNativeEvents, type MockResponse } from "./fixtures";
-import { itemLine } from "./snapshot-format";
+import {
+  assistantResponse,
+  attachTarget,
+  commandResponse,
+  configure,
+  dispose,
+  nativePanel,
+  openExtension,
+  readEvents,
+  readNativeEvents,
+  startProvider,
+  submitNative,
+  test,
+  textResponse,
+} from "./fixtures";
 
 function nativeAssistantText(panel: Awaited<ReturnType<typeof attachTarget>>) {
   return panel.evaluate<string>(`Array.from(document.querySelectorAll('[data-role="assistant"]'))
     .map(element => element.textContent || '').join('\\n')`);
 }
 
-test("opens the real side panel through the extension action", async () => {
-  const provider = await startProvider([]);
-  const opened = await openExtension();
-  try {
-    await opened.page.close();
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/target`);
-    const browserSession = await opened.context.browser()!.newBrowserCDPSession();
-    const { targetInfos } = await browserSession.send("Target.getTargets", {
-      filter: [{ type: "tab", exclude: false }, { exclude: true }],
-    });
-    const tab = targetInfos.find((info) => info.type === "tab" && info.url === target.url());
-    expect(tab).toBeDefined();
-    try { await browserSession.send("Extensions.triggerAction", { id: opened.extensionId, targetId: tab!.targetId }); }
-    catch (error) {
-      test.skip(/Extensions\.triggerAction.*(?:wasn't found|not found)|method not found/i.test(String(error)),
-        'Chrome 138 lacks the CDP Extensions.triggerAction command; native panel API opening is covered by the lifecycle tests.');
-      throw error;
-    }
-    await expect.poll(async () => (await browserSession.send("Target.getTargets")).targetInfos
-      .some((info) => info.url.split(/[?#]/, 1)[0] === `chrome-extension://${opened.extensionId}/sidepanel.html`)).toBe(true);
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
-test("uses a large observation from the real side panel before acting on its ref", async () => {
-  const responses: MockResponse[] = [];
-  const provider = await startProvider(responses);
-  const opened = await openExtension();
-  let panel: Awaited<ReturnType<typeof attachTarget>> | undefined;
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/target`);
-    await target.evaluate(() => {
-      document.body.innerHTML = '<button id="exact">Run exact action</button>';
-      document.querySelector("#exact")!.addEventListener("click", () => { document.body.dataset.clicked = "yes"; });
-      for (let index = 0; index < 350; index += 1) {
+test(
+  "closing a native Side Panel aborts its owner and prevents a queued page mutation",
+  { tag: "@user-journey" },
+  async () => {
+    const calls = [
+      {
+        name: "verify_state",
+        input: {
+          target: { by: "label", value: "Never exists" },
+          state: "visible",
+          timeoutMs: 300_000,
+        },
+      },
+      {
+        name: "click",
+        input: {
+          target: { by: "role", value: "button", name: "Queued native action" },
+        },
+      },
+    ];
+    const provider = await startProvider([
+      assistantResponse({
+        tool_calls: calls.map((call, index) => ({
+          id: `native-queue-${index}`,
+          type: "function",
+          function: { name: call.name, arguments: JSON.stringify(call.input) },
+        })),
+      }),
+    ]);
+    const opened = await openExtension();
+    try {
+      await (
+        await configure(opened.context, opened.page, provider.baseURL)
+      ).close();
+      const native = await nativePanel(opened, `${provider.origin}/target`);
+      await native.target.evaluate(() => {
         const button = document.createElement("button");
-        button.textContent = `Filler action ${String(index).padStart(3, "0")} with a deliberately long accessible name`;
+        button.textContent = "Queued native action";
+        button.onclick = () => {
+          document.documentElement.dataset.queuedNativeRan = "yes";
+        };
         document.body.append(button);
-      }
-    });
-    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/target`);
-    expect(tab?.id).toBeDefined();
+      });
+      await submitNative(native.panel, "perform two queued actions");
+      await expect
+        .poll(() =>
+          native.panel.evaluate<boolean>(
+            'document.body.textContent.includes("检查页面状态")',
+          ),
+        )
+        .toBe(true);
+      await expect
+        .poll(
+          async () =>
+            (await readNativeEvents(native.panel)).filter(
+              (event) =>
+                event.type === "tool.started" &&
+                event.toolCallId?.startsWith("native-queue-"),
+            ).length,
+        )
+        .toBe(2);
+      await native.panel.close();
+      expect(
+        (
+          await native.browser.send("Target.closeTarget", {
+            targetId: native.targetId,
+          })
+        ).success,
+      ).toBe(true);
+      await expect
+        .poll(() =>
+          native.target.evaluate(
+            () => document.documentElement.dataset.queuedNativeRan,
+          ),
+        )
+        .toBeUndefined();
+      const recovery = await opened.context.newPage();
+      await recovery.goto(
+        `chrome-extension://${opened.extensionId}/sidepanel.html`,
+      );
+      await expect
+        .poll(
+          async () =>
+            (await readEvents(recovery)).filter(
+              (event) =>
+                event.type === "tool.failed" &&
+                event.toolCallId?.startsWith("native-queue-"),
+            ).length,
+        )
+        .toBe(2);
+      expect(provider.requests).toHaveLength(1);
+    } finally {
+      await dispose(opened.context, opened.userDataDirectory, provider.server);
+    }
+  },
+);
 
-    responses.push(
-      commandResponse("inspect_page", { budget: 100000 }, "call-large-observe"),
-      (request) => {
-        const message = request.messages.findLast((entry: any) => entry.role === "tool");
-        const ref = JSON.parse(message.content).$ref;
-        return commandResponse("read_artifact", { artifactId: ref, path: ["items"], offset: 0, limit: 5 }, "call-read-snapshot");
+test("a recoverable complete-response failure retries without repeating a completed browser effect", async () => {
+  const effectId = "retry-effect-once";
+  const provider = await startProvider([
+    commandResponse(
+      "click",
+      {
+        target: { by: "role", value: "button", name: "RETRY_EFFECT_ACCEPTED" },
       },
-      (request) => {
-        const message = request.messages.findLast((entry: any) => entry.role === "tool");
-        const items = JSON.parse(message.content).result;
-        const ref = items.find((item: any) => itemLine(item).includes('button "Run exact action"'))?.id;
-        if (!ref) throw new Error("The selected snapshot did not contain the target ref");
-        return commandResponse("click", { target: { id: ref } }, "call-act-from-ref");
-      },
-      textResponse("REAL_SIDE_PANEL_OK"),
-      textResponse("真实侧边栏"),
-    );
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    panel = (await nativePanel(opened, target.url(), { target })).panel;
-    await panel.evaluate(`(async () => {
-      const input = document.querySelector('[data-testid=composer-input]');
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, 'observe the large page and use its exact ref');
-      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: input.value }));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      input.closest('form').requestSubmit();
-    })()`);
-    await expect.poll(() => panel!.evaluate<string>('Array.from(document.querySelectorAll(".markdown-body")).at(-1)?.textContent || ""'), { timeout: 45_000 }).toContain("REAL_SIDE_PANEL_OK");
-    await expect.poll(() => target.locator("body").getAttribute("data-clicked")).toBe("yes");
-
-    const events = await panel.evaluate<any[]>(`new Promise((resolve, reject) => {
-      const request = indexedDB.open('side-agent-runtime');
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const all = request.result.transaction('events', 'readonly').objectStore('events').getAll();
-        all.onerror = () => reject(all.error); all.onsuccess = () => resolve(all.result);
-      };
-    })`);
-    const data = events.filter((event) => event.type === "tool.result.data");
-    expect(data).toHaveLength(1);
-    expect(data[0].output.items.length).toBeGreaterThan(100);
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-large-observe")?.output).toMatchObject({ $ref: data[0].id });
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-read-snapshot")?.output.result).toEqual(expect.arrayContaining([expect.objectContaining({ line: expect.stringContaining('button "Run exact action"'), ref: expect.any(String) })]));
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-act-from-ref")?.output).toMatchObject({ ok: true });
-  } finally {
-    await panel?.close();
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
-test("executes a completed DSML scroll in the side panel", async () => {
-  const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="scroll"><｜DSML｜ parameter name="deltaY" string="false">600</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
-  const provider = await startProvider([
-    textResponse(dsml),
-    textResponse("SCROLL_OK"),
-    textResponse("滚动测试"),
-  ]);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/scroll-target`);
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    await opened.page.getByTestId("composer-input").fill("scroll the page");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("SCROLL_OK");
-    await expect.poll(() => target.evaluate(() => scrollY)).toBeGreaterThan(0);
-    await expect(opened.page.locator('[data-role="assistant"]').last()).not.toContainText("DSML");
-    const events = await readEvents(opened.page);
-    expect(events.filter((event) => event.type === "tool.finished" && event.content?.toolName === "scroll")).toHaveLength(1);
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
-test("executes a completed DSML text read in the side panel", async () => {
-  const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="read_text"><｜DSML｜ parameter name="target" string="false">{"by":"css","value":"body"}</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
-  const provider = await startProvider([textResponse(dsml), textResponse("READ_OK"), textResponse("读取页面")]);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/target`);
-    await target.evaluate(() => { document.body.textContent = "知识点掌握度 72%"; });
-    await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    await target.bringToFront();
-    await opened.page.getByTestId("composer-input").fill("read the knowledge score");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("READ_OK");
-    await expect(opened.page.locator('[data-role="assistant"]').last()).not.toContainText("DSML");
-    const terminal = (await readEvents(opened.page)).filter((event) => event.type === "tool.finished" && event.content?.toolName === "read_text");
-    expect(terminal).toHaveLength(1);
-    expect(terminal[0].output.result).toBe("知识点掌握度 72%");
-  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
-});
-
-test("closing the panel cancels a pending complete response and continues only on request", async () => {
-  const provider = await startProvider([delayedResponse(textResponse("CANCELLED_RESPONSE"), 30_000), textResponse("CONTINUED"), textResponse("恢复后的标题")]);
-  const opened = await openExtension();
-  try {
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    await opened.page.getByTestId("composer-input").fill("cancel the pending reply");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    await expect.poll(() => provider.requests.length).toBe(1);
-    await opened.page.close();
-    await expect.poll(() => provider.stats.abortedResponses).toBe(1);
-
-    const resumed = await opened.context.newPage();
-    await resumed.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
-    await expect(resumed.getByTestId("conversation-menu")).toContainText("新对话");
-    await resumed.getByTestId("conversation-menu").click();
-    await resumed.locator(".conversation-item").first().locator(".conversation-select").click();
-    await expect(resumed.getByTestId("interrupted-message")).toBeVisible();
-    await expect(resumed.getByTestId("live-tool-calls")).toHaveCount(0);
-    expect(JSON.stringify(await readEvents(resumed))).not.toContain("CANCELLED_RESPONSE");
-    await expect(resumed.getByTestId("continue-interrupted")).toHaveCount(0);
-    await resumed.getByTestId("composer-input").fill("继续上一次被中断的工作，先确认已经完成的操作。");
-    await resumed.getByTestId("composer-input").press("Enter");
-    await expect(resumed.locator('[data-role="user"]').last()).toContainText("继续上一次被中断的工作");
-    await expect(resumed.locator(".markdown-body").last()).toContainText("CONTINUED");
-    await expect(resumed.getByTestId("conversation-menu")).toContainText("恢复后的标题");
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
-test("closing the panel prevents a queued chrome call from starting", async () => {
-  const responses: MockResponse[] = [];
-  const provider = await startProvider(responses);
-  const targetUrl = `${provider.origin}/target`;
-  responses.push(assistantResponse({ tool_calls: [
-    { id: "call-queued-0", type: "function", function: { name: "verify_state", arguments: JSON.stringify({ target: { by: "css", value: "#never-exists" }, state: "visible", timeoutMs: 60_000 }) } },
-    { id: "call-queued-1", type: "function", function: { name: "click", arguments: JSON.stringify({ target: { by: "role", value: "button", name: "Queued action" } }) } },
-  ] }));
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(targetUrl);
-    await target.evaluate(() => { const button = document.createElement("button"); button.textContent = "Queued action"; button.onclick = () => { document.documentElement.dataset.queuedToolRan = "yes"; }; document.body.append(button); });
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    await opened.page.getByTestId("composer-input").fill("queue two calls");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    const process = opened.page.getByTestId("live-tool-calls");
-    await expect(process).toHaveCount(1);
-    await expect(process.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(process.locator(".activity").last()).toContainText("点击");
-    await expect(process.locator('.activity[data-status="running"]').last()).toBeVisible();
-    const runningLabel = process.locator('.activity[data-status="running"]').last();
-    await opened.page.emulateMedia({ colorScheme: "dark" });
-    await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationName)).toBe("none");
-    await opened.page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
-    await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationName)).toBe("none");
-    await opened.page.emulateMedia({ colorScheme: "light", reducedMotion: "no-preference" });
-    await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationName)).toBe("none");
-    await opened.page.close();
-    await expect.poll(() => target.evaluate(() => document.documentElement.dataset.queuedToolRan)).toBeUndefined();
-    expect(provider.requests).toHaveLength(1);
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
-test("operates on a selected tab while user pointer input remains available", async () => {
-  const responses: MockResponse[] = [];
-  const provider = await startProvider(responses);
-  const targetUrl = `${provider.origin}/target`;
-  const otherUrl = `${provider.origin}/complex-next`;
-  const opened = await openExtension();
-  try {
-    const first = await opened.context.newPage();
-    await first.goto(targetUrl);
-    const second = await opened.context.newPage();
-    await second.goto(otherUrl);
-    const tabs = await opened.page.evaluate(async () => await chrome.tabs.query({ currentWindow: true }));
-    const urls = tabs.map(tab => tab.url);
-    const firstIndex = urls.indexOf(targetUrl);
-    const secondIndex = urls.indexOf(otherUrl);
-    expect(firstIndex).toBeGreaterThanOrEqual(0);
-    expect(secondIndex).toBeGreaterThanOrEqual(0);
-    await second.evaluate(() => {
-      const button = document.createElement('button'); button.textContent = 'CDP target';
-      button.style.cssText = 'position:fixed;left:20px;top:20px;width:120px;height:40px';
-      button.onclick = () => { document.documentElement.dataset.cdpClicks = String(Number(document.documentElement.dataset.cdpClicks || 0) + 1); };
-      document.body.append(button);
-    });
-    responses.push(
-      commandResponse("switch_tab", { tabId: tabs[firstIndex]!.id }, "call-select-first"),
-      commandResponse("inspect_page", {}, "call-snapshot-first"),
-      commandResponse("switch_tab", { tabId: tabs[secondIndex]!.id }, "call-select-second"),
-      commandResponse("click", { target: { by: "role", value: "button", name: "CDP target" } }, "call-click-target"),
-      delayedResponse(textResponse("MULTI_TAB_OK"), 1_200),
-      textResponse("多标签操作"),
-    );
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    await first.bringToFront();
-    await opened.page.getByTestId("composer-input").fill("operate on another tab");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    await expect.poll(() => second.evaluate(() => document.documentElement.dataset.cdpClicks)).toBe("1");
-    await second.mouse.click(40, 40);
-    expect(await second.evaluate(() => document.documentElement.dataset.cdpClicks)).toBe("2");
-    await second.goto(otherUrl);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("MULTI_TAB_OK");
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
-test('closing a native Side Panel aborts its owner and prevents a queued page mutation', { tag: "@user-journey" }, async () => {
-  const calls = [
-    { name: 'verify_state', input: { target: { by: 'label', value: 'Never exists' }, state: 'visible', timeoutMs: 300_000 } },
-    { name: 'click', input: { target: { by: 'role', value: 'button', name: 'Queued native action' } } },
-  ];
-  const provider = await startProvider([assistantResponse({ tool_calls: calls.map((call, index) => ({ id: `native-queue-${index}`, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.input) } })) })]);
-  const opened = await openExtension();
-  try {
-    await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    const native = await nativePanel(opened, `${provider.origin}/target`);
-    await native.target.evaluate(() => { const button = document.createElement('button'); button.textContent = 'Queued native action'; button.onclick = () => { document.documentElement.dataset.queuedNativeRan = 'yes'; }; document.body.append(button); });
-    await submitNative(native.panel, 'perform two queued actions');
-    await expect.poll(() => native.panel.evaluate<boolean>('document.body.textContent.includes("检查页面状态")')).toBe(true);
-    await expect.poll(async () => (await readNativeEvents(native.panel)).filter(event => event.type === 'tool.started' && event.toolCallId?.startsWith('native-queue-')).length).toBe(2);
-    await native.panel.close();
-    expect((await native.browser.send('Target.closeTarget', { targetId: native.targetId })).success).toBe(true);
-    await expect.poll(() => native.target.evaluate(() => document.documentElement.dataset.queuedNativeRan)).toBeUndefined();
-    const recovery = await opened.context.newPage();
-    await recovery.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
-    await expect.poll(async () => (await readEvents(recovery)).filter(event => event.type === 'tool.failed' && event.toolCallId?.startsWith('native-queue-')).length).toBe(2);
-    expect(provider.requests).toHaveLength(1);
-  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
-});
-
-test('a native run stays in its owning window after another window becomes focused', { tag: "@user-journey" }, async () => {
-  const provider = await startProvider([
-    commandResponse("inspect_page", {}, 'native-first-snapshot'),
-    delayedResponse(commandResponse('fill', { target: { by: 'label', value: 'Email' }, value: 'owner@example.com' }, 'native-owner-fill'), 1_000),
-    commandResponse('click', { target: { by: 'role', value: 'button', name: 'Sign in' } }, 'native-owner-act'),
-    textResponse('OWNER_WINDOW_DONE'), textResponse('窗口绑定'),
-  ]);
-  const opened = await openExtension();
-  try {
-    await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    const native = await nativePanel(opened, `${provider.origin}/automation`);
-    await submitNative(native.panel, 'complete the form in this window');
-    await expect.poll(() => provider.requests.length).toBeGreaterThanOrEqual(2);
-    const other = await native.panel.evaluate<{ id: number }>(`chrome.windows.create({ url: ${JSON.stringify(`${provider.origin}/automation?other-window`)}, focused: true })`);
-    await expect(native.target.locator('output')).toHaveText('Welcome owner@example.com');
-    const otherTabs = await native.panel.evaluate<Array<{ id: number }>>(`chrome.tabs.query({ windowId: ${other.id} })`);
-    expect(otherTabs).toHaveLength(1);
-    await expect.poll(() => native.panel.evaluate<string | null>(`chrome.scripting.executeScript({target:{tabId:${otherTabs[0]!.id}},func:()=>document.querySelector('output')?.textContent ?? null}).then(results=>results[0]?.result ?? null)`)).toBe('');
-    await native.panel.evaluate(`chrome.windows.remove(${other.id})`);
-    await native.panel.close();
-  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
-});
-
-test('a recoverable complete-response failure retries without repeating a completed browser effect', async () => {
-  const effectId = 'retry-effect-once';
-  const provider = await startProvider([
-    commandResponse("click", { target: { by: "role", value: "button", name: "RETRY_EFFECT_ACCEPTED" } }, effectId),
-    { status: 503, error: 'temporary full-response failure' },
-    textResponse('RETRY_RESPONSE_COMPLETE'), textResponse('恢复请求'),
+      effectId,
+    ),
+    { status: 503, error: "temporary full-response failure" },
+    textResponse("RETRY_RESPONSE_COMPLETE"),
+    textResponse("恢复请求"),
   ]);
   const opened = await openExtension();
   let native: Awaited<ReturnType<typeof nativePanel>> | undefined;
   try {
-    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await (
+      await configure(opened.context, opened.page, provider.baseURL)
+    ).close();
     native = await nativePanel(opened, `${provider.origin}/target`);
-    await native.target.evaluate(() => { const button = document.createElement('button'); button.textContent = 'RETRY_EFFECT_ACCEPTED'; button.onclick = () => { const root = document.documentElement; root.dataset.retryEffects = String(Number(root.dataset.retryEffects || 0) + 1); }; document.body.append(button); });
-    await submitNative(native.panel, 'record one browser effect and retry a temporary full-response failure');
-    await expect.poll(() => nativeAssistantText(native!.panel)).toContain('RETRY_RESPONSE_COMPLETE');
-    await expect(native.target.locator('html')).toHaveAttribute('data-retry-effects', '1');
-    const agentRequests = provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "click"));
+    await native.target.evaluate(() => {
+      const button = document.createElement("button");
+      button.textContent = "RETRY_EFFECT_ACCEPTED";
+      button.onclick = () => {
+        const root = document.documentElement;
+        root.dataset.retryEffects = String(
+          Number(root.dataset.retryEffects || 0) + 1,
+        );
+      };
+      document.body.append(button);
+    });
+    await submitNative(
+      native.panel,
+      "record one browser effect and retry a temporary full-response failure",
+    );
+    await expect
+      .poll(() => nativeAssistantText(native!.panel))
+      .toContain("RETRY_RESPONSE_COMPLETE");
+    await expect(native.target.locator("html")).toHaveAttribute(
+      "data-retry-effects",
+      "1",
+    );
+    const agentRequests = provider.requests.filter((request) =>
+      request.tools?.some((tool: any) => tool.function.name === "click"),
+    );
     expect(agentRequests).toHaveLength(3);
     expect(agentRequests[2].messages).toEqual(agentRequests[1].messages);
     const resumedContext = JSON.stringify(agentRequests[2].messages);
-    expect(resumedContext).toContain('RETRY_EFFECT_ACCEPTED');
-    expect(agentRequests[2].messages.filter((message: any) => message.role === 'tool' && message.tool_call_id === effectId)).toHaveLength(1);
-    await expect.poll(async () => (await readNativeEvents(native!.panel)).filter(event => event.type === 'conversation.finished').length).toBe(1);
+    expect(resumedContext).toContain("RETRY_EFFECT_ACCEPTED");
+    expect(
+      agentRequests[2].messages.filter(
+        (message: any) =>
+          message.role === "tool" && message.tool_call_id === effectId,
+      ),
+    ).toHaveLength(1);
+    await expect
+      .poll(
+        async () =>
+          (await readNativeEvents(native!.panel)).filter(
+            (event) => event.type === "conversation.finished",
+          ).length,
+      )
+      .toBe(1);
     const events = await readNativeEvents(native.panel);
-    const started = events.filter(event => event.type === 'tool.started' && event.toolCallId === effectId);
-    const terminal = events.filter(event => ['tool.finished', 'tool.failed'].includes(event.type) && event.toolCallId === effectId);
+    const started = events.filter(
+      (event) => event.type === "tool.started" && event.toolCallId === effectId,
+    );
+    const terminal = events.filter(
+      (event) =>
+        ["tool.finished", "tool.failed"].includes(event.type) &&
+        event.toolCallId === effectId,
+    );
     expect(started).toHaveLength(1);
     expect(terminal).toHaveLength(1);
-    expect(terminal[0].type).toBe('tool.finished');
-    expect(events.filter(event => event.type === 'request.retry')).toMatchObject([
-      { retry: { attempt: 1, status: 503 } },
-    ]);
-    expect(JSON.stringify(events.filter(event => event.type === 'conversation.message'))).toContain('RETRY_RESPONSE_COMPLETE');
-    expect(events.filter(event => ['conversation.failed', 'conversation.aborted'].includes(event.type))).toHaveLength(0);
+    expect(terminal[0].type).toBe("tool.finished");
+    expect(
+      events.filter((event) => event.type === "request.retry"),
+    ).toMatchObject([{ retry: { attempt: 1, status: 503 } }]);
+    expect(
+      JSON.stringify(
+        events.filter((event) => event.type === "conversation.message"),
+      ),
+    ).toContain("RETRY_RESPONSE_COMPLETE");
+    expect(
+      events.filter((event) =>
+        ["conversation.failed", "conversation.aborted"].includes(event.type),
+      ),
+    ).toHaveLength(0);
   } finally {
     await native?.panel.close();
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-test('two native side panels accept only one owner and closing the non-owner preserves the active task', { tag: "@user-journey" }, async () => {
-  let releaseOwner!: () => void;
-  const ownerMayFinish = new Promise<void>((resolveOwner) => { releaseOwner = resolveOwner; });
-  const provider = await startProvider([
-    commandResponse("click", { target: { by: "role", value: "button", name: "Owner effect" } }, 'native-owner-effect'),
-    delayedResponse(textResponse('OWNER_SURVIVED_NONOWNER_CLOSE'), 0, ownerMayFinish),
-    textResponse('多窗口互斥'),
-  ]);
-  const opened = await openExtension();
-  let owner: Awaited<ReturnType<typeof nativePanel>> | undefined;
-  let other: Awaited<ReturnType<typeof openNativeSidePanel>> | undefined;
-  try {
-    await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    owner = await nativePanel(opened, `${provider.origin}/automation`);
-    await owner.target.evaluate(() => { const button = document.createElement('button'); button.textContent = 'Owner effect'; button.onclick = () => { const root = document.documentElement; root.dataset.ownerEffects = String(Number(root.dataset.ownerEffects || 0) + 1); }; document.body.append(button); });
-    await submitNative(owner.panel, 'complete only the owning window task');
-    await expect(owner.target.locator('html')).toHaveAttribute('data-owner-effects', '1');
-    await expect.poll(() => provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "click")).length).toBe(2);
-    const active = await owner.panel.evaluate<{ identity: { runId: string } }>(`chrome.runtime.sendMessage({ type: 'surf-wax:run-status' })`);
-    expect(active.identity.runId).toBeTruthy();
-    const secondWindow = await owner.panel.evaluate<{ id: number }>(`chrome.windows.create({ url: ${JSON.stringify(`${provider.origin}/target`)}, focused: true })`);
-    other = await openNativeSidePanel(opened, `${provider.origin}/target`, { browser: owner.browser, windowId: secondWindow.id });
-    await expect.poll(() => other!.panel.evaluate<string>(`document.querySelector('[data-testid="other-run-busy"]')?.textContent || ''`)).toContain('其他窗口已有任务运行');
-    await submitNative(other.panel, 'this second task must not replace the owner');
-    await expect.poll(() => other!.panel.evaluate<boolean>(`document.querySelector('[data-testid="composer-input"]').disabled`)).toBe(true);
-    expect(JSON.stringify(await readNativeEvents(owner.panel))).not.toContain('this second task must not replace the owner');
-    expect(provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "click"))).toHaveLength(2);
-    expect((await readNativeEvents(owner.panel)).filter(event => event.type === 'conversation.submitted')).toHaveLength(1);
-    await other.panel.close();
-    expect((await owner.browser.send('Target.closeTarget', { targetId: other.targetId })).success).toBe(true);
-    await expect.poll(() => owner!.panel.evaluate<string>(`chrome.runtime.sendMessage({ type: 'surf-wax:run-status' }).then(result => result.identity?.runId || '')`)).toBe(active.identity.runId);
-    expect(provider.stats.abortedResponses).toBe(0);
-    // Chrome can suspend animation frames in the unfocused native window.
-    // Restore the owner's visible surface before asserting the completed response.
-    await owner.panel.evaluate(`chrome.windows.update(${owner.windowId}, { focused: true })`);
-    releaseOwner();
-    await expect.poll(() => nativeAssistantText(owner!.panel)).toContain('OWNER_SURVIVED_NONOWNER_CLOSE');
-    const events = await readNativeEvents(owner.panel);
-    const submitted = events.filter(event => event.type === 'conversation.submitted');
-    expect(submitted).toHaveLength(1);
-    expect(submitted[0].runId).toBe(active.identity.runId);
-    expect(events.filter(event => event.runId === active.identity.runId && ['conversation.finished', 'conversation.failed', 'conversation.aborted'].includes(event.type))).toMatchObject([{ type: 'conversation.finished' }]);
-    expect(events.filter(event => event.type === 'tool.finished' && event.toolCallId === 'native-owner-effect')).toHaveLength(1);
-    await expect(owner.target.locator('html')).toHaveAttribute('data-owner-effects', '1');
-  } finally {
-    releaseOwner();
-    await other?.panel.close();
-    await owner?.panel.close();
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });

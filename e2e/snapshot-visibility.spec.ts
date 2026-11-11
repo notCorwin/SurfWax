@@ -123,7 +123,12 @@ test("snapshots reflect rendered visibility and update when content is shown or 
     expect(JSON.stringify(before.items)).not.toContain("Accessible name");
     expect(button(before.items, "Visible label")?.id).toBeTruthy();
     expect(JSON.stringify(before.items)).not.toContain("Hidden label");
-    expect(button(before.items, "Start Original text end")?.id).toBeTruthy();
+    // Separated painted fragments stay structured; a hidden span leaves a
+    // geometric gap, so there is deliberately no invented contiguous name.
+    const fragmented = before.items.find((item: any) => item.role === "button"
+      && item.textParts?.map((part: any) => part.text).join("") === "Start Original text end");
+    expect(fragmented?.id).toBeTruthy();
+    expect(fragmented.name).toBeUndefined();
     expect(JSON.stringify(before.items)).not.toContain("Known alias");
     expect(JSON.stringify(before.items)).not.toContain("Nested hidden secret");
     expect(JSON.stringify(before.items)).not.toContain("Explicit label");
@@ -142,7 +147,7 @@ test("snapshots reflect rendered visibility and update when content is shown or 
     expect(delta?.mode).toBe("delta");
     const previouslyVisible = button(before.items, "Visible action");
     expect(previouslyVisible?.id).toEqual(expect.any(String));
-    expect(delta.items.find((item: any) => item.id === previouslyVisible.id)).toMatchObject({ id: previouslyVisible.id, line: "", change: "removed" });
+    expect(delta.items.find((item: any) => item.id === previouslyVisible.id)).toEqual({ id: previouslyVisible.id, change: "removed" });
     expect(button(delta.items, "Transparent action")?.change).toBe("added");
     expect(button(after.items, "Visible action")).toBeUndefined();
     expect(button(after.items, "Transparent action")?.id).toBeTruthy();

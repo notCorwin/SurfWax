@@ -1,4 +1,4 @@
-name: Tool capability tests
+name: Core regression tests
 
 on:
   push:
@@ -9,12 +9,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: capability-${{ github.workflow }}-${{ github.ref }}
+  group: core-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  evidence:
-    name: Evaluation evidence and types
+  core:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -24,135 +23,18 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
-      - name: Verify user journeys are actually selected by CI
-        run: node scripts/audit-tests.mjs collect
-      - run: node --test scripts/tests/browser-tests.test.mjs
-      - run: >-
-          mkdir -p test-results && npm test --
-          src/evaluation
-          src/agent
-          src/background.test.ts
-          src/logging.test.ts
-          src/log-io.test.ts
-          src/deadline.test.ts
-          src/conversations.test.ts
-          src/sidepanel/conversation-store.test.ts
-          src/components/chat/context-counter.test.tsx
-          src/chrome/executor.test.ts
-          src/chrome/tool.test.ts
-          src/tool-result-values.test.ts
-          src/sidepanel/useSidePanelRuntime.test.ts
-          src/components/chat/markdown-text.test.tsx
-          src/components/chat/markdown-text.loading.test.tsx
-          src/components/chat/markdown-text-renderer.test.tsx
-          src/chrome/snapshot-pagination.test.ts
-          src/chrome/snapshot-render.test.ts
-          src/chrome/snapshot-visibility.test.ts
-          src/chrome/snapshot-text-paint.test.ts
-          src/chrome/frame-visibility.test.ts
-          src/chrome/frame-list.test.ts
-          src/chrome/automation.test.ts
-          src/chrome/diagnostics.test.ts
-          --reporter=default --reporter=junit --outputFile.junit=test-results/evaluation.xml
-      - name: Save evaluation results on failure
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: evaluation-results
-          path: test-results/
-          if-no-files-found: ignore
-          retention-days: 7
-
-  browser:
-    name: No-model levels (installed Chrome, shard ${{ matrix.shard }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - name: Verify installed Google Chrome
-        run: google-chrome --version
-      - name: Exercise fixtures and extension tools without an LLM
-        id: browser-tests
-        shell: bash
+      - run: npm test
+      - name: Installed Chrome development E2E
         env:
           SURFWAX_CHROME_PATH: /usr/bin/google-chrome
           PLAYWRIGHT_HTML_OPEN: never
-          PLAYWRIGHT_JSON_OUTPUT_FILE: .dev/ci-browser/results.json
-        run: >-
-          mkdir -p .dev/ci-browser && node scripts/run-browser-tests.mjs e2e
-          e2e/evaluation/artifact-handoff-fixture.spec.ts
-          e2e/evaluation/cancel-recovery-fixture.spec.ts
-          e2e/evaluation/claims-fixture.spec.ts
-          e2e/evaluation/procurement-fixture.spec.ts
-          e2e/evaluation/network-context-fixture.spec.ts
-          e2e/evaluation/closed-event-fixture.spec.ts
-          e2e/evaluation/semantic-delta-fixture.spec.ts
-          e2e/purpose-tools.spec.ts
-          e2e/artifact-handoff-tools.spec.ts
-          e2e/cancel-recovery-tools.spec.ts
-          e2e/chooser-prompt-tools.spec.ts
-          e2e/dispatch-tools.spec.ts
-          e2e/failed-job-evidence.spec.ts
-          e2e/manifest-tools.spec.ts
-          e2e/multitab-tools.spec.ts
-          e2e/network-context-tools.spec.ts
-          e2e/network-level-tools.spec.ts
-          e2e/recovery-tools.spec.ts
-          e2e/rolling-tools.spec.ts
-          e2e/upload-tools.spec.ts
-          e2e/upload-job-evidence.spec.ts
-          e2e/claims-queue-tools.spec.ts
-          e2e/procurement-tools.spec.ts
-          e2e/closed-event-tools.spec.ts
-          e2e/semantic-delta-tools.spec.ts
-          e2e/semantic-alternative-path.spec.ts
-          e2e/snapshot-css-effects.spec.ts
-          e2e/snapshot-text-paint.spec.ts
-          e2e/snapshot-firstline-proof.spec.ts
-          e2e/snapshot-frame-readiness.spec.ts
-          e2e/snapshot-offscreen.spec.ts
-          e2e/snapshot-visibility.spec.ts
-          e2e/refresh-snapshot.spec.ts
-          e2e/semantic-delta-identity.spec.ts
-          e2e/locator-accessibility-semantics.spec.ts
-          e2e/real-model-harness.spec.ts
-          e2e/rendering.spec.ts
-          e2e/goal-mode.spec.ts
-          e2e/context.spec.ts
-          e2e/canonical-session.spec.ts
-          e2e/snapshot-auto-delivery.spec.ts
-          e2e/page-independent-tools.spec.ts
-          e2e/completion-review-boundary.spec.ts
-          e2e/lifecycle.spec.ts
-          e2e/maintenance.spec.ts
-          e2e/conversations.spec.ts
-          e2e/userscripts.spec.ts
-          e2e/settings.spec.ts
-          e2e/screenshot-dynamic.spec.ts
-          e2e/live-market-regression.spec.ts
-          e2e/diagnostic-index.spec.ts
-          --grep 'purpose-specific tools|artifact-handoff|cancel-recovery|chooser-prompt-tools|dispatch-tools|failed-job-evidence|manifest-tools|multitab-tools|network-context|network-level-tools|recovery-tools|rolling-tools|upload-tools|upload-job-evidence|claims-fixture|procurement-fixture|procurement-tools|closed-event-fixture|semantic-delta-fixture|claims-queue-tools|closed-event-tools|semantic-delta-tools|semantic-alternative-path|local scripted semantic-delta|local scripted userscript-repair|local scripted binary-transfer|local scripted frame-replacement|local scripted window-transfer|a completed order with an unfinished background job|renders a complete Markdown response|snapshot-|refresh-snapshot|semantic-delta-identity|locator-accessibility-semantics|goal mode|automatically summarizes|a summary failure|stopping background summarization|canonical session|delivers action snapshots|@user-journey|captures .* pixels independently of changing semantic content|captures a page with hidden layoutless|keeps current frame routes across top-level navigation'
-          --project=current --shard=${{ matrix.shard }}/2 --workers=1 --retries=0 --reporter=list,html,json
-          2>&1 | tee .dev/ci-browser/runner.log
-      - name: Verify browser failure evidence
-        if: failure() && steps.browser-tests.outcome == 'failure'
-        run: node scripts/verify-browser-evidence.mjs
-      - name: Save browser reports on failure
-        if: failure() && steps.browser-tests.outcome == 'failure'
+        run: npm run test:e2e
+      - name: Save failure evidence
+        if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: browser-report-${{ matrix.shard }}
-          path: |
-            .dev/artifacts/
-            .dev/ci-browser/
+          name: core-failure-evidence
+          path: .dev/artifacts/
           include-hidden-files: true
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 7

@@ -411,3 +411,11 @@ ShadowRoot 在拓扑采集和对象解析期间被添加或移除时，使当前
 回归测试保留真实浏览器中的开放/闭合根、隐藏与视口外内容排除，以及采样中途新增闭合根后的拒绝与重采。这些断言能分别发现扩展依赖回流、隐藏内容泄漏和跨读取拓扑竞态，具有独立回归价值。
 
 来源：`src/chrome/automation.ts`、`src/chrome/snapshot-native-runtime.ts`、`src/chrome/snapshot-readable-source.js`、`src/standalone/runtime.test.ts`。
+
+### 核心回归测试精简
+
+2026-11-11 根据用户明确决定，将自动化测试收敛到约 20–30 个核心用例，取代 2026-11-05 要求在用途不明确时保留测试的维护策略。优先保护 Canonical Event Log 的持久性与恢复、重复操作、停止与中断、可见快照、上下文压缩与计数、关键 UI，以及真实 Provider SDK 的请求契约；删除其他测试不代表这些行为已经由保留用例覆盖。
+
+保留的 SDK 契约通过真实 SDK 和模拟 HTTP 响应检查 OpenAI Responses、Anthropic Messages、Google Interactions 与 OpenAI 兼容 Chat Completions 的工具结果往返、恢复和取消；它使用显式端点和 Custom Provider 配置，不证明普通 Provider 的自动端点选择或其他 SDK 的行为。确定性浏览器任务使用脚本化模型响应；真实模型评估必须显式启用，因此常规测试通过不证明模型任务能力。快照测试覆盖所列可见性场景，不证明所有绘制与动态页面边界；删除既有细分回归是本次精简接受的覆盖取舍。
+
+来源：`src/logging.test.ts`、`src/agent/runner.test.ts`、`src/agent/sdk-generate-contract.test.ts`、`e2e/snapshot-visibility.spec.ts`、`e2e/context.spec.ts`、`e2e/lifecycle.spec.ts`、`e2e/real-model-evaluation.spec.ts`。

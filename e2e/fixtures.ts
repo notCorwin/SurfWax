@@ -1,6 +1,6 @@
 import { chromium, expect, test as base, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, mkdir, cp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, cp, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { systemChromePath } from "../scripts/development-extension.mjs";
 import { createServer, type Server } from "node:http";
@@ -44,11 +44,6 @@ function completion(message: Record<string, unknown>, usage?: { promptTokens: nu
       prompt_tokens_details: { cached_tokens: usage.cachedTokens ?? 0 },
     } } : {}),
   };
-}
-
-export function p95(values: number[]): number {
-  const sorted = [...values].sort((left, right) => left - right);
-  return sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] ?? 0;
 }
 
 export function textResponse(text: string, usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): CompletionResponse {
@@ -104,45 +99,9 @@ export async function startProvider(responses: MockResponse[], delayMs = 0, summ
       response.end("<!doctype html><title>Side Agent Target</title><main>ready</main>");
       return;
     }
-    if (request.method === "GET" && pathname === "/scroll-target") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end("<!doctype html><title>Scroll Target</title><main style='height:3000px'>ready</main>");
-      return;
-    }
     if (request.method === "GET" && pathname === "/automation") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(`<!doctype html><title>Automation Target</title><label>Email <input type="email"></label><button onclick="document.querySelector('output').textContent='Welcome '+document.querySelector('input').value">Sign in</button><output></output>`);
-      return;
-    }
-    if (request.method === "GET" && pathname === "/visual") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end("<!doctype html><title>Visual Target</title><style>button{position:fixed;left:20px;top:20px;width:100px;height:50px}</style><canvas width=200 height=100></canvas><button aria-hidden=true onclick=\"document.body.dataset.clicked='yes'\">Visual action</button>");
-      return;
-    }
-    if (request.method === "GET" && pathname === "/performance") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end("<!doctype html><title>Performance Target</title><button onclick=\"document.querySelector('output').value=String(Number(document.querySelector('output').value)+1)\">Increment</button><output>0</output>");
-      return;
-    }
-    if (request.method === "GET" && pathname === "/automation-dynamic") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(`<!doctype html><title>Dynamic Automation</title>
-        <button id="dynamic" disabled onclick="advance(this)">Delayed action</button><output>0</output><shadow-action></shadow-action>
-        <script>
-          let hits = 0;
-          function advance(button) {
-            document.querySelector('output').textContent = String(++hits);
-            const next = button.cloneNode(true); next.disabled = true; button.replaceWith(next);
-            setTimeout(() => { next.disabled = false; }, 1);
-          }
-          customElements.define('shadow-action', class extends HTMLElement {
-            connectedCallback() {
-              const root = this.attachShadow({mode:'open'}); const button = document.createElement('button'); button.textContent = 'Shadow action';
-              button.onclick = () => { this.dataset.clicked = 'yes'; }; root.append(button);
-            }
-          });
-          setTimeout(() => { document.querySelector('#dynamic').disabled = false; }, 20);
-        </script>`);
       return;
     }
     if (request.method === "GET" && pathname === "/complex") {
@@ -160,16 +119,6 @@ export async function startProvider(responses: MockResponse[], delayMs = 0, summ
     if (request.method === "GET" && pathname === "/frame") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end("<!doctype html><title>Cross Origin Frame</title><main>frame ready <button onclick=\"document.body.dataset.clicked='yes'\">Frame action</button></main>");
-      return;
-    }
-    if (request.method === "GET" && pathname === "/worker.js") {
-      response.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
-      response.end("self.workerMarker = 'WORKER_READY';");
-      return;
-    }
-    if (request.method === "GET" && pathname === "/complex-next") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end("<!doctype html><title>After Navigation</title><main>new document</main>");
       return;
     }
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
@@ -321,26 +270,6 @@ export async function dispose(context: BrowserContext, directory: string, server
   if (server) await closeServer(server);
 }
 
-/** Reload an unpacked installation after replacing its files, as Chrome's
- * extension Reload action does. Restarting Chrome can reuse the prior SW cache. */
-export async function reloadUpgradedExtension(opened: Awaited<ReturnType<typeof openExtension>>): Promise<void> {
-  const settings = await opened.context.newPage();
-  await settings.goto("chrome://extensions/");
-  const developerMode = settings.locator("extensions-toolbar #devMode");
-  await expect(developerMode).toBeVisible();
-  if (await developerMode.evaluate((element) => element.getAttribute("aria-checked") ?? element.getAttribute("aria-pressed")) !== "true") await developerMode.click();
-  await settings.close();
-  await opened.page.evaluate(() => chrome.runtime.reload()).catch(() => undefined);
-  if (!opened.page.isClosed()) await opened.page.close().catch(() => undefined);
-  opened.page = await opened.context.newPage();
-  // Reload briefly unregisters the extension; navigation during that interval
-  // is blocked. Opening the panel also starts its lazy MV3 worker.
-  await expect(async () => {
-    await opened.page.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
-  }).toPass({ timeout: 10_000 });
-  await expect(opened.page.getByTestId("composer-input")).toBeVisible();
-}
-
 export async function selectProvider(options: Page, query: string, optionName: string | RegExp): Promise<void> {
   const input = options.getByLabel("Provider", { exact: true });
   await input.click();
@@ -362,18 +291,13 @@ export async function configure(context: BrowserContext, page: Page, baseURL: st
   await options.getByLabel("API Key", { exact: true }).fill("test-key");
   await options.getByLabel("上下文窗口（tokens）").fill(String(contextWindow));
   await options.getByRole("button", { name: "保存配置" }).click();
-  await expect(options.getByRole("status")).toContainText("配置已保存");
+  // Saving can settle directly into the clean state after storage.onChanged.
+  // Verify the durable configuration rather than a transient success message.
+  await expect.poll(() => options.evaluate(async () => {
+    const stored = (await chrome.storage.local.get("side-agent:model-config"))["side-agent:model-config"] as import("../src/sidepanel/config").PersistedModelConfig | undefined;
+    return stored?.profiles?.[stored.selectedProviderId];
+  })).toMatchObject({ model: "test-model", contextWindowOverride: contextWindow, providerSettings: { apiKey: "test-key" }, baseURL });
   await expect(page.getByTestId("composer-input")).toBeVisible();
-  return options;
-}
-
-/** Explicitly advertise vision only for tests that request image artifacts. */
-export async function configureWithImages(context: BrowserContext, page: Page, baseURL: string): Promise<Page> {
-  const options = await configure(context, page, baseURL);
-  await options.getByLabel("图片输入能力").click();
-  await options.getByRole("option", { name: "支持", exact: true }).click();
-  await options.getByRole("button", { name: "保存配置" }).click();
-  await expect(options.getByRole("status")).toContainText("配置已保存");
   return options;
 }
 
@@ -386,64 +310,11 @@ export async function focusPageControl(page: Page, control: Locator): Promise<vo
   await expect(control).toBeFocused();
 }
 
-export async function themeColors(page: Page, selectors: string[]): Promise<{ colorScheme: string; colors: { background: string; foreground: string }[] }> {
-  return page.evaluate((targets) => ({
-    colorScheme: getComputedStyle(document.documentElement).colorScheme,
-    colors: targets.map((selector) => {
-      const element = document.querySelector<HTMLElement>(selector);
-      if (!element) throw new Error(`Missing theme target: ${selector}`);
-      const style = getComputedStyle(element);
-      return { background: style.backgroundColor, foreground: style.color };
-    }),
-  }), selectors);
-}
-
-export async function expectThemeButton(locator: Locator, colorScheme: "light" | "dark", variant: "default" | "destructive") {
-  const expectedColor = variant === "destructive"
-    ? colorScheme === "light" ? "rgb(185, 28, 28)" : "rgb(239, 68, 68)"
-    : colorScheme === "light" ? "rgb(36, 109, 97)" : "rgb(157, 217, 201)";
-  await expect.poll(() => locator.evaluate((element) => {
-    const style = getComputedStyle(element);
-    const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
-    const context = canvas.getContext("2d")!; context.fillStyle = style.backgroundColor; context.fillRect(0, 0, 1, 1);
-    return { alpha: context.getImageData(0, 0, 1, 1).data[3], foreground: style.color, fontSize: style.fontSize, fontWeight: style.fontWeight };
-  })).toMatchObject({ foreground: expectedColor, fontSize: "14px", fontWeight: "500" });
-  const alpha = await locator.evaluate((element) => {
-    const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
-    const context = canvas.getContext("2d")!; context.fillStyle = getComputedStyle(element).backgroundColor; context.fillRect(0, 0, 1, 1);
-    return context.getImageData(0, 0, 1, 1).data[3]!;
-  });
-  expect(alpha).toBeGreaterThan(0);
-  expect(alpha).toBeLessThan(64);
-}
-
 export async function startNewConversation(page: Page): Promise<void> {
   if (await page.locator(".conversation-dropdown").isVisible()) await page.keyboard.press("Escape");
   await page.getByTestId("new-conversation").click();
   await expect(page.getByTestId("conversation-menu")).toContainText("新对话");
   await expect(page.getByTestId("composer-input")).toBeEnabled();
-}
-
-/** Seed a named, idle conversation before a run. UI mutation itself is tested separately. */
-export async function nameCurrentConversation(page: Page, title: string): Promise<void> {
-  const id = await page.evaluate(async (title) => {
-    const id = crypto.randomUUID();
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const request = indexedDB.open("side-agent-runtime");
-      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
-    });
-    const transaction = db.transaction("events", "readwrite");
-    const store = transaction.objectStore("events");
-    const timestamp = new Date().toISOString();
-    store.add({ type: "conversation.created", conversationId: id, timestamp, content: null });
-    store.add({ type: "conversation.title.updated", conversationId: id, timestamp, content: { title, source: "manual" } });
-    await new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); });
-    db.close(); return id;
-  }, title);
-  await page.reload();
-  await page.getByTestId("conversation-menu").click();
-  await page.locator(".conversation-item", { hasText: title }).locator(".conversation-select").click();
-  await expect(page.getByTestId("conversation-menu")).toContainText(title);
 }
 
 export async function enableUserScripts(context: BrowserContext, extensionId: string, extensionPage: Page): Promise<void> {
@@ -503,14 +374,6 @@ export async function attachTarget(browserSession: CDPSession, targetId: string)
       await browserSession.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
     },
   };
-}
-
-export async function warnsOnLeave(page: Page): Promise<boolean> {
-  return page.evaluate(() => {
-    const event = new Event("beforeunload", { cancelable: true });
-    window.dispatchEvent(event);
-    return event.defaultPrevented;
-  });
 }
 
 
