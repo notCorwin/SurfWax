@@ -19,6 +19,8 @@ const failures = sdkCoverageFailures(report);
 if (failures.length) throw new Error(failures.join('; '));
 console.log(`Models.dev (${report.sourceKind}): ${report.catalogSdks.length} SDK names `
   + `(${report.providerSdks.length} provider-level, ${report.modelOverrideSdks.length} model-override), `
-  + `${report.providers} providers, ${report.models} models; SDK name and GitLab alias coverage complete `
-  + `(${report.gitlab.catalogModelIds.length} GitLab aliases).`);
+  + `${report.providers} providers, ${report.models} models; agent-eligible SDK name and GitLab alias coverage complete `
+  + `(${report.agentSdks.length} SDKs, ${report.agentModels} models, ${report.gitlab.agentModelIds.length} GitLab aliases).`);
+console.log(`Full catalog unsupported SDK inventory: ${report.missing.join(', ') || 'none'}; `
+  + `${report.unsupportedRoutes.filter(route => !route.eligible).length} excluded routes (reasons recorded in sdk-coverage.json).`);
 console.log(report.limitations);

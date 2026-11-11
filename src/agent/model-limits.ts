@@ -1,4 +1,4 @@
-import { isModelSdk, type JsonValue, type ModelConfig, type ModelProviderOverride, type ModelSdk } from "../types";
+import { isAgentEligibleModel, isModelSdk, type JsonValue, type ModelConfig, type ModelProviderOverride, type ModelSdk } from "../types";
 import { defaultBaseURL, isCloudflareGateway, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
 import { linkModelDiagnostic, modelDiagnostic, type ModelDiagnostic, type ModelDiagnosticContext } from "./diagnostics";
 import bundledCatalogGzip, { metadata as bundledCatalogMetadata } from "../data/models-dev-api";
@@ -225,7 +225,7 @@ export function modelProviderPresets(catalog: ModelCatalog): ModelProviderPreset
       return [[modelId, route], ...(model.id && model.id !== modelId ? [[model.id, route]] : [])];
     }));
     const models = Object.entries(provider.models ?? {}).filter(([, model]) =>
-      isModelSdk(model.provider?.npm ?? defaultSdk) && model.tool_call === true && (model.modalities?.output?.includes("text") ?? true),
+      isModelSdk(model.provider?.npm ?? defaultSdk) && isAgentEligibleModel(model),
     ).map(([modelId, model]) => ({ id: model.id ?? modelId, name: model.name ?? modelId,
       ...(model.family ? { family: model.family } : {}), ...(model.canonical_model_id ? { canonicalModelId: model.canonical_model_id } : {}) }))
       .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));

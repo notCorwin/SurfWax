@@ -56,6 +56,11 @@ export function isModelSdk(value: unknown): value is ModelSdk {
   return typeof value === "string" && (MODEL_SDKS as readonly string[]).includes(value);
 }
 
+/** Catalog models offered to the browser agent must support tools and text output. */
+export function isAgentEligibleModel(model: { tool_call?: boolean; modalities?: { output?: readonly string[] } }): boolean {
+  return model.tool_call === true && (model.modalities?.output?.includes("text") ?? true);
+}
+
 export type ModelConfig = {
   providerId?: string;
   sdk?: ModelSdk;
