@@ -15,7 +15,7 @@ import { createDeadline } from "../deadline";
 import { ARTIFACT_READ_NOTE, artifactReadSelection, nativeArtifactPageLimit as nativePageLimit } from "../artifact-selection";
 
 const timeoutMs = z.number().int().positive().optional();
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v45";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v46";
 export const inspectInputSchema = z.object({ timeoutMs, since: z.string().min(1).max(256).optional().describe("Compare with this completely delivered observation ID from the same tab, run and scope. Omit to reuse the latest valid baseline automatically."), full: z.boolean().optional().describe("Request a complete new baseline instead of an automatic delta when prior rows are unavailable."), tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional().describe("Restrict inspection to one matching element. To inspect a frame use region:{by:\"css\",value:\"html\",frame:{ref:\"frameRef\"}}; frame is not a top-level inspect_page field. Prefer a structured target. A plain string is a CSS selector, except supported locator expressions such as getByRole('button', {name:'Save'})."),
   fields: z.array(z.enum(["text", "state", "actions"])).min(1).optional().describe("Fields to include; defaults to visible text, state and measured layout. IDs are always present; actionable=true identifies a single element usable as target:{id}. Request actions for supported action hints."), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),

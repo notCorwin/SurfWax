@@ -1050,6 +1050,7 @@ export class ChromeExecutor {
     };
     const artifacts = {
       read: (id: number, selection = {}) => call("artifacts.read", false, () => this.logger!.result(id, selection, this.activeContext.conversationId)),
+      evidence: (id: string) => call("artifacts.evidence", false, () => this.logger!.evidenceResult(id, this.activeContext.conversationId ?? "", this.activeContext.logIdentity?.runId)),
       save: (id: number, filename?: string) => call("artifacts.save", true, () => this.saveArtifact(id, filename)),
       text: (filename: string, text: string, mimeType = "text/plain", save = false) => call("artifacts.text", save, () => this.storeText(filename, text, mimeType, save)),
       importUrl: (url: string, filename: string) => call("artifacts.importUrl", true, async () => {

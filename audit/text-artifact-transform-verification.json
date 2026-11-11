@@ -1,0 +1,118 @@
+{
+  "base": "9dd4bda",
+  "scope": "Deterministic fake HTTP and sandboxed headless local Chrome DEV only; no real model, user credentials, main checkout changes, Markdown, push, PR or delegation.",
+  "environment": {
+    "node": "24.22.2",
+    "chrome": "157.0.8103.39"
+  },
+  "verification": {
+    "vitest": "8 files / 25 tests passed",
+    "typescript": "tsc --noEmit passed",
+    "focusedE2E": {
+      "run": ".dev/artifacts/1794422264833-e2e-c3df374d-eea1-4c34-83a0-f7c4baf5b018",
+      "receipt": {
+        "kind": "e2e",
+        "pid": 55086,
+        "startedAt": 1794422264839,
+        "status": "passed",
+        "finishedAt": 1794422275201
+      },
+      "actual": {
+        "httpReads": 2,
+        "inlineEvidenceId": "inline-http",
+        "largeEvidenceId": "large-http",
+        "rawArtifactId": 97,
+        "extracted": {
+          "sources": [
+            {
+              "evidenceId": "inline-http",
+              "count": 4
+            },
+            {
+              "evidenceId": "large-http",
+              "count": 175
+            },
+            {
+              "artifactId": 97,
+              "count": 175
+            }
+          ],
+          "totalItems": 354,
+          "byteLength": 65896,
+          "sha256": "9feb4baa33664a9f71f4e0aa86f856e3ca7139b5f37f0fba632705a2e0ce6945",
+          "artifact": {
+            "id": 121,
+            "filename": "extracted.txt",
+            "mimeType": "text/plain;charset=utf-8",
+            "byteLength": 65896,
+            "saved": false
+          },
+          "access": {
+            "artifactId": 121,
+            "path": []
+          }
+        },
+        "joined": {
+          "sources": [
+            {
+              "artifactId": 121,
+              "count": 1
+            },
+            {
+              "artifactId": 121,
+              "count": 1
+            }
+          ],
+          "totalItems": 2,
+          "byteLength": 131796,
+          "sha256": "f92829bdf641bb1edc1e01870ca1861545dad1413b71f31bd611ec09a2152408",
+          "artifact": {
+            "id": 186,
+            "filename": "joined.txt",
+            "mimeType": "text/plain;charset=utf-8",
+            "byteLength": 131796,
+            "saved": false
+          },
+          "access": {
+            "artifactId": 186,
+            "path": []
+          }
+        },
+        "deliveredByteLength": 131796,
+        "deliveredSha256": "f92829bdf641bb1edc1e01870ca1861545dad1413b71f31bd611ec09a2152408",
+        "model": "scripted fake HTTP only; no real model or user key"
+      }
+    },
+    "regression": {
+      "initial": "7/8 passed; context first-send failed with session read error while source HMR occurred",
+      "recheck": "context compaction and transform E2E 2/2 passed without concurrent source edits",
+      "run": ".dev/artifacts/1794422215105-e2e-88f3b980-bd12-4bba-b5ea-6876b1fc382b",
+      "passedOtherChecks": [
+        "canonical cross-panel synchronization",
+        "immediate covered click recovery",
+        "context pending/branch updates",
+        "provider token anchoring",
+        "external refresh snapshot",
+        "bottom following/manual scrolling"
+      ]
+    }
+  },
+  "boundaries": [
+    "CPU JSON.parse/select/map/join/UTF-8/hash runs in existing revocable ProgramWorker; memory O(total sources plus output); existing 40s tool default and explicit timeout override, not streaming.",
+    "Cancellation and snapshot lifecycle use unchanged registry/executor plumbing; no dedicated new cancellation E2E.",
+    "Per-operation read deduplication only; canonical artifact cache and epoch invalidation reused; evidence IDs restricted to exact current conversation/run successful terminal.",
+    "No changes to read_artifact paging, recommended URLs, models, budgets or acceptance thresholds.",
+    "Potential integration conflicts: executor programCapabilities, atomic registry, tool catalog version and scheduler artifact resource list; preserve c4 instant dispatch behavior.",
+    "Local HTML/IndexedDB evidence paths are machine-local; extracted compact evidence below is committed."
+  ],
+  "sha256": {
+    "src/chrome/atomic-tools.ts": "c249637200761af089dc20a7f3f7807b1c9dab4dd3c582becf70adcd58547562",
+    "src/chrome/text-artifact-transform.ts": "ed698f7ba5939be21448248f92281a4263ad1d45b56ff360ea5c9f23230e1b88",
+    "src/chrome/text-artifact-transform.test.ts": "48356dd9d197a6e62953afc4bdc961da3209358b21bfada307037d6ddde699e8",
+    "src/chrome/executor.ts": "a4b2033c0bd15940fab26dc737250a484f71a46f243615a86b9600d9e8ef8d44",
+    "src/chrome/tool.ts": "9cc3f1408e340492db95d8ee8048a9a87cffd11327eaea682190aab17ebeb8ec",
+    "src/chrome/tool-scheduler.ts": "136a31efe93cc8bfa34dd5c2d52428e3c89ebb93401677d2350ed3e1a67c94a1",
+    "src/logging.ts": "b9135a3cc6379120f23dd7dc6bfc5dec0a2a94b80addb5afc741066cd0636a10",
+    "e2e/canonical-session.spec.ts": "87c9b655b86f75ac166179444d4fa1a4690f77d9589e475bcd476a74a79ce4dd"
+  }
+}

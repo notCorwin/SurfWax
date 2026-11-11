@@ -1594,6 +1594,44 @@ export class EventLogger {
     finally { if (this.artifactLoads.get(id) === task) this.artifactLoads.delete(id); }
   }
 
+  /** Resolve only this run's successful terminal envelope, never a displayed preview. */
+  async evidenceResult(evidenceId: string, conversationId: string, runId?: string): Promise<unknown> {
+    if (!conversationId || !runId) throw new Error("Evidence requires a current conversation and run");
+    const loaded = await this.readCanonical(async (store, floor) => {
+      const events = await this.eventsByRunTypesAt(store, floor, [runId], ["tool.started", "tool.finished", "tool.failed"]);
+      const matches = events.filter(event => event.conversationId === conversationId && event.runId === runId && event.toolCallId === evidenceId);
+      const terminals = matches.filter(event => event.type === "tool.finished" || event.type === "tool.failed");
+      if (terminals.length !== 1 || terminals[0]!.type !== "tool.finished") throw new Error("Successful terminal evidence is unavailable");
+      const terminal = terminals[0]!;
+      const starts = matches.filter(event => event.type === "tool.started" && event.id < terminal.id);
+      const started = starts.length === 1 ? starts[0] : undefined;
+      if (!started) throw new Error("Evidence has no matching start");
+      let value: any = fromLogValue(terminal.output, terminal.valueEncoding);
+      const seen = new Set<number>();
+      while (value && typeof value === "object" && Object.hasOwn(value, "$ref")) {
+        const id = value.$ref;
+        if (!Number.isSafeInteger(id) || seen.has(id) || id <= started.id || id >= terminal.id) throw new Error("Invalid evidence artifact reference");
+        seen.add(id);
+        const event = store.get ? await store.get(id) : (await store.all()).find(item => item.id === id);
+        if (event?.type !== "tool.result.data" || event.conversationId !== conversationId || event.runId !== runId || event.toolCallId !== evidenceId)
+          throw new Error("Evidence artifact ownership mismatch");
+        const artifact = await this.loadArtifact(store, floor, id);
+        if (!artifact) throw new Error("Evidence artifact unavailable");
+        // Partitioned graphs are reconstructed through the existing artifact reader below.
+        if (artifact.graph) return { artifactId: id };
+        value = artifact.value;
+      }
+      if (!value || typeof value !== "object" || value.ok === false || value.complete === false || value.type === "tool-error") throw new Error("Evidence is not a successful terminal result");
+      return { value };
+    });
+    if ("artifactId" in loaded) {
+      const value: any = await this.result(loaded.artifactId!, {}, conversationId);
+      if (!value || typeof value !== "object" || Object.hasOwn(value, "$ref") || value.ok === false || value.complete === false || value.type === "tool-error") throw new Error("Invalid terminal artifact value");
+      return value;
+    }
+    return loaded.value;
+  }
+
   async result(id: number, selection: { path?: string | Array<string | number>; offset?: number; limit?: number } = {}, conversationId?: string): Promise<unknown> {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid result event ID");
     for (const field of ["offset", "limit"] as const) {

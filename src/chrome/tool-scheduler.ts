@@ -64,7 +64,7 @@ function resource(call: ScheduledToolCall, batch: Batch): string {
     const definition = inputOf(input.definition);
     return `script:${String(input.scriptId ?? definition.id ?? "*")}`;
   }
-  if (["read_artifact", "create_text_artifact", "save_artifact"].includes(name)) return `artifact:${String(input.artifactId ?? "*")}`;
+  if (["read_artifact", "create_text_artifact", "extract_json_text", "join_text_artifacts", "save_artifact"].includes(name)) return `artifact:${String(input.artifactId ?? "*")}`;
   if (name === "import_file_from_url" || name === "send_extension_request") return "extension";
   const explicit = typeof input.tabId === "number" ? input.tabId : undefined;
   return `tab:${String(explicit ?? batch.boundTabId ?? "unbound")}`;
