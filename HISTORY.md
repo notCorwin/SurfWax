@@ -56,6 +56,8 @@
 
 来源：[`902eeb0`](https://github.com/notCorwin/SurfWax/commit/902eeb0)，见 `src/agent/context-projection.ts`、`src/agent/context-prompt.ts`。
 
+请求容量判断集中在 `src/agent/context-budget.ts`：固定提示和工具定义先检查，超过自动压缩阈值时按增长保护决定是否压缩，最终仍必须检查完整请求是否超出输入预算。运行器负责提供压缩、补充浏览器输入和持久化适配；压缩后重新计入补充输入，不能只检查摘要大小。
+
 ## 工作模式与完成判定
 
 ### 工作模式通过显式工具结束

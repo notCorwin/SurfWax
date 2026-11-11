@@ -12,7 +12,8 @@ import { modelDiagnosticContext } from "./diagnostics";
 import { safeDiagnosticText } from "../diagnostic-error";
 import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-limits";
 import { resolvedBaseURL, sdkFor } from "./model-sdks";
-import { estimatePromptInput, hasSummarizableHistory, type ContextCompactor } from "./compaction";
+import type { ContextCompactor } from "./compaction";
+import { fitContextRequest } from "./context-budget";
 import { IncrementalActiveContext } from "./context-choice";
 import { createDeadline } from "../deadline";
 import { GOAL_TOOLS } from "./context-prompt";
@@ -229,35 +230,16 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       // The durable supplemental message is already in prepared after this point.
       const finalizeMessages = (source: typeof prepared) => anchor ? Promise.resolve(source) : prepareMessages(source);
       const prompt = { instructions: currentInstructions(), tools: currentTools() };
-      let estimatedInput = options.compactor?.estimate(outgoing, prompt) ?? estimatePromptInput({ ...prompt, messages: outgoing });
-      // Fixed instructions and schemas cannot be made smaller by repeatedly
-      // summarizing history. Check them before spending requests on summaries.
-      const capacity = modelLimit && inputBudget(modelLimit);
-      if (capacity && estimatePromptInput({ ...prompt, messages: [] }) >= capacity) {
-        throw new Error("模型输入窗口无法容纳系统提示与工具定义；请增大上下文窗口或减少固定提示与工具开销。");
-      }
-      const pressure = modelLimit && estimatedInput > inputBudget(modelLimit) * 0.8
-        && (!options.compactor || options.compactor.canCompact(prepared, modelLimit));
-      if (pressure) {
-        if (!options.compactor) throw new Error("上下文容量不足，无法在当前运行中压缩历史消息。");
-        prepared = await options.compactor.compact(raw, prepared, stepNumber, options.languageModel, modelLimit);
-        outgoing = await finalizeMessages(prepared);
-        estimatedInput = options.compactor.estimate(outgoing, prompt);
-      }
-      // The automatic threshold is a compaction policy, not permission to send
-      // an oversized prompt. Include late browser state, attachments and schemas
-      // in this final check even when the growth guard skipped a normal summary.
-      if (modelLimit && estimatedInput > inputBudget(modelLimit)) {
-        if (!options.compactor || !hasSummarizableHistory(prepared, modelLimit)) {
-          throw new Error("模型输入窗口无法容纳当前请求；原始历史已保留，请增大上下文窗口或减少固定提示与工具开销。");
-        }
-        prepared = await options.compactor.compact(raw, prepared, stepNumber, options.languageModel, modelLimit, true);
-        outgoing = await finalizeMessages(prepared);
-        estimatedInput = options.compactor.estimate(outgoing, prompt);
-        if (estimatedInput > inputBudget(modelLimit)) {
-          throw new Error("压缩后请求仍超出模型输入窗口；原始历史已保留，请增大上下文窗口或减少固定提示与工具开销。");
-        }
-      }
+      const compactor = options.compactor;
+      outgoing = await fitContextRequest({
+        prepared, outgoing, limit: modelLimit, prompt,
+        compaction: compactor && {
+          estimate: (messages) => compactor.estimate(messages, prompt),
+          canCompact: (messages, limit) => compactor.canCompact(messages, limit),
+          compact: (messages, limit, force) => compactor.compact(raw, messages, stepNumber, options.languageModel, limit, force),
+        },
+        finalize: finalizeMessages,
+      });
       if (options.compactor) await options.compactor.recordBase(outgoing);
       reviewContext = outgoing;
       return {

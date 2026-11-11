@@ -1,8 +1,9 @@
+import { hasSummarizableHistory } from "./context-budget";
 import { type LanguageModel, type ModelMessage } from "ai";
 import { isSyntheticTerminalMessage, restoreConversationRepository } from "../conversations";
 import { conversationMessageHeader, type ConversationMessage, type EventLogger, type LogEvent } from "../logging";
 import type { ModelConfig } from "../types";
-import { contextPressure, effectiveContext, hasSummarizableHistory, summarizeContext } from "./compaction";
+import { contextPressure, effectiveContext, summarizeContext } from "./compaction";
 import { createModel } from "./model";
 import type { ModelLimit } from "./model-limits";
 import { projectModelMessages } from "./context-projection";

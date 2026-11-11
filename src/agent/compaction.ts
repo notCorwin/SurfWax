@@ -5,6 +5,7 @@ import { createPromptSnapshot, readPromptSnapshot, PROMPT_TOOLS, type PromptSnap
 import { inputBudget, resolveModelLimit, type ModelLimit } from "./model-limits";
 import { retryModelOperation } from "./model";
 import { modelDiagnosticContext } from "./diagnostics";
+import { estimateInput, estimatePromptInput, hasSummarizableHistory } from "./context-budget";
 import { contextPrompt } from "./context-prompt";
 
 export const SUMMARY_PREFIX = "Earlier conversation summary:\n";
@@ -39,25 +40,6 @@ type EstimateCalibration = {
   inputTokens?: number;
   fixedEstimate?: number;
 };
-
-function estimateValue(value: unknown): number {
-  return 1024 + Math.ceil(new TextEncoder().encode(stringifyLogSafe(value)).length / 3);
-}
-
-export function estimateInput(messages: readonly ModelMessage[]): number {
-  return estimateValue(messages);
-}
-
-/** Fixed instructions and schemas cannot be reduced by summarizing a tiny task. */
-export function hasSummarizableHistory(messages: readonly ModelMessage[], limit: ModelLimit): boolean {
-  return estimateInput(messages) - estimateInput([]) >= Math.min(1024, inputBudget(limit) * 0.1);
-}
-
-export function estimatePromptInput(prompt: {
-  instructions?: unknown; messages: readonly ModelMessage[]; tools?: readonly Record<string, unknown>[];
-}): number {
-  return estimateValue(prompt);
-}
 
 async function digestValue(value: unknown): Promise<string> {
   const bytes = new TextEncoder().encode(stringifyLogSafe(value));

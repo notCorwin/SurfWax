@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { EventLogger } from "../logging";
 import type { Goal, actionHistory } from "./goal-completion";
 import { retryModelOperation } from "./model";
-import { estimatePromptInput } from "./compaction";
+import { estimatePromptInput } from "./context-budget";
 
 export const GOAL_REVIEW_INSTRUCTIONS = `SURFWAX_GOAL_REVIEW
 Review a proposed browser-task completion against the user's requirements and actual tool observations.
