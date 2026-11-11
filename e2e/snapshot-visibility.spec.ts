@@ -552,7 +552,7 @@ test("native values retain exact UTF-8 through fill, focus, blur and replacement
   const filled = "filled+雪@example.invalid";
   const inspect = (id: string) => commandResponse("inspect_page", { full: true, budget: 16000 }, id);
   const record = (next: any) => (request: any) => {
-    for (const message of request.messages.filter((m: any) => m.role === "tool" && ["native-initial","native-focused","native-blurred","native-replaced","native-textarea","native-selection"].includes(m.tool_call_id))) wires.set(message.tool_call_id, JSON.parse(message.content));
+    for (const message of request.messages.filter((m: any) => m.role === "tool" && ["native-initial","native-focused","native-blurred","native-replaced","native-textarea","native-selection","native-pseudo-before","native-pseudo-after"].includes(m.tool_call_id))) wires.set(message.tool_call_id, JSON.parse(message.content));
     return next;
   };
   try {
@@ -624,6 +624,33 @@ test("native values retain exact UTF-8 through fill, focus, blur and replacement
     for(const output of [selection?.output,selectionPart?.output,wires.get("native-selection")]){
       expect(output.items.some((item:any)=>item.role==="textbox"&&item.name==="Notes"&&item.valueUnknown&& !item.value)).toBe(true);
       expect(JSON.stringify(output.items)).not.toContain("Textarea filled");
+    }
+    for (const pseudo of ["before", "after"] as const) {
+      const cover = await target.evaluate(pseudo => {
+        document.getElementById('native-pseudo-style')?.remove();
+        document.body.innerHTML = '<style>body{margin:16px;font:16px Arial;background:white;color:black}input{font:16px Arial;width:340px}</style><div id="cover-source"></div><input id="pseudo-covered" aria-label="Pseudo covered" value="PSEUDO_COVERED_SECRET">';
+        const input = document.querySelector('#pseudo-covered')!, owner = document.querySelector('#cover-source')!;
+        const box = input.getBoundingClientRect();
+        const style = document.createElement('style');
+        style.id = 'native-pseudo-style';
+        style.textContent = `#cover-source::${pseudo}{content:"";position:absolute;z-index:auto;left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px;background:white}`;
+        document.head.append(style);
+        return { ownerPosition: getComputedStyle(owner).position, pseudoPosition: getComputedStyle(owner, `::${pseudo}`).position,
+          pseudoZ: getComputedStyle(owner, `::${pseudo}`).zIndex, hit: document.elementFromPoint(box.x+box.width/2, box.y+box.height/2)?.id };
+      }, pseudo);
+      expect(cover).toEqual({ ownerPosition: 'static', pseudoPosition: 'absolute', pseudoZ: 'auto', hit: 'cover-source' });
+      const id = `native-pseudo-${pseudo}`;
+      responses.push(inspect(id), record(textResponse(`NATIVE_PSEUDO_${pseudo}_DONE`)));
+      await submit('Inspect the currently covered field.', `NATIVE_PSEUDO_${pseudo}_DONE`);
+      const current = await readEvents(opened.page);
+      const terminal = current.find(e=>e.type==='tool.finished' && e.toolCallId===id);
+      const part = current.filter(e=>e.type==='conversation.message').flatMap((e:any)=>e.content?.parts ?? []).find((p:any)=>p.toolCallId===id && p.output);
+      await test.info().attach(id, { contentType: 'application/json', body: Buffer.from(JSON.stringify({ cover, terminal, wire: wires.get(id) })) });
+      for (const output of [terminal?.output, part?.output, wires.get(id)] as any[]) {
+        expect(output).toBeTruthy();
+        expect.soft(output.items.some((item:any)=>item.role==='textbox' && item.valueUnknown && !item.value)).toBe(true);
+        expect.soft(JSON.stringify(output.items)).not.toContain('PSEUDO_COVERED_SECRET');
+      }
     }
     await test.info().attach("native-value-chain",{contentType:"application/json",body:Buffer.from(JSON.stringify({axBefore,events,wires:[...wires]},null,2))});
   } finally { await dispose(opened.context,opened.userDataDirectory,provider.server); }

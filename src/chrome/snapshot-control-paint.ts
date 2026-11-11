@@ -10,7 +10,8 @@ import { SNAPSHOT_SELECT_PAINT_EVALUATOR_SOURCE } from "./snapshot-select-paint"
  * The caller must verify their CDP identities and re-run the entire batch with
  * a fresh scene and DOM snapshot before delivery. Null entries are uncertain.
  */
-export const SNAPSHOT_CONTROL_PAINT_SOURCE = `function(groups, frameUnobscured, noAuthorShadowRoots, ...objects) {
+function controlPaintSource(sample: string): string {
+  return `function(groups, frameUnobscured, noAuthorShadowRoots, ...objects) {
   if (!groups || !Array.isArray(groups.native) || !Array.isArray(groups.selects) || !Array.isArray(groups.selectHosts)) return null;
   const count = groups.native.length, stateOffset = count + groups.selects.length * 2;
   if (objects.length !== stateOffset + groups.selectHosts.length)
@@ -26,12 +27,7 @@ export const SNAPSHOT_CONTROL_PAINT_SOURCE = `function(groups, frameUnobscured, 
   const failures = () => ({scene:null, nativeValues:groups.native.map(() => null), selectValues:groups.selects.map(() => null), selectStates});
   if(frameUnobscured!==true || noAuthorShadowRoots!==true)return failures();
   let painted=groups.painted;
-  if(!painted && (count || groups.selects.length)){
-    const texts=[...objects.slice(0,count),...groups.selects.map((_,i)=>objects[count+i*2])];
-    const roots=[...new Set(texts.map(text=>text.getRootNode()))];
-    (${sampleReadableSnapshot.toString()})(1,roots,{shadowRoots:roots},{scope:{contains:()=>true},
-      accept:(_nodes,_uncertain,items)=>{painted=new Map(items.map(item=>[item.node,item.text]));}});
-  }
+  ${sample}
   if(!painted)return failures();
   const nativeValues=(${SNAPSHOT_NATIVE_VALUE_EVALUATOR_SOURCE})(this,groups.native,objects.slice(0,count),painted);
   const scene = groups.selects.length ? (${SNAPSHOT_PAINT_SCENE_SOURCE})(this, frameUnobscured, noAuthorShadowRoots,painted) : null;
@@ -40,3 +36,17 @@ export const SNAPSHOT_CONTROL_PAINT_SOURCE = `function(groups, frameUnobscured, 
     nativeValues,
     selectValues:(${SNAPSHOT_SELECT_PAINT_EVALUATOR_SOURCE})(scene, groups.selects, objects.slice(count, stateOffset)), selectStates};
 }`;
+}
+
+/** Semantic reads already supply their current accepted text Map. */
+export const SNAPSHOT_CONTROL_PAINTED_SOURCE = controlPaintSource("");
+
+/** Independent before/after batches build their own current synchronous Map. */
+export const SNAPSHOT_CONTROL_PAINT_SOURCE = controlPaintSource(`
+  if(!painted && (count || groups.selects.length)){
+    const texts=[...objects.slice(0,count),...groups.selects.map((_,i)=>objects[count+i*2])];
+    const roots=[...new Set(texts.map(text=>text.getRootNode()))];
+    (${sampleReadableSnapshot.toString()})(1,roots,{shadowRoots:roots},{scope:{contains:()=>true},
+      accept:(_nodes,_uncertain,items)=>{painted=new Map(items.map(item=>[item.node,item.text]));}});
+  }
+`);

@@ -28,12 +28,15 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
     toolsRunning: state.messages.some((message) => message.parts.some((part) => part.type === "tool-call" && part.status.type === "running")) });
   const projectTurns = useMemo(createTurnProjection, []);
   const turns = useMemo(() => projectTurns(state.messages), [projectTurns, state.messages]);
-  const [warning, setWarning] = useState("");
+  const [warning, setWarning] = useState(false);
+  const [commandError, setCommandError] = useState<unknown>();
   const command = useCallback((action: () => void | Promise<unknown>) => {
-    if (locked) { setWarning("当前会话尚未结束，请等待完成或先停止运行。"); return; }
-    void Promise.resolve().then(action).catch((error) => setWarning(error instanceof Error ? error.message : String(error)));
+    setCommandError(undefined);
+    if (locked) { setWarning(true); return; }
+    setWarning(false);
+    void Promise.resolve().then(action).catch((error) => setCommandError(() => error ?? new Error()));
   }, [locked]);
-  useEffect(() => { if (!locked) setWarning(""); }, [locked]);
+  useEffect(() => { if (!locked) setWarning(false); }, [locked]);
   const scroller = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({ count: turns.length, estimateSize: () => 200, getItemKey: projectTurns.getItemKey(),
     getScrollElement: () => scroller.current, initialRect: { height: 800, width: 430 }, overscan: 2,
@@ -42,7 +45,8 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
   const totalSize = virtualizer.getTotalSize();
   return <div data-testid="thread-root" className="relative flex h-full min-h-0 flex-col">
     {state.error !== undefined && <ErrorNotice summary="会话读取失败，请重试。" error={state.error} />}
-    {warning && <p role="status" className="conversation-notice thread-warning">{warning}</p>}
+    {warning && <p role="status" className="conversation-notice thread-warning">当前会话尚未结束，请等待完成或先停止运行。</p>}
+    {commandError !== undefined && <ErrorNotice className="conversation-notice thread-warning" summary="会话操作失败；请重试。" error={commandError} />}
     <MessageScrollerProvider autoScroll>
       <MessageScroller className="flex-1">
         <MessageScrollerViewport ref={scroller} data-testid="thread-viewport" className="overflow-x-hidden">

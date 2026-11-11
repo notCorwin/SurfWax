@@ -1,6 +1,6 @@
 import { sampleReadableSnapshot } from "./snapshot-readable";
 import { PLACEHOLDER_EVIDENCE_SOURCE } from "./snapshot-placeholder";
-import { SNAPSHOT_CONTROL_PAINT_SOURCE } from "./snapshot-control-paint";
+import { SNAPSHOT_CONTROL_PAINTED_SOURCE } from "./snapshot-control-paint";
 
 /** The final read receives live roots, never earlier native strings or states. */
 export const NATIVE_OBSERVATION_SOURCE = `function(pageZoom,...nativeRoots){
@@ -9,7 +9,7 @@ export const NATIVE_OBSERVATION_SOURCE = `function(pageZoom,...nativeRoots){
   return (${sampleReadableSnapshot.toString()})(pageZoom,nativeRoots,{
     shadowRoots:nativeRoots,
     placeholder:(${PLACEHOLDER_EVIDENCE_SOURCE}),
-    controls:(${SNAPSHOT_CONTROL_PAINT_SOURCE})
+    controls:(${SNAPSHOT_CONTROL_PAINTED_SOURCE})
   });
 }`;
 

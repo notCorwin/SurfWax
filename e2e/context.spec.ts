@@ -210,6 +210,29 @@ test(
           Number(await indicator.getAttribute("data-used-percent")),
         )
         .toBeLessThan(longPercent);
+      const beforeRejectedSwitch = await projection();
+      const selectedBefore = (await readEvents(opened.page)).filter(event => event.type === "conversation.branch.selected");
+      await opened.page.evaluate(() => {
+        const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+        document.documentElement.dataset.rejectBranchStatus = "true";
+        chrome.runtime.sendMessage = ((...args: any[]) => {
+          if (args[0]?.type === "surf-wax:run-status" && document.documentElement.dataset.rejectBranchStatus === "true")
+            return Promise.reject(new Error("branch-raw-marker stack-marker credential-marker"));
+          return (send as any)(...args);
+        }) as typeof chrome.runtime.sendMessage;
+      });
+      await opened.page.getByRole("button", { name: "上一个分支" }).last().click();
+      await expect(opened.page.locator(".thread-warning")).toBeVisible();
+      const failurePresentation = await opened.page.locator(".thread-warning").innerText();
+      const afterRejectedSwitch = await projection();
+      await test.info().attach("rejected-branch-switch", { contentType: "application/json", body: Buffer.from(JSON.stringify({ failurePresentation, beforeRejectedSwitch, afterRejectedSwitch })) });
+      expect.soft(failurePresentation).not.toMatch(/branch-raw-marker|stack-marker|credential-marker/);
+      expect.soft(failurePresentation).toContain("会话操作失败；请重试。");
+      expect(afterRejectedSwitch.digest).toBe(beforeRejectedSwitch.digest);
+      expect(afterRejectedSwitch.branchIds).toEqual(beforeRejectedSwitch.branchIds);
+      expect((await readEvents(opened.page)).filter(event => event.type === "conversation.branch.selected")).toEqual(selectedBefore);
+      await expect(opened.page.locator(".markdown-body").last()).toContainText("SHORT_BRANCH");
+      await opened.page.evaluate(() => { document.documentElement.dataset.rejectBranchStatus = "false"; });
       await opened.page
         .getByRole("button", { name: "上一个分支" })
         .last()
@@ -217,6 +240,7 @@ test(
       await expect(opened.page.locator(".markdown-body").last()).toContainText(
         "LONG_BRANCH",
       );
+      await expect(opened.page.locator(".thread-warning")).toHaveCount(0);
       await expect.poll(async () => (await projection()).lastText).toContain("LONG_BRANCH");
       const restoredProjection = await projection();
       await test.info().attach("context-branch-projections", { contentType: "application/json", body: Buffer.from(JSON.stringify({ originalProjection, restoredProjection }, null, 2)) });

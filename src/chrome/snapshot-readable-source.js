@@ -1527,9 +1527,9 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     }
     return ordinaryFlow.get(element);
   };
-  const behindNativeBackdrop = (parent, foreign, path, foregroundEffect) => {
+  const behindNativeBackdrop = (parent, foreign, path, foregroundEffect, pseudoStyle) => {
     const host = nativeOwners.get(parent);
-    if (!host || foregroundEffect || stack(host) !== path || path?.unknown || paintContains(foreign,host)
+    if (!host || pseudoStyle || foregroundEffect || stack(host) !== path || path?.unknown || paintContains(foreign,host)
       || !inFlow(host) || !inFlow(foreign)
       || !(foreign.compareDocumentPosition(host) & Node.DOCUMENT_POSITION_FOLLOWING)) return false;
     const s = style(host), color = rgba(s.backgroundColor);
@@ -1546,11 +1546,11 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
   };
   const foreignCover = (parent, rects, presence = false) =>
     covers.some(
-      ({ element, rect, path, foregroundEffect, directText, outline }) =>
+      ({ element, rect, path, foregroundEffect, directText, outline, pseudoStyle }) =>
         !(presence && paintContains(parent, element)) &&
         (!paintContains(element, parent) || foregroundEffect || (directText && element !== parent)) &&
         rects.some((r) => overlaps(r, rect)) &&
-        !strictlyAbove(stack(parent), path) && !behindNativeBackdrop(parent, element, path, foregroundEffect) && !(outline && nativeOwnOutline(parent, element, rects)),
+        !strictlyAbove(stack(parent), path) && !behindNativeBackdrop(parent, element, path, foregroundEffect, pseudoStyle) && !(outline && nativeOwnOutline(parent, element, rects)),
     );
   for (const element of topLayers) {
     const p = getComputedStyle(element, "::backdrop");

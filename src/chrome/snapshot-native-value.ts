@@ -1,6 +1,8 @@
 /** Prove a complete native value against text accepted in this synchronous paint read. */
 export const SNAPSHOT_NATIVE_VALUE_EVALUATOR_SOURCE = `function(doc, requests, texts, painted) {
-  const view=doc.defaultView, style=el=>view.getComputedStyle(el);
+  // Requests share ancestors only for this synchronous invocation.
+  const view=doc.defaultView, styles=new Map();
+  const style=el=>{let value=styles.get(el);if(!value){value=view.getComputedStyle(el);styles.set(el,value);}return value;};
   const rect=el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};
   const finite=r=>[r.x,r.y,r.width,r.height].every(Number.isFinite)&&r.width>0&&r.height>0;
   const inside=(a,b)=>a.x>=b.x&&a.y>=b.y&&a.x+a.width<=b.x+b.width&&a.y+a.height<=b.y+b.height;

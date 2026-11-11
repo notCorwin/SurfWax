@@ -84,9 +84,9 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 来源：`fdf724f`，见 `src/model-error.ts`、`src/agent/model.ts`、`src/components/chat/waiting-status.tsx`、`src/components/chat/use-activity-clock.ts`。
 
-会话重命名与新建操作的异常保留原对象，统一经 `ErrorNotice` 的安全边界展示；编辑态和页头不能直接输出异常的 message 或字符串化结果。空名称属于独立的固定应用验证提示，不与未知操作失败混用；取消、输入修正和后续成功清除相应旧错误。错误展示不绕过运行互斥、不把未知失败一概判为忙碌或网络故障，也不因失败切换会话或丢弃既有历史。
+会话重命名、新建与消息操作（包括切换分支）的异常保留原对象，统一经 `ErrorNotice` 的安全边界展示；编辑态、页头和消息操作提示不能直接输出异常的 message 或字符串化结果。空名称与运行忙碌属于独立的固定应用提示，不与未知操作失败混用；取消、输入修正和后续操作清除相应旧错误。错误展示不绕过运行互斥、不把未知失败一概判为忙碌或网络故障，也不因失败切换会话、分支或丢弃既有历史。
 
-来源：`src/components/chat/thread-list.tsx`、`src/sidepanel/App.tsx`、`e2e/canonical-session.spec.ts`。
+来源：`src/components/chat/thread-list.tsx`、`src/components/chat/thread.tsx`、`src/sidepanel/App.tsx`、`e2e/canonical-session.spec.ts`、`e2e/context.spec.ts`。
 
 ## 工作模式与完成判定
 
@@ -329,6 +329,12 @@ ID 的可操作性来自唯一真实元素绑定，不来自名字匹配或包�
 Chrome 扩展的 author-shadow API 不提供原生控件的 UA shadow root；原生字段改由 CDP 异步发现并解析 live roots，再将对象交给本扩展的隔离上下文，在最终一次同步调用中重新读取当前 host、Text、值、样式与几何。前置步骤只复用绑定 root 文档、loader/frame 身份的 host 索引，不传入旧的字段文字或状态；不能复用时按需发现当前根文档字段。root/host 的连接、所属文档和对应关系须现场验证，不能读取 UA root 的 `.mode`。该路径采用上述新 root-only 采集身份边界，根文档或其执行上下文、会话、页面缩放变化以及取消仍拒绝本次结果；临时句柄采后释放。
 
 原生值、placeholder 与选择文字分别经过既有字段绘制证明，并与同一次局部采样接受的 Text 证据共同确认，映射到现有 `value`、`placeholder`、`selectedLabels` 字段。缺失或已替换的 root、未发现的新字段、字体或裁剪证明不足时保留 unknown 与 coverage gap，不能用 DOM value、aria-label 或 placeholder 属性补足。这仍是根视口 partial：Polymarket 的短输入提示词、自定义字体、native listbox 等未获完整覆盖，嵌入文档、Canvas 及任意 CSS 的完整性也未由此得到保证。
+
+原生字段值的真实缺口来自独立整页绘制证明过度拒绝普通列表、将折叠光标当作选区以及原生 outline 的无界遮挡；不是已确认的跨 world 问题。字段值与单选标签改为共享同次同步文字引擎接受的 live Text Map，再核对当前 UA Text、host、完整几何、值及前后 capture 身份，不以 AX 或 DOM 原文补足。祖先样式仅在该次同步 batch 内按节点复用，语义采样直接使用自己的 Map，注入函数不重复携带独立采样器，也不跨异步或文档复用绘制证明。
+
+不确定的字体、裁剪、遮挡、密码和非折叠选区仍保留 unknown。普通流中较晚的不透明原生背景只可排除同一已知绘制上下文内较早的普通流墨迹；定位伪元素不能借其 owner 的普通流身份获得这一豁免。outline 的有限边界与自身内区判定不放宽其它遮挡。ASCII、中文及所测控件状态的精确字节证据不代表任意文字、CSS、页面完整性或 Luna 任务成功。
+
+来源：`ec2831b`，见 `src/chrome/snapshot-control-paint.ts`、`src/chrome/snapshot-native-value.ts`、`src/chrome/snapshot-native-runtime.ts`、`src/chrome/snapshot-readable-source.js`、`e2e/snapshot-visibility.spec.ts`。
 
 来源：2026-11-04、2026-11-07 的实现决策，见 `src/chrome/snapshot-readable-source.js`、`src/chrome/snapshot-readable.ts`、`src/chrome/snapshot-native-runtime.ts` 及 `src/chrome/automation.ts` 的 `captureReadableSnapshot`、`inspect`。
 
