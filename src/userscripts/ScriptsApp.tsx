@@ -261,18 +261,18 @@ export function ScriptsApp() {
       const failed: string[] = [];
       for (const id of ids) {
         try { await call("delete", { id }); }
-        catch (cause) { failed.push(`${id}：${errorDetails(cause)}`); }
+        catch (cause) { failed.push(id); }
       }
-      if (ids.includes(selected) && !failed.some((item) => item.startsWith(`${selected}：`))) {
+      if (ids.includes(selected) && !failed.includes(selected)) {
         choose(undefined, true);
         setView("manager");
         history.replaceState(null, "", "#manage");
       }
       setDeleteIds([]);
       await refresh();
-      setCheckedIds((current) => current.filter((id) => !ids.includes(id) || failed.some((item) => item.startsWith(`${id}：`))));
+      setCheckedIds((current) => current.filter((id) => !ids.includes(id) || failed.includes(id)));
       setMessage(failed.length ? `已删除 ${ids.length - failed.length} 个；${failed.length} 个失败。` : `已删除 ${ids.length} 个脚本`);
-      if (failed.length) setError(failed.join("\n"));
+      if (failed.length) setError("操作未完成，请检查设置后重试。");
     } catch (cause) { setError(errorDetails(cause)); }
     finally { setAction(null); }
   };
@@ -334,11 +334,11 @@ export function ScriptsApp() {
       for (const id of ids) {
         if (disabledIds.includes(id) === !enable) continue;
         try { await call("setEnabled", { id, enabled: enable }); }
-        catch (cause) { failed.push(`${id}：${errorDetails(cause)}`); }
+        catch (cause) { failed.push(id); }
       }
       await refresh(false);
       setMessage(failed.length ? `操作完成，${failed.length} 个脚本失败。` : `已${enable ? "启用" : "停用"}所选脚本`);
-      if (failed.length) setError(failed.join("\n"));
+      if (failed.length) setError("操作未完成，请检查设置后重试。");
     } catch (cause) { setError(errorDetails(cause)); }
     finally { setAction(null); }
   };
@@ -361,7 +361,7 @@ export function ScriptsApp() {
     setImportScripts(null);
     setOverwriteIds([]);
     try { setImportScripts(parseImport(await file.text())); }
-    catch (cause) { setError(`无法读取导入文件：${errorDetails(cause)}`); }
+    catch (cause) { setError(errorDetails(cause)); }
     if (fileInput.current) fileInput.current.value = "";
   };
 
@@ -378,13 +378,13 @@ export function ScriptsApp() {
         try {
           await call(existing ? "replace" : "create", script);
           imported++;
-        } catch (cause) { failed.push(`${script.id}：${errorDetails(cause)}`); }
+        } catch (cause) { failed.push(script.id); }
       }
       await refresh(false);
       setImportScripts(null);
       setOverwriteIds([]);
       setMessage(`已导入 ${imported} 个脚本${failed.length ? `，${failed.length} 个失败` : ""}。`);
-      if (failed.length) setError(failed.join("\n"));
+      if (failed.length) setError("操作未完成，请检查设置后重试。");
     } catch (cause) { setError(errorDetails(cause)); }
     finally { setAction(null); }
   };

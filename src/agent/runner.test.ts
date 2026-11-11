@@ -188,3 +188,17 @@ describe("createAgent", () => {
     });
   });
 });
+
+describe("user-facing errors", () => {
+  it("shows actionable known failures without exposing arbitrary error content", async () => {
+    const { errorDetails } = await import("../components/ui/error-notice");
+    const secret = "secret-token server response";
+    for (const error of [new Error(secret), secret, { message: secret }, { stack: secret }]) {
+      expect(errorDetails(error)).not.toContain(secret);
+    }
+    expect(errorDetails(Object.assign(new Error(secret), { statusCode: 401 }))).toBe("认证失败，请检查 API 密钥和访问权限。");
+    expect(errorDetails(new Error("脚本 ID 已存在。"))).toBe("脚本 ID 已存在。");
+    expect(errorDetails("压缩后请求仍超出模型输入窗口；原始历史已保留，请增大上下文窗口或减少固定提示与工具开销。"))
+      .toContain("增大上下文窗口");
+  });
+});
