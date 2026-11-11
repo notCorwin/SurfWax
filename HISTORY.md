@@ -72,6 +72,10 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 模型限制由装配层解析并作为本次运行的快照传给运行器；压力估算和摘要生成也接收明确的限制，不自行读取模型目录。图像输入优先服从用户显式设置，否则使用同一限制快照中的输入模态。压缩和运行器测试使用真实事件记录器及内存事件存储，避免用全局网络替身或手写日志接口模拟这些边界。该隔离验证不替代模型目录解析、取消及浏览器端到端行为的验证。
 
+模型上下文以本次请求明确指定、已经持久化的实际分支 head 为锚。重试与编辑沿该分支重建，不发送被替换的旧答案；尚未产生新输出的失败仍保留原 UI 历史。即使没有新事件，head 改变也必须使上下文缓存失效，不能复用另一分支的投影。
+
+来源：`f9aaa1a`，见 `src/agent/context-choice.ts`、`src/agent/runner.ts`、`src/agent/transport.ts`、`src/components/chat/local-composer.tsx`。
+
 ## 工作模式与完成判定
 
 ### 工作模式通过显式工具结束
@@ -85,6 +89,12 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 2026-11-01 起加强完成判定：动作成功返回不等于业务目标完成。浏览器目标引用真实工具结果的 `evidenceId`，并由独立复核核对用户要求和观察结果；历史动作回执参与累计约束检查，例如“只能提交一次”。未结束的后台任务不能视为完成。副作用未知时，必须先用后续观察确认，不能盲目重试或直接宣告成功。2026-11-04 进一步明确，不完整快照不能作为完整观察证据。
 
 来源：[`3437dbe`](https://github.com/notCorwin/SurfWax/commit/3437dbe)、[`b00caf4`](https://github.com/notCorwin/SurfWax/commit/b00caf4)、[`a49c713`](https://github.com/notCorwin/SurfWax/commit/a49c713)，见 `src/agent/goal-completion.ts`、`src/agent/goal-review.ts`。
+
+完成复核结合累计动作回执与派发前实际观测到的目标身份；目标身份来自可操作性检查，并明确标注来源，不能由请求的选择器猜造。动作后按钮消失不应抹去派发前证据。引用证据只在预算选择时优先，选中的对话片段仍按原始时序呈现，并保留原位置；不能把较旧引用标成最新观察。累计证据使用独立的 Canonical Event Log 投影，按事件游标与存储代次增量重建，不把动作尝试塞入普通模型上下文。
+
+审查的 `remaining` 只列当前所提状态获准前，智能体仍需补充的操作或观察；获准的 blocked 状态所需用户操作归入 `goal.userAction`。结构合法但 `accept:true` 且 `remaining` 非空时，规范为拒绝，保留具体原因和待办，不冒充审查服务故障，也不因此额外请求模型。Canonical 诊断同时保存原始答复与规范化标记；非法 JSON、截断和服务故障仍按各自错误路径处理，完成门槛不变。
+
+来源：`7fd6301`、`af5e79f`、`5e8d5fd`，见 `src/agent/goal-completion.ts`、`src/agent/goal-review.ts`、`src/logging.ts`。
 
 ### 完成工具不接收总结
 
@@ -124,11 +134,19 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 来源：[`0c4173e`](https://github.com/notCorwin/SurfWax/commit/0c4173e)、[`171464b`](https://github.com/notCorwin/SurfWax/commit/171464b)、[`e514df4`](https://github.com/notCorwin/SurfWax/commit/e514df4)、[`902eeb0`](https://github.com/notCorwin/SurfWax/commit/902eeb0)，见 `src/chrome/tool-scheduler.ts`。
 
+即时原子动作不隐式轮询缺失或不可操作的目标；等待由独立的显式等待工具表达。保留动作派发前既有的身份与可操作性检查，不能把动作超时当成等待入口。
+
+来源：`60e53eb`，见 `src/chrome/automation.ts`。
+
 ### 后台操作使用可查询任务与增量回执
 
 2026-10-29 起，长操作和可能被浏览器事件阻塞的操作可交给后台任务，通过 `get_job` 增量读取回执直至终态，也可取消。取消不回滚已产生的副作用；重启保留任务记录，但不恢复正在运行的工作。浏览器事件使用运行期订阅和游标，显式报告溢出、截断和关闭。
 
 来源：[`0c4173e`](https://github.com/notCorwin/SurfWax/commit/0c4173e)、[`171464b`](https://github.com/notCorwin/SurfWax/commit/171464b)、[`9c377f6`](https://github.com/notCorwin/SurfWax/commit/9c377f6)，当前协议见 `src/chrome/tool.ts`。
+
+取消结果依据实际派发边界判断：能够确认在真正派发前取消，才明确报告未派发；派发后的未知效果不能被后续成功调用擦掉。JavaScript 取消无法撤销已经交给 Chrome 的底层操作，必须保留未知状态并通过后续观察核实。
+
+来源：`60e53eb`，见 `src/chrome/executor.ts`、`src/chrome/program.ts`、`src/chrome/tool.ts`。
 
 ### 元素引用绑定观察、文档和框架
 
@@ -136,11 +154,21 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 来源：[`b60bf21`](https://github.com/notCorwin/SurfWax/commit/b60bf21)、[`6b41900`](https://github.com/notCorwin/SurfWax/commit/6b41900)、[`ea1c158`](https://github.com/notCorwin/SurfWax/commit/ea1c158)、[`41dc64a`](https://github.com/notCorwin/SurfWax/commit/41dc64a)、[`fea9e40`](https://github.com/notCorwin/SurfWax/commit/fea9e40)。
 
+链接导入将解析与读取绑定到同一个真实节点及其框架；节点被替换或移除时明确失败，不重新匹配同名链接并读取另一节点。
+
+来源：`60e53eb`，见 `src/chrome/executor.ts`、`src/chrome/automation.ts`。
+
 ### 大结果存入会话 Artifact，保留原始数据语义
 
 2026-09-22 起，将生成结果保存在会话存储中；2026-10-30 至 31 日进一步支持大结果、二进制和复杂数据图，通过 Artifact 引用、分页及范围读取按需取回。编码保留 `undefined`、特殊数值、BigInt、类型化数组等 JSON 不能直接表达的值，不把显示用截断结果当成完整原始数据。
 
 来源：[`61c200f`](https://github.com/notCorwin/SurfWax/commit/61c200f)、[`45f231c`](https://github.com/notCorwin/SurfWax/commit/45f231c)、[`c7e6e18`](https://github.com/notCorwin/SurfWax/commit/c7e6e18)、[`b156e43`](https://github.com/notCorwin/SurfWax/commit/b156e43)、[`8efcf68`](https://github.com/notCorwin/SurfWax/commit/8efcf68)。
+
+存储数据的文本处理采用职责固定的 JSON 字符串提取与 UTF-8 文本产物拼接，不要求模型逐字复制大结果；这两项操作不执行任意转换脚本。路径、解码方式和分隔符明确指定；严格检查字符串类型，保留输入顺序、重复项、空字符串与空白，不猜字段、不隐式字符串化、排序或裁剪。处理复用可终止的程序 Worker，全部来源验证通过后才保存一个产物，并返回来源、数量、字节数与哈希。
+
+内部 `artifacts.read` 保留原始值读取契约；模型的 `read_artifact` 单独按响应预算分页，始终指向原产物与绝对路径，用绝对 `range`、`total` 和 `nextAccess` 表达进度。HTTP 大结果优先推荐正文路径；读取不重新包装、复制成新产物。单项过大而未交付数据时明确说明，可缩窄时给出路径，不伪造分页进度。
+
+来源：`2ae82b8`、`53aac09`，见 `src/chrome/text-artifact-transform.ts`、`src/chrome/artifact-read.ts`、`src/chrome/atomic-tools.ts`、`src/chrome/executor.ts`、`src/artifact-selection.ts`。
 
 ### 保存文件直接使用必需的 downloads 权限
 
@@ -367,6 +395,10 @@ HTML 祖先的 overflow 裁剪须按实际定位包含块判断，不能因 DOM 
 2026-10-30 起引入模型评估，随后按任务能力建立关卡，并提供不调用模型的沙盒和工具验证。固定脚本通过只能证明工具及关卡可用，真实模型完成能力由独立的模型评估证据支持；不能混用两类结果。
 
 来源：[`45f231c`](https://github.com/notCorwin/SurfWax/commit/45f231c)、[`75a7e54`](https://github.com/notCorwin/SurfWax/commit/75a7e54)、[`b2c9e1d`](https://github.com/notCorwin/SurfWax/commit/b2c9e1d)、[`a6135d6`](https://github.com/notCorwin/SurfWax/commit/a6135d6)。
+
+2026-11-12 起，按用户明确决定，实际 Surf Wax 任务及其内部完成复核、上下文压缩与真实模型验收只使用 `gpt-6-luna`；开发子代理的模型不受此限制。每次真实会话都审阅历史，包括通过的用例，以模型实际收到的工具选择、结果和证据检查 Harness，不用更强模型掩盖工具契约缺陷。保留旧失败样本、证据与原分类；修复后的复测另建验收批次，不覆盖旧结果，也不把事后诊断算作原样本通过。
+
+来源：用户 2026-11-12 的模型与会话审计约定；验收入口见 `e2e/real-model-evaluation.spec.ts`、`e2e/evaluation/run-evaluation.ts`。
 
 ### 删除自动发布，改为本地打包
 
