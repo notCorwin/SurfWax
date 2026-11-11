@@ -68,7 +68,7 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 来源：[`902eeb0`](https://github.com/notCorwin/SurfWax/commit/902eeb0)，见 `src/agent/context-projection.ts`、`src/agent/context-prompt.ts`。
 
-请求容量判断集中在 `src/agent/context-budget.ts`：固定提示和工具定义先检查，超过自动压缩阈值时按增长保护决定是否压缩，最终仍必须检查完整请求是否超出输入预算。运行器负责提供压缩、补充浏览器输入和持久化适配；压缩后重新计入补充输入，不能只检查摘要大小。
+请求容量判断集中在 `src/agent/context-budget.ts`：固定提示和工具定义先检查，有可压缩历史且满足增长保护时，达到有效输入预算的 80% 即触发自动压缩；非整数边界取向上整 token，发送、压力判断和 UI 抢占运行租约前使用同一阈值。空历史、不可约的固定开销和未增长的已压缩前缀不因此反复抢租约或请求摘要。最终仍必须检查完整请求是否超出输入预算，必要的强制压缩也不能放行超额请求。运行器负责提供压缩、补充浏览器输入和持久化适配；压缩后重新计入补充输入，不能只检查摘要大小。
 
 模型限制由装配层解析并作为本次运行的快照传给运行器；压力估算和摘要生成也接收明确的限制，不自行读取模型目录。图像输入优先服从用户显式设置，否则使用同一限制快照中的输入模态。压缩和运行器测试使用真实事件记录器及内存事件存储，避免用全局网络替身或手写日志接口模拟这些边界。该隔离验证不替代模型目录解析、取消及浏览器端到端行为的验证。
 
@@ -79,6 +79,10 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 首次回复尚未持久化时，补充观察虽锚定共享用户消息，仍归属其实际运行；可证明归属的投影只纳入当前 Assistant 分支的运行及明确的活跃运行；无法归属的旧记录保留原锚定语义，不能借此放行已知兄弟运行。重试和无输出失败的观察不能污染旧答案分支，当前重试也不能丢失自己的新观察。运行身份与 head、日志代次共同决定投影缓存和 UI 计数失效；切回或重载旧分支须恢复相同的原始模型上下文，而不只比较取整百分比。
 
 来源：`src/agent/context-projection.ts`、`src/agent/context-choice.ts`、`src/agent/transport.ts`、`src/components/chat/local-composer.tsx`。
+
+模型请求的重试原因与等待状态来自 Canonical 请求生命周期，仅展示结构化错误分类对应的安全文案，不将提供商原始错误体写入用户提示。倒计时按事件中的实际延迟计算，共享低频时钟并在到期或卸载时停止；新请求、停止和终态清除旧等待，其他运行的迟到事件不能覆盖当前状态。该反馈不证明模型正在思考，也不改变重试策略。
+
+来源：`fdf724f`，见 `src/model-error.ts`、`src/agent/model.ts`、`src/components/chat/waiting-status.tsx`、`src/components/chat/use-activity-clock.ts`。
 
 ## 工作模式与完成判定
 
@@ -167,6 +171,10 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 来源：`60e53eb`，见 `src/chrome/executor.ts`、`src/chrome/automation.ts`。
 
 搜索候选关联其自动附带快照的同次 capture 语义容器与已证明可见标签，复用现有快照证据和交付 lease，不另行采集或猜用 AX 名称、DOM 原文补齐。未证明的关联与标签保留 unknown 或不完整标记；当前关联不保证 DOM 复用后的业务身份永远不变。容器引用仅供观察，`scope:{id}` 仍不支持。
+
+自动快照中实际交付的 actionable 项也可携带同次 capture 的容器标签关联；与 find 共用按需建立的语义索引，不增加 DOM、AX 或快照采集。自动关联受 3072 字节子预算与 16384 字节快照 envelope 共同约束，分页、delta、遗漏及 unknown 保持明确，交付 lease 失效时关联一起失效。关联仅帮助模型核对已观察内容，不替代任务条件判断或后续动作前的身份校验。
+
+来源：`b309d11`，见 `src/chrome/candidate-context.ts`、`src/chrome/automation.ts`、`src/chrome/tool.ts`。
 
 来源：`8a4407b`，见 `src/chrome/candidate-context.ts`、`src/chrome/automation.ts`、`src/chrome/tool.ts`。
 

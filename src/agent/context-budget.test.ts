@@ -6,26 +6,30 @@ const limit = { provider: "manual", model: "test", context: 10_000, input: 8_000
 const history: ModelMessage[] = [{ role: "user", content: "Keep this constraint. " + "x".repeat(12_000) }];
 const summary: ModelMessage[] = [{ role: "user", content: "Saved constraint" }];
 
-it("admits the exact input budget and compacts only above 80%, including supplemental input", async () => {
+it("compacts at 80% without rounding early, including supplemental input, and admits the exact input budget", async () => {
   const supplemental: ModelMessage = { role: "user", content: "Latest browser state" };
   const outgoing = [...history, supplemental];
-  const compact = vi.fn(async () => summary);
-  const finalize = vi.fn(async (messages: ModelMessage[]) => [...messages, supplemental]);
-  let tokens = 6_400;
-  const options = {
-    prepared: history, outgoing, limit, prompt: {}, finalize,
-    compaction: {
-      estimate: () => tokens,
-      canCompact: () => true,
-      compact: async () => { tokens = 8_000; return compact(); },
-    },
-  };
-  expect(await fitContextRequest(options)).toBe(outgoing);
-  expect(compact).not.toHaveBeenCalled();
-  tokens++;
-  expect(await fitContextRequest(options)).toEqual([...summary, supplemental]);
-  expect(compact).toHaveBeenCalledOnce();
-  expect(finalize).toHaveBeenCalledWith(summary);
+  for (const [input, estimate, shouldCompact] of [
+    [8_000, 6_399, false], [8_000, 6_400, true], [8_000, 6_401, true],
+    [8_001, 6_400, false], [8_001, 6_401, true],
+  ] as const) {
+    const compact = vi.fn(async () => summary);
+    const finalize = vi.fn(async (messages: ModelMessage[]) => [...messages, supplemental]);
+    let tokens: number = estimate;
+    const result = await fitContextRequest({
+      prepared: history, outgoing, limit: { ...limit, input }, prompt: {}, finalize,
+      compaction: {
+        estimate: () => tokens,
+        canCompact: () => true,
+        compact: async () => { tokens = input; return compact(); },
+      },
+    });
+    expect(compact).toHaveBeenCalledTimes(shouldCompact ? 1 : 0);
+    if (shouldCompact) {
+      expect(result).toEqual([...summary, supplemental]);
+      expect(finalize).toHaveBeenCalledWith(summary);
+    } else expect(result).toBe(outgoing);
+  }
   expect(history[0]?.content).toContain("Keep this constraint");
 });
 

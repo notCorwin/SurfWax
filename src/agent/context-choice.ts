@@ -95,7 +95,7 @@ export async function ensureAutomaticContextSummary(
   const limit = options.limit ?? await resolveModelLimit(model, { signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
   const pressure = await contextPressure({ raw: source.raw, branchIds: source.branchIds, events: source.events,
     model, limit, instructions: options.instructions, tools: options.tools, goalMode: options.goalMode });
-  if (!options.forced && pressure.estimated <= pressure.threshold) return false;
+  if (!options.forced && pressure.estimated < pressure.threshold) return false;
   if (!options.forced && !hasSummarizableHistory(pressure.messages, pressure.limit)) return false;
   if (!source.raw.length) return false;
   // Fixed instructions/schema overhead cannot be reduced by re-summarizing an unchanged prefix.

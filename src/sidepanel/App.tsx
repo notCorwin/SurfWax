@@ -266,7 +266,9 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
         controller.signal.throwIfAborted();
         const pressure = await contextPressure({ raw: before.raw, branchIds: before.branchIds, events: before.events, model: config, limit, goalMode });
         if (!active) return;
-        if (!force && !overflow && (pressure.estimated <= pressure.threshold || !hasSummarizableHistory(pressure.messages, pressure.limit))) {
+        if (!force && !overflow && (pressure.estimated < pressure.threshold || !before.raw.length
+          || !hasSummarizableHistory(pressure.messages, pressure.limit)
+          || before.checkpoint?.sourceCount === before.raw.length)) {
           setContextStatus(before.checkpoint ? { message: "历史上下文已被压缩成摘要", error: false } : undefined);
           return;
         }

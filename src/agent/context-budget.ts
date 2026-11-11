@@ -15,6 +15,11 @@ export function hasSummarizableHistory(messages: readonly ModelMessage[], limit:
   return estimateInput(messages) - estimateInput([]) >= Math.min(1024, inputBudget(limit) * 0.1);
 }
 
+/** First whole token at or above 80% of the effective input budget. */
+export function automaticContextThreshold(limit: ModelLimit): number {
+  return Math.ceil(inputBudget(limit) * 4 / 5);
+}
+
 export function estimatePromptInput(prompt: {
   instructions?: unknown; messages: readonly ModelMessage[]; tools?: readonly Record<string, unknown>[];
 }): number {
@@ -44,7 +49,7 @@ export async function fitContextRequest(options: {
   if (capacity && estimatePromptInput({ ...prompt, messages: [] }) >= capacity) {
     throw new Error("模型输入窗口无法容纳系统提示与工具定义；请增大上下文窗口或减少固定提示与工具开销。");
   }
-  if (limit && estimatedInput > inputBudget(limit) * 0.8
+  if (limit && estimatedInput >= automaticContextThreshold(limit)
     && (!compaction || compaction.canCompact(prepared, limit))) {
     if (!compaction) throw new Error("上下文容量不足，无法在当前运行中压缩历史消息。");
     prepared = await compaction.compact(prepared, limit, false);

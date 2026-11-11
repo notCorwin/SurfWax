@@ -4,7 +4,7 @@ import type { ModelConfig } from "../types";
 import { createPromptSnapshot, readPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./prompt";
 import { inputBudget, type ModelLimit } from "./model-limits";
 import { retryModelOperation } from "./model";
-import { estimateInput, estimatePromptInput, hasSummarizableHistory } from "./context-budget";
+import { automaticContextThreshold, estimateInput, estimatePromptInput, hasSummarizableHistory } from "./context-budget";
 import { contextPrompt } from "./context-prompt";
 
 export const SUMMARY_PREFIX = "Earlier conversation summary:\n";
@@ -181,7 +181,7 @@ export async function contextPressure(options: {
   const estimated = Math.max(0, Math.ceil(anchor && calibration?.baseEstimate
     ? anchor + currentEstimate - calibration.baseEstimate + (calibration.fixedEstimate !== undefined ? fixedEstimate - calibration.fixedEstimate : 0)
     : estimatePromptInput(prompt)));
-  return { limit, estimated, threshold: Math.floor(inputBudget(limit) * 0.8), messages };
+  return { limit, estimated, threshold: automaticContextThreshold(limit), messages };
 }
 
 export async function summarizeContext(options: {
