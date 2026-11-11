@@ -141,6 +141,34 @@ test('stored HTTP JSON extracts and joins exact text without refetch or model te
     }
     expect(events.filter(event => event.type === 'tool.failed' && event.toolCallId === 'invalid-extract')).toHaveLength(1);
     expect(events.filter(event => event.type === 'tool.result.data' && (event.content as any)?.filename === 'must-not-exist.txt')).toHaveLength(0);
+    const source = events.find(event => event.type === 'tool.finished' && event.toolCallId === first.evidenceId)!;
+    const indexedReads = await opened.page.evaluate(async ({ dev, conversationId, runId, ids }) => {
+      const { EventLogger, IndexedDbEventStore } = await import(`${dev}/src/logging.ts`);
+      const store = new IndexedDbEventStore();
+      const read = store.byRunToolTypes.bind(store);
+      const queries: any[] = [];
+      store.byRunToolTypes = async (...args: any[]) => {
+        const rows = await read(...args);
+        queries.push({ runId: args[0], toolCallId: args[1], types: args[2], afterId: args[3],
+          rows: rows.map((row: any) => ({ id: row.id, runId: row.runId, toolCallId: row.toolCallId, type: row.type })) });
+        return rows;
+      };
+      store.byRunTypes = store.all = async () => { throw new Error('Evidence performed a whole-run or whole-store read'); };
+      const logger = new EventLogger({ store });
+      try {
+        const values = await Promise.all(ids.map((id: string) => logger.evidenceResult(id, conversationId, runId)));
+        return { queries, records: values.map((value: any) => JSON.parse(value.result.body).records.map((record: any) => record.text)) };
+      } finally { logger.dispose(); }
+    }, { dev: process.env.SURFWAX_DEV_SERVER_URL!, conversationId: source.conversationId!, runId: source.runId!, ids: [first.evidenceId, large.evidenceId] });
+    expect(indexedReads.records).toEqual(pages);
+    expect(indexedReads.queries).toHaveLength(2);
+    for (const query of indexedReads.queries) {
+      expect(query.types).toEqual(['tool.started', 'tool.finished', 'tool.failed']);
+      expect(query.rows).toHaveLength(2);
+      expect(query.rows.map((row: any) => row.type)).toEqual(['tool.started', 'tool.finished']);
+      expect(query.rows.every((row: any) => row.runId === source.runId && row.toolCallId === query.toolCallId)).toBe(true);
+    }
+    await test.info().attach('indexed-evidence-reads', { contentType: 'application/json', body: Buffer.from(JSON.stringify(indexedReads.queries, null, 2)) });
     const requests = provider.requests.filter((request: any) => request.tools?.length);
     const calls = requests.flatMap((request: any) => request.messages.filter((message: any) => message.role === 'assistant').flatMap((message: any) => message.tool_calls ?? []));
     for (const call of calls.filter((call: any) => ['extract_json_text', 'join_text_artifacts', 'fill_from_artifact'].includes(call.function.name)))

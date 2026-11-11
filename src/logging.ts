@@ -74,6 +74,7 @@ type EventStore = {
   diagnosticsByCapture?(conversationId: string, tabId: number, epoch: string, afterId: number): Promise<LogEvent[]>;
   terminalEvents?(events: readonly Omit<LogEvent, "id">[], afterId: number): Promise<LogEvent[]>;
   byRunTypes?(runIds: readonly string[], types: readonly string[], afterId?: number): Promise<LogEvent[]>;
+  byRunToolTypes?(runId: string, toolCallId: string, types: readonly string[], afterId?: number): Promise<LogEvent[]>;
   conversation?(conversationId: string, afterId?: number): Promise<LogEvent[]>;
   /** Legacy test capability; canonical runtime never invokes destructive clearing. */
   clear?(): Promise<void>;
@@ -435,6 +436,16 @@ export class IndexedDbEventStore implements EventStore {
         : ["conversation.finished", "conversation.failed", "conversation.aborted"].map((type) => indexEventsAfter(store.index(RUN_TYPE_INDEX), [event.runId!, type], afterId))));
     await done;
     return batches.flat().filter((event) => keys.has(terminalKey(event)!)).sort((a, b) => a.id - b.id);
+  }
+
+  async byRunToolTypes(runId: string, toolCallId: string, types: readonly string[], afterId = -1): Promise<LogEvent[]> {
+    const db = await this.open();
+    const transaction = db.transaction(EVENT_STORE, "readonly");
+    const done = transactionDone(transaction);
+    const index = transaction.objectStore(EVENT_STORE).index(RUN_TOOL_TYPE_INDEX);
+    const batches = await Promise.all(types.map(type => indexEventsAfter(index, [runId, toolCallId, type], afterId)));
+    await done;
+    return batches.flat().sort((left, right) => left.id - right.id);
   }
 
   async diagnosticsByCapture(conversationId: string, tabId: number, epoch: string, afterId: number): Promise<LogEvent[]> {
@@ -1607,8 +1618,11 @@ export class EventLogger {
   async evidenceResult(evidenceId: string, conversationId: string, runId?: string): Promise<unknown> {
     if (!conversationId || !runId) throw new Error("Evidence requires a current conversation and run");
     const loaded = await this.readCanonical(async (store, floor) => {
-      const events = await this.eventsByRunTypesAt(store, floor, [runId], ["tool.started", "tool.finished", "tool.failed"]);
-      const matches = events.filter(event => event.conversationId === conversationId && event.runId === runId && event.toolCallId === evidenceId);
+      const types = ["tool.started", "tool.finished", "tool.failed"];
+      const events = store.byRunToolTypes ? await store.byRunToolTypes(runId, evidenceId, types, floor)
+        : store.byRunTypes ? await store.byRunTypes([runId], types, floor) : await store.all();
+      const matches = await this.materializeEvents(store, floor, events.filter(event => event.id > floor
+        && event.conversationId === conversationId && event.runId === runId && event.toolCallId === evidenceId && types.includes(event.type)));
       const terminals = matches.filter(event => event.type === "tool.finished" || event.type === "tool.failed");
       if (terminals.length !== 1 || terminals[0]!.type !== "tool.finished") throw new Error("Successful terminal evidence is unavailable");
       const terminal = terminals[0]!;

@@ -5,7 +5,8 @@ import { createMemoryEventStore } from "../memory-event-store";
 import { transformTextArtifact } from "./text-artifact-transform";
 
 it("validates all text sources before writing, preserves exact strings, and confines terminal evidence", async () => {
-  const logger = new EventLogger({ store: createMemoryEventStore() });
+  const store = createMemoryEventStore();
+  const logger = new EventLogger({ store });
   logger.beginRun("c", "r");
   const identity = { conversationId: "c", runId: "r", toolCallId: "http" };
   await logger.append({ type: "tool.started", ...identity });
@@ -47,6 +48,26 @@ it("validates all text sources before writing, preserves exact strings, and conf
   await logger.append({ type: "tool.started", ...spoof });
   await logger.append({ type: "tool.finished", ...spoof, output: { $ref: raw!.id } });
   await expect(logger.evidenceResult("spoof", "c", "r")).rejects.toThrow();
+  const pending = { ...identity, toolCallId: "pending" };
+  await logger.append({ type: "tool.started", ...pending });
+  await expect(logger.evidenceResult("pending", "c", "r")).rejects.toThrow();
+  const incomplete = { ...identity, toolCallId: "incomplete" };
+  await logger.append({ type: "tool.started", ...incomplete });
+  await logger.append({ type: "tool.finished", ...incomplete, output: { ok: true, complete: false } });
+  await expect(logger.evidenceResult("incomplete", "c", "r")).rejects.toThrow();
+  // Corrupt stored history must remain ambiguous, even when all rows share scope.
+  for (const duplicate of ["tool.started", "tool.finished"]) {
+    const scoped = { ...identity, toolCallId: duplicate, timestamp: new Date().toISOString(), content: null };
+    await store.append({ type: "tool.started", ...scoped });
+    await store.append({ type: duplicate, ...scoped, output: { ok: true } });
+    await store.append({ type: "tool.finished", ...scoped, output: { ok: true } });
+    await expect(logger.evidenceResult(duplicate, "c", "r")).rejects.toThrow();
+  }
   expect(writes).toHaveLength(before);
+  await new EventLogger({ store }).clear();
+  await expect(logger.evidenceResult("http", "c", "r")).rejects.toThrow();
+  await logger.append({ type: "tool.started", ...identity });
+  await logger.append({ type: "tool.finished", ...identity, output: { $ref: raw!.id } });
+  await expect(logger.evidenceResult("http", "c", "r")).rejects.toThrow();
   logger.dispose();
 });
