@@ -198,13 +198,14 @@ export async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
 }
 
-const testProfiles = new Map<string, { context: BrowserContext; browserVersion: string }>();
+const testProfiles = new Map<string, { context: BrowserContext; browserVersion: string; diagnostics: Array<{ type: string; message: string; page: string }> }>();
 
 export const test = base.extend<{ _profileCleanup: void }>({
   _profileCleanup: [async ({}, use, info) => {
     await use();
     for (const [directory, profile] of testProfiles) {
-      const { context, browserVersion } = profile;
+      const { context, browserVersion, diagnostics } = profile;
+      await info.attach("browser-diagnostics", { body: JSON.stringify({ diagnostics }), contentType: "application/json" });
       await context.close().catch(() => undefined);
       const source = resolve(directory, "Default/IndexedDB");
       const destination = resolve(process.env.SURFWAX_EVIDENCE_PATH ?? info.outputPath("canonical-logs"), basename(directory));
@@ -245,6 +246,19 @@ export async function openExtension(existingDirectory?: string, settings: { exte
     ignoreDefaultArgs: ["--disable-extensions"],
     args: ["--enable-unsafe-extension-debugging", "--hide-crash-restore-bubble", ...(settings.args ?? [])],
   });
+  const diagnostics: Array<{ type: string; message: string; page: string }> = [];
+  const watch = (page: Page) => {
+    const record = (type: string, message: string) => {
+      const url = new URL(page.url());
+      diagnostics.push({ type, message: message.slice(0, 512), page: `${url.origin}${url.pathname}` });
+    };
+    page.on("pageerror", error => record("pageerror", error.message));
+    page.on("console", message => {
+      if (["warning", "error"].includes(message.type())) record(message.type(), message.text());
+    });
+  };
+  context.pages().forEach(watch);
+  context.on("page", watch);
   const browserSession = await context.browser()!.newBrowserCDPSession();
   let extensionId: string;
   try {
@@ -256,6 +270,7 @@ export async function openExtension(existingDirectory?: string, settings: { exte
   testProfiles.set(userDataDirectory, {
     context,
     browserVersion: process.env.SURFWAX_CHROME_VERSION ?? context.browser()?.version() ?? "unknown",
+    diagnostics,
   });
   if (!context.serviceWorkers().some(worker => new URL(worker.url()).hostname === extensionId))
     await context.waitForEvent("serviceworker", { predicate: worker => new URL(worker.url()).hostname === extensionId });

@@ -25,6 +25,7 @@ test(
   { tag: "@user-journey" },
   async () => {
     const calls = [
+      { name: "click", input: { target: { by: "role", value: "button", name: "Completed native action" } } },
       {
         name: "verify_state",
         input: {
@@ -56,6 +57,10 @@ test(
       ).close();
       const native = await nativePanel(opened, `${provider.origin}/target`);
       await native.target.evaluate(() => {
+        const completed = document.createElement("button");
+        completed.textContent = "Completed native action";
+        completed.onclick = () => document.documentElement.dataset.completedNativeCount = String(Number(document.documentElement.dataset.completedNativeCount ?? 0) + 1);
+        document.body.append(completed);
         const button = document.createElement("button");
         button.textContent = "Queued native action";
         button.onclick = () => {
@@ -80,7 +85,26 @@ test(
                 event.toolCallId?.startsWith("native-queue-"),
             ).length,
         )
-        .toBe(2);
+        .toBe(3);
+      await expect.poll(() => native.target.evaluate(() => document.documentElement.dataset.completedNativeCount)).toBe("1");
+      await expect.poll(async () => (await readNativeEvents(native.panel)).some(event =>
+        event.type === "browser.job.progress" && event.toolCallId === "native-queue-1"
+        && event.content?.state === "not-dispatched")).toBe(true);
+      const beforeClose = await readNativeEvents(native.panel);
+      const starts = beforeClose.filter(event => event.type === "tool.started" && event.toolCallId?.startsWith("native-queue-"));
+      expect(new Set(starts.map(event => event.runId)).size).toBe(1);
+      expect(beforeClose.filter(event => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === "native-queue-1")).toHaveLength(0);
+      const protocol = await opened.context.newCDPSession(native.target);
+      let versionId: string | undefined;
+      let stopped = false;
+      protocol.on("ServiceWorker.workerVersionUpdated", ({ versions }) => {
+        for (const version of versions) if (version.scriptURL.startsWith(`chrome-extension://${opened.extensionId}/`)) {
+          if (version.runningStatus === "running") versionId = version.versionId;
+          if (version.versionId === versionId && version.runningStatus === "stopped") stopped = true;
+        }
+      });
+      await protocol.send("ServiceWorker.enable");
+      await expect.poll(() => versionId).toBeTruthy();
       await native.panel.close();
       expect(
         (
@@ -89,6 +113,9 @@ test(
           })
         ).success,
       ).toBe(true);
+      await protocol.send("ServiceWorker.stopWorker", { versionId: versionId! });
+      await expect.poll(() => stopped).toBe(true);
+      await protocol.detach();
       await expect
         .poll(() =>
           native.target.evaluate(
@@ -110,6 +137,30 @@ test(
             ).length,
         )
         .toBe(2);
+      await expect(recovery.getByTestId("composer-input")).toBeVisible();
+      const assertRecovered = async () => {
+        const events = await readEvents(recovery);
+        for (const start of starts) {
+          const terminals = events.filter(event => ["tool.finished", "tool.failed"].includes(event.type)
+            && event.conversationId === start.conversationId && event.runId === start.runId && event.toolCallId === start.toolCallId
+            && event.content?.callId === start.content?.callId);
+          expect(terminals).toHaveLength(1);
+          expect(terminals[0].type).toBe(start.toolCallId === "native-queue-0" ? "tool.finished" : "tool.failed");
+          if (start.toolCallId !== "native-queue-0") expect(terminals[0].content?.status).toBe("interrupted");
+        }
+        expect(events.filter(event => event.type === "browser.job.progress" && event.toolCallId === "native-queue-2")).toHaveLength(0);
+        expect(await native.target.evaluate(() => document.documentElement.dataset.completedNativeCount)).toBe("1");
+        expect(await native.target.evaluate(() => document.documentElement.dataset.queuedNativeRan)).toBeUndefined();
+        return events.filter(event => ["tool.finished", "tool.failed"].includes(event.type) && event.runId === starts[0].runId);
+      };
+      const recovered = await assertRecovered();
+      await recovery.reload();
+      await expect(recovery.getByTestId("composer-input")).toBeVisible();
+      expect(await assertRecovered()).toEqual(recovered);
+      await test.info().attach("native-lifecycle-recovery", { contentType: "application/json", body: Buffer.from(JSON.stringify({
+        stoppedWorker: versionId, sameRun: starts[0].runId, starts: starts.map(event => ({ id: event.id, toolCallId: event.toolCallId, callId: event.content?.callId })),
+        terminals: recovered, completedEffects: 1, queuedEffects: 0, browserProcessRestart: false,
+      }, null, 2)) });
       expect(provider.requests).toHaveLength(1);
     } finally {
       await dispose(opened.context, opened.userDataDirectory, provider.server);
