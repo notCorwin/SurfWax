@@ -5,7 +5,9 @@ import { resolve, relative, join } from 'node:path';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const slash = value => value.replaceAll('\\', '/');
 const sorted = values => [...new Set(values)].sort();
-const legalName = /^(?:licen[sc]e|copying|copyright|notice|ofl)(?:[.\-_]|$)/i;
+// Legal document names may carry a license identifier or text extension, but
+// never a source-code extension (e.g. Lucide's copyright.mjs icon).
+const legalName = /^(?:licen[sc]e|copying|copyright|notice|ofl)(?:[-_][a-z0-9_-]+(?:\.\d+)*)?(?:\.(?:txt|md|markdown|rst))?$/i;
 const metadataName = /^(?:\.DS_Store|\._.*)$/;
 const json = value => `${JSON.stringify(value)}\n`;
 
@@ -88,11 +90,13 @@ export function thirdPartyLicenses() {
             }
           };
           visit(pkg.packagePath);
-          for (const supplement of supplements.filter(item => item.package === pkg.name && item.versions.includes(pkg.version))) {
+          pkg.licenseEvidence = supplements.filter(item => item.package === pkg.name && item.versions.includes(pkg.version));
+          for (const supplement of pkg.licenseEvidence) {
+            if (supplement.unresolved) issues.push(supplement.unresolved);
+            if (!supplement.file) continue;
             const bytes = file(supplement.file);
             if (hash(bytes) !== supplement.sha256) throw new Error(`Vendored license hash mismatch: ${supplement.file}`);
             addDocument(pkg, supplement.file, bytes, supplement.upstream);
-            if (supplement.unresolved) issues.push(supplement.unresolved);
           }
           // This package ships its full MIT text in README rather than LICENSE.
           if (pkg.name === 'data-uri-to-buffer' && pkg.version === '4.0.1') addDocument(pkg, `${pkg.packagePath}/README.md`, file(`${pkg.packagePath}/README.md`));
@@ -104,8 +108,14 @@ export function thirdPartyLicenses() {
           if (pkg.name === 'katex' && pkg.resources.some(item => /\.(woff2?|ttf)$/.test(item.source))) {
             // Preserve copyright, reserved names and license metadata from the actual TTFs.
             const names = new Set();
-            for (const resource of pkg.resources.filter(item => item.source.endsWith('.ttf'))) {
-              for (const text of fontNames(file(resource.source))) names.add(text);
+            pkg.noticeSources = [];
+            const stems = sorted(pkg.resources.filter(item => /\.(woff2?|ttf)$/.test(item.source)).map(item => item.source.replace(/\.(woff2?|ttf)$/, '')));
+            for (const stem of stems) {
+              // TTF metadata is a build input, not a distributed fallback font.
+              // Derive names from actual distributed faces, never a fixed list.
+              const source = `${stem}.ttf`, bytes = file(source);
+              pkg.noticeSources.push({ source, sha256: hash(bytes) });
+              for (const text of fontNames(bytes)) names.add(text);
             }
             if (!names.size) issues.push('KaTeX fonts: no embedded copyright/license records found');
             addDocument(pkg, `${pkg.packagePath}/dist/fonts/*.ttf#name`, Buffer.from(sorted(names).join('\n\n') + '\n'));

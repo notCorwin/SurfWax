@@ -19,7 +19,28 @@
     "file": "scripts/licenses/react-remove-scroll-bar-LICENSE.txt",
     "upstream": "https://raw.githubusercontent.com/theKashey/react-remove-scroll-bar/8ca9ba5ea52de03308fe8ced94f7b159a44d28ff/LICENSE",
     "sha256": "a79aae0c0f21990d9d963bb3c5a79cdcea9a46f8523ba55c58d7fe776b6ebc84",
-    "unresolved": "react-remove-scroll-bar@2.3.8: upstream LICENSE snapshot is from repository version 2.3.7; npm gitHead b3b1287aad81def2e2ae707274b74531b61ddbaf is unavailable upstream; verify original version before release"
+    "basis": "Retain the unmodified MIT copyright and permission text from the official upstream linked by the latest npm release. npm 2.3.8 declares MIT and author Anton Korzunov <thekashey@gmail.com>, matching the copyright holder and author in this official repository snapshot. This is upstream attribution evidence, not proof of byte-identical release source; no dependency downgrade or assertion that repository 2.3.7 equals npm 2.3.8.",
+    "evidence": [
+      {
+        "url": "https://registry.npmjs.org/react-remove-scroll-bar/latest",
+        "sha256": "826c618ece09367334160c1ab3a272fd54f8f12e3b0a45f75b0f2660d285855a",
+        "observedVersion": "2.3.8",
+        "license": "MIT",
+        "author": "Anton Korzunov <thekashey@gmail.com>",
+        "gitHead": "b3b1287aad81def2e2ae707274b74531b61ddbaf"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/theKashey/react-remove-scroll-bar/8ca9ba5ea52de03308fe8ced94f7b159a44d28ff/package.json",
+        "version": "2.3.7",
+        "license": "MIT",
+        "author": "Anton Korzunov <thekashey@gmail.com>"
+      },
+      {
+        "url": "https://api.github.com/repos/theKashey/react-remove-scroll-bar/commits?per_page=1",
+        "result": "Official upstream HEAD remains 8ca9ba5ea52de03308fe8ced94f7b159a44d28ff, the vendored LICENSE snapshot. Latest repository tag is v2.3.7; no GitHub releases."
+      }
+    ],
+    "limitations": "npm gitHead is unavailable upstream (GitHub 422); the original release tarball omits LICENSE. Exact 2.3.8 source-to-license correspondence is not independently verified. Official package ownership, license declaration and upstream copyright holder support retaining this original full notice."
   },
   {
     "package": "remark-math",
@@ -47,6 +68,32 @@
     "file": "scripts/licenses/SIL-OFL-1.1.txt",
     "upstream": "https://openfontlicense.org/documents/OFL.txt",
     "sha256": "1d361a8f8e8ce6e68457dcd93fb56e162e6baa3bbb7e7573a290d44399f6b57e",
-    "basis": "Official unmodified OFL template text; its placeholder header is not a copyright claim. Actual font copyright and reserved names are extracted from distributed font name tables."
+    "basis": "Official unmodified OFL template text; its placeholder header is not a copyright claim. Actual font copyright and reserved names are extracted from locked-package TTF name tables corresponding to every distributed WOFF2 face; TTF input hashes are retained in noticeSources but TTFs are not distributed."
+  },
+  {
+    "package": "@aihubmix/ai-sdk-provider",
+    "versions": [
+      "2.2.1"
+    ],
+    "unresolved": "@aihubmix/ai-sdk-provider@2.2.1: official npm release declares Apache-2.0 but neither tarball, matching v2.2.1/gitHead nor current official repository supplies original license/copyright text; obtain upstream materials before release. Provider routing remains unchanged.",
+    "evidence": [
+      {
+        "url": "https://registry.npmjs.org/@aihubmix%2fai-sdk-provider/latest",
+        "sha256": "bc10fd102d631681b707a0b779064920bf64e7a232110fc966e37e93dc044e70",
+        "observedVersion": "2.2.1",
+        "license": "Apache-2.0",
+        "gitHead": "ec4b737bf9f945f4c17ae0e230121cf81d0154f1"
+      },
+      {
+        "url": "https://github.com/AIhubmix/ai-sdk-provider/tree/ec4b737bf9f945f4c17ae0e230121cf81d0154f1",
+        "result": "No LICENSE/COPYING/NOTICE/COPYRIGHT; README and package headers have no original license/copyright text."
+      },
+      {
+        "url": "https://github.com/AIhubmix/ai-sdk-provider/tree/86fbd7c2dcdd2b8c1bc276bb979d1509e784021c",
+        "result": "Current official upstream tree also has no legal document; GitHub releases list empty."
+      }
+    ],
+    "limitations": "npm license identifier alone does not establish missing original attribution. No copyright holder or permission text has been invented.",
+    "remediation": "Preferred minimum change: obtain the original upstream license/copyright materials for 2.2.1. Removal is not route-neutral: src/agent/provider-adapters.ts and src/agent/model.ts:610 expose the Models.dev SDK route. A replacement using existing licensed SDKs must independently preserve documented Claude /v1/messages + x-api-key, Gemini /gemini/v1beta + x-goog-api-key (including -nothink/-search exceptions), OpenAI-compatible /v1, APP-Code and empty-tools request behavior. A blanket OpenAI-compatible substitution or deleting the SDK mapping would change that public contract; neither is made here."
   }
 ]

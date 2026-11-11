@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { crx } from "@crxjs/vite-plugin";
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import manifest from "./manifests/store.json" with { type: "json" };
 import packageMetadata from "./package.json" with { type: "json" };
@@ -27,6 +28,22 @@ export default defineConfig({
     process: "globalThis.process",
   },
   plugins: [
+    {
+      name: "surf-wax-katex-woff2",
+      enforce: "pre",
+      load(id) {
+        if (!/\/katex\/dist\/katex(?:\.min)?\.css$/.test(id)) return;
+        // W3C WOFF2 implementation report lists Chrome 36+ support.
+        // https://www.w3.org/Fonts/WG/WOFF2/Implementation.html
+        // Chrome 138+ supports WOFF2. Prune fallback URLs before Vite discovers
+        // assets, retaining every upstream face and all other KaTeX styles.
+        return readFileSync(id, "utf8").replace(/src:([^;}]+)/g, (_declaration, sources: string) => {
+          const woff2 = sources.split(",").filter(source => /format\(["']?woff2["']?\)/.test(source));
+          if (woff2.length !== 1) throw new Error("Expected one WOFF2 source per KaTeX font face; review the updated stylesheet");
+          return `src:${woff2[0]}`;
+        });
+      },
+    },
     {
       name: "surf-wax-development-sandbox",
       configureServer(server) {

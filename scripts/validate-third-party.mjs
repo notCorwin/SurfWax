@@ -29,6 +29,9 @@ export async function validateThirdParty(root, output, files) {
       if (!resource.source.startsWith(`${pkg.packagePath}/`)) throw new Error(`Invalid resource owner: ${resource.output}`);
       await checkHash(resource);
     }
+    for (const source of pkg.noticeSources ?? []) {
+      if (!source.source.startsWith(`${pkg.packagePath}/`) || hash(await readFile(resolve(root, source.source))) !== source.sha256) throw new Error(`Font notice source differs from locked build input: ${source.source}`);
+    }
     for (const document of pkg.documents) {
       await checkHash(document);
       const text = (await read(document.output)).toString('utf8');
@@ -40,6 +43,7 @@ export async function validateThirdParty(root, output, files) {
     }
     if (pkg.name === 'katex' && pkg.resources.length) {
       const text = (await Promise.all(pkg.documents.map(async doc => (await read(doc.output)).toString('utf8')))).join('\n');
+      if (!pkg.noticeSources?.length) throw new Error('KaTeX font notice source provenance is missing');
       if (!text.includes('Khan Academy') || !text.includes('Design Science') || !text.includes('Reserved Font Name') || !text.includes('SIL OPEN FONT LICENSE Version 1.1') || !text.includes('TERMINATION')) throw new Error('KaTeX font notices or full OFL text are missing');
     }
   }
