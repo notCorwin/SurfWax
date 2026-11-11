@@ -158,6 +158,10 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 来源：`60e53eb`，见 `src/chrome/executor.ts`、`src/chrome/automation.ts`。
 
+搜索候选关联其自动附带快照的同次 capture 语义容器与已证明可见标签，复用现有快照证据和交付 lease，不另行采集或猜用 AX 名称、DOM 原文补齐。未证明的关联与标签保留 unknown 或不完整标记；当前关联不保证 DOM 复用后的业务身份永远不变。容器引用仅供观察，`scope:{id}` 仍不支持。
+
+来源：`8a4407b`，见 `src/chrome/candidate-context.ts`、`src/chrome/automation.ts`、`src/chrome/tool.ts`。
+
 ### 大结果存入会话 Artifact，保留原始数据语义
 
 2026-09-22 起，将生成结果保存在会话存储中；2026-10-30 至 31 日进一步支持大结果、二进制和复杂数据图，通过 Artifact 引用、分页及范围读取按需取回。编码保留 `undefined`、特殊数值、BigInt、类型化数组等 JSON 不能直接表达的值，不把显示用截断结果当成完整原始数据。
