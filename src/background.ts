@@ -168,10 +168,11 @@ async function dispatchNativeInput(debuggee: chrome.debugger.Debuggee, command: 
 
 // A lease survives the UI cleanup deadline until every operation issued by the
 // old port and its final detach has settled.
-const debuggerLeases = new Map<string, object>();
+type DebuggerLease = { recovery: Map<string, () => Promise<void>> };
+const debuggerLeases = new Map<string, DebuggerLease>();
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "surf-wax-debugger") return;
-  const lease = {};
+  const lease: DebuggerLease = { recovery: new Map() };
   const leaseKeys = new Set<string>();
   const operations = new Map<string, Set<Promise<void>>>();
   const resources = new Map<string, string>();
@@ -294,8 +295,14 @@ chrome.runtime.onConnect.addListener((port) => {
         const resource = await resourceKey(args[0]);
         if (closed) throw new DOMException("Side Panel 已关闭", "AbortError");
         runs.validate(message as RunIdentity);
-        if (debuggerLeases.has(resource) && debuggerLeases.get(resource) !== lease)
-          throw new Error("AutomationError[resource-cleaning]: 调试资源仍在清理，请稍后重试或关闭目标页。");
+        const previous = debuggerLeases.get(resource);
+        if (previous && previous !== lease) {
+          await previous.recovery.get(resource)?.();
+          if (closed) throw new DOMException("Side Panel 已关闭", "AbortError");
+          runs.validate(message as RunIdentity);
+          if (debuggerLeases.has(resource) && debuggerLeases.get(resource) !== lease)
+            throw new Error("AutomationError[resource-cleaning]: 调试资源仍在清理，请稍后重试或关闭目标页。");
+        }
         debuggerLeases.set(resource, lease); leaseKeys.add(resource);
         resources.set(debuggeeKey(args[0]), resource);
         if (pendingAttaches.has(resource) || pendingDetaches.has(resource))
@@ -474,7 +481,8 @@ chrome.runtime.onConnect.addListener((port) => {
     sessions.clear();
     const deadline = createDeadline(2_000, undefined, "Background debugger cleanup");
     const report = (step: string, target: unknown, error: unknown) => eventLogger.telemetry({ type: "run.cleanup.failed", runId: validatedRunId,
-      content: { operation: "debugger-cleanup", step, target, effectUnknown: true }, error: safeDiagnosticError(error) });
+      content: { operation: "debugger-cleanup", step, target, effectUnknown: true,
+        ...(step === "final-detach" ? { recovery: "关闭目标页以释放调试连接，或稍后重试该页面的操作。" } : {}) }, error: safeDiagnosticError(error) });
     const workByResource = [...leaseKeys].map(resource => {
       const belongs = (debuggee: chrome.debugger.Debuggee) => resources.get(debuggeeKey(debuggee)) === resource;
       const targets = debuggees.filter(belongs);
@@ -490,8 +498,35 @@ chrome.runtime.onConnect.addListener((port) => {
         await Promise.allSettled([...pending, work]);
         // An attach can finish after cleanup was revoked. Detach once more only
         // after all old native calls settle, while this port still holds the lease.
-        await Promise.all(targets.map(debuggee => chrome.debugger.detach(debuggee).catch(() => undefined)));
-        if (debuggerLeases.get(resource) === lease) debuggerLeases.delete(resource);
+        let finalizing: Promise<void> | undefined;
+        const finalize = (): Promise<void> => finalizing ??= (async () => {
+          if (debuggerLeases.get(resource) !== lease) return;
+          let failed = false;
+          await Promise.all(targets.map(async debuggee => {
+            try { await chrome.debugger.detach(debuggee); }
+            catch (error) {
+              const kind = debuggee.tabId !== undefined ? "tab" : debuggee.extensionId !== undefined ? "extension" : "target";
+              const id = debuggee.tabId ?? debuggee.extensionId ?? debuggee.targetId;
+              // attached can also describe another CDP client. This exact native
+              // rejection confirms this extension no longer owns the session.
+              if (error instanceof Error && error.message === `Debugger is not attached to the ${kind} with id: ${id}.`) return;
+              const current = await chrome.debugger.getTargets().catch(() => undefined);
+              const target = current?.find(item => debuggee.tabId !== undefined ? item.tabId === debuggee.tabId
+                : debuggee.extensionId !== undefined ? item.extensionId === debuggee.extensionId : item.id === debuggee.targetId);
+              // Chrome also rejects detach when the target is already gone or
+              // detached. Confirm that state instead of trusting error text.
+              if (current && (!target || !target.attached)) return;
+              failed = true;
+              report("final-detach", debuggee, error);
+            }
+          }));
+          if (!failed && debuggerLeases.get(resource) === lease) debuggerLeases.delete(resource);
+        })().finally(() => { finalizing = undefined; });
+        // Recovery is available only after all old native calls have settled.
+        // A later attachment retries this final detach, sharing its in-flight
+        // promise; no new session is admitted until completion is confirmed.
+        lease.recovery.set(resource, finalize);
+        await finalize();
       })().catch(error => report("final-detach", targets, error));
       return work;
     });

@@ -226,11 +226,13 @@ test("debugger cleanup quarantines delayed native calls without blocking another
       // Only the external native API is delayed. Production ports, ownership,
       // cleanup deadlines, IndexedDB and telemetry remain untouched.
       const gate = (globalThis as any).__debuggerGate = {
-        method: "", tabId: -1, entered: 0, settled: 0, release: () => {},
+        method: "", tabId: -1, entered: 0, settled: 0, rejectDetach: false, release: () => {},
       };
       for (const method of ["attach", "detach", "sendCommand"] as const) {
         const native = chrome.debugger[method].bind(chrome.debugger) as (...args: any[]) => Promise<void>;
         (chrome.debugger as any)[method] = async (...args: any[]) => {
+          if (method === "detach" && gate.rejectDetach && args[0].tabId === gate.tabId)
+            throw new Error("Injected native detach rejection");
           const held = gate.method === method && args[0].tabId === gate.tabId;
           if (held) {
             gate.entered++;
@@ -317,7 +319,7 @@ test("debugger cleanup quarantines delayed native calls without blocking another
     for (const debuggee of [{ tabId: targets[0].tabId }, { targetId: targets[0].targetId }]) {
       expect((await request("next", "attach", [debuggee, "1.3"])).error).toContain("resource-cleaning");
     }
-    expect((await request("next", "attach", [{ tabId: targets[1].tabId }, "1.3"])).error).toBeUndefined();
+    await expect.poll(async () => (await request("next", "attach", [{ tabId: targets[1].tabId }, "1.3"])).error ?? null).toBeNull();
     await assertAlive("next", targets[1].tabId);
     await release();
     await expect.poll(() => worker.evaluate(() => (globalThis as any).__debuggerGate.settled)).toBe(1);
@@ -365,9 +367,29 @@ test("debugger cleanup quarantines delayed native calls without blocking another
     await assertAlive("after-pending", targets[0].tabId);
     await finish("after-pending");
     await idle();
+
+    // A rejected detach can leave the real native session attached. Preserve
+    // quarantine, report recovery, and only admit the next owner after a
+    // successful final detach of the old session.
+    await claim("failed-detach");
+    expect((await request("failed-detach", "attach", [{ tabId: targets[0].tabId }, "1.3"])).error).toBeUndefined();
+    await worker.evaluate(() => { (globalThis as any).__debuggerGate.rejectDetach = true; });
+    await finish("failed-detach");
+    await idle();
+    await expect.poll(async () => (await readEvents(opened.page)).filter(event => event.type === "run.cleanup.failed" && event.content?.step === "final-detach" && event.content?.recovery?.includes("关闭目标页")).length).toBeGreaterThan(0);
+    expect(await opened.page.evaluate(async tabId => (await chrome.debugger.getTargets()).find(target => target.tabId === tabId)?.attached, targets[0].tabId)).toBe(true);
+    await claim("after-failed-detach");
+    expect((await request("after-failed-detach", "attach", [{ targetId: targets[0].targetId }, "1.3"])).error).toContain("resource-cleaning");
+    expect((await request("after-failed-detach", "attach", [{ tabId: targets[1].tabId }, "1.3"])).error).toBeUndefined();
+    await assertAlive("after-failed-detach", targets[1].tabId);
+    await worker.evaluate(() => { (globalThis as any).__debuggerGate.rejectDetach = false; });
+    expect((await request("after-failed-detach", "attach", [{ tabId: targets[0].tabId }, "1.3"])).error).toBeUndefined();
+    await assertAlive("after-failed-detach", targets[0].tabId);
+    await finish("after-failed-detach");
+    await idle();
     await test.info().attach("debugger-cleanup-timing", {
       body: JSON.stringify({ cancellationMs, ownerReleaseMs, resources: targets, delayedDetachSettledBeforeOwnerRelease: false,
-        scenarios: ["delayed teardown", "tab/target aliases", "independent resource", "normal detach", "late command", "pending attach"] }, null, 2),
+        scenarios: ["delayed teardown", "tab/target aliases", "independent resource", "normal detach", "late command", "pending attach", "rejected detach recovery"] }, null, 2),
       contentType: "application/json",
     });
   } finally {
