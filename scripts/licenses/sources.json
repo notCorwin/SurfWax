@@ -1,0 +1,52 @@
+[
+  {
+    "package": "@ai-sdk/provider-utils",
+    "versions": [
+      "4.0.66",
+      "5.0.49",
+      "5.0.79"
+    ],
+    "file": "scripts/licenses/vercel-ai-LICENSE.txt",
+    "upstream": "https://raw.githubusercontent.com/vercel/ai/e9e44bb6770542b26ad54a6bbd8c9c462c31877e/LICENSE",
+    "sha256": "b4f9adb7c568904834d0dd6cc98d16c390d21ca32fc17ae7a267715269bd5529",
+    "basis": "Repository root license; byte-identical to the full LICENSE included in locked sibling package ai. Includes separate vendored ISC LICENSE from installed provider-utils source."
+  },
+  {
+    "package": "react-remove-scroll-bar",
+    "versions": [
+      "2.3.8"
+    ],
+    "file": "scripts/licenses/react-remove-scroll-bar-LICENSE.txt",
+    "upstream": "https://raw.githubusercontent.com/theKashey/react-remove-scroll-bar/8ca9ba5ea52de03308fe8ced94f7b159a44d28ff/LICENSE",
+    "sha256": "a79aae0c0f21990d9d963bb3c5a79cdcea9a46f8523ba55c58d7fe776b6ebc84",
+    "unresolved": "react-remove-scroll-bar@2.3.8: upstream LICENSE snapshot is from repository version 2.3.7; npm gitHead b3b1287aad81def2e2ae707274b74531b61ddbaf is unavailable upstream; verify original version before release"
+  },
+  {
+    "package": "remark-math",
+    "versions": [
+      "6.0.0"
+    ],
+    "file": "scripts/licenses/remark-math-LICENSE.txt",
+    "upstream": "https://raw.githubusercontent.com/remarkjs/remark-math/88a9497e1ede93b958237c85edbf5651faeca7af/license",
+    "sha256": "cb992262f361a5359e6771c28740d33c7041e15332ae8537fae40538992591a9"
+  },
+  {
+    "package": "rehype-katex",
+    "versions": [
+      "7.0.1"
+    ],
+    "file": "scripts/licenses/remark-math-LICENSE.txt",
+    "upstream": "https://raw.githubusercontent.com/remarkjs/remark-math/88a9497e1ede93b958237c85edbf5651faeca7af/license",
+    "sha256": "cb992262f361a5359e6771c28740d33c7041e15332ae8537fae40538992591a9"
+  },
+  {
+    "package": "katex",
+    "versions": [
+      "0.16.47"
+    ],
+    "file": "scripts/licenses/SIL-OFL-1.1.txt",
+    "upstream": "https://openfontlicense.org/documents/OFL.txt",
+    "sha256": "1d361a8f8e8ce6e68457dcd93fb56e162e6baa3bbb7e7573a290d44399f6b57e",
+    "basis": "Official unmodified OFL template text; its placeholder header is not a copyright claim. Actual font copyright and reserved names are extracted from distributed font name tables."
+  }
+]

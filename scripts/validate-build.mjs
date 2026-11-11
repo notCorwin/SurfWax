@@ -2,6 +2,8 @@ import { readFile, readdir, access, stat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { validateThirdParty } from './validate-third-party.mjs';
+
 export const requiredPermissions = ['debugger', 'downloads', 'scripting', 'sidePanel', 'storage', 'tabs', 'unlimitedStorage', 'userScripts'];
 export async function validateBuild(directory = 'dist') {
   const root = fileURLToPath(new URL('..', import.meta.url));
@@ -40,6 +42,7 @@ export async function validateBuild(directory = 'dist') {
   if (totalBytes > 9_000_000) throw new Error(`Extension output ${totalBytes} bytes exceeds the 9,000,000-byte budget`);
   if (largestAsset.bytes > 900_000) throw new Error(`Asset ${largestAsset.path} is ${largestAsset.bytes} bytes and exceeds the 900,000-byte budget`);
   if (files.some(path => /(?:^|\/)(?:offscreen|devtools)(?:[.-]|\/)/.test(path))) throw new Error('Removed execution host is included in build');
+  await validateThirdParty(root, output, files);
   return { version: packageInfo.version, manifest, files, directory: output, entrypointBytes, totalBytes };
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

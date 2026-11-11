@@ -1,4 +1,5 @@
 import { defineConfig } from "vite";
+import { thirdPartyLicenses } from "./scripts/third-party-licenses.mjs";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { crx } from "@crxjs/vite-plugin";
@@ -43,6 +44,7 @@ export default defineConfig({
     react(),
     tailwindcss(),
     crx({ manifest: devManifest as any }),
+    thirdPartyLicenses(),
   ],
   resolve: {
     alias: {
