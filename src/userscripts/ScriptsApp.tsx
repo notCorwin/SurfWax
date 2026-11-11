@@ -40,6 +40,13 @@ async function call(method: string, ...args: unknown[]): Promise<any> {
   return response.result;
 }
 
+function scriptError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  if (/invalid.*match|match.*invalid|invalid.*pattern/i.test(message)) return "网站匹配规则无效，请检查 matches。";
+  if (error instanceof SyntaxError || /syntax|unexpected token/i.test(message)) return "JavaScript 语法有误，请检查代码。";
+  return errorDetails(error);
+}
+
 function parseScript(text: string): Script | null {
   try { return JSON.parse(text) as Script; }
   catch { return null; }
@@ -56,6 +63,7 @@ export function ScriptsApp() {
   const [available, setAvailable] = useState<boolean | null>(null);
   const [registered, setRegistered] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const [failures, setFailures] = useState<Array<{ id: string; reason: string }>>([]);
   const [draftError, setDraftError] = useState("");
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<Field, string>>>({});
   const [message, setMessage] = useState("");
@@ -133,7 +141,7 @@ export function ScriptsApp() {
       if (!current()) return;
       setAvailable(false);
       setRegistered([]);
-      setError(errorDetails(cause));
+      setError(scriptError(cause));
       return;
     }
     try {
@@ -142,7 +150,7 @@ export function ScriptsApp() {
       if (!current()) return;
       setRegistered(registeredScripts.map((script) => script.id));
       setError("");
-    } catch (cause) { if (current()) setError(errorDetails(cause)); }
+    } catch (cause) { if (current()) setError(scriptError(cause)); }
   };
 
   useEffect(() => {
@@ -202,6 +210,7 @@ export function ScriptsApp() {
 
   const save = async () => {
     setError("");
+    setFailures([]);
     setDraftError("");
     setFieldErrors({});
     setMessage("");
@@ -240,7 +249,7 @@ export function ScriptsApp() {
       let formatWarning = "";
       if (mode === "form" && editableAsForm(script)) {
         try { script = { ...script, js: [{ ...script.js[0], code: await formatUserScriptCode(script.js[0].code) }] }; }
-        catch (cause) { formatWarning = errorDetails(cause); }
+        catch (cause) { formatWarning = scriptError(cause); }
       }
       if (selected) await call("replace", script);
       else await call("create", script);
@@ -248,7 +257,7 @@ export function ScriptsApp() {
       await refresh();
       setMessage(formatWarning ? "脚本已保存，但代码未格式化。" : "脚本已保存");
       if (formatWarning) setError(formatWarning);
-    } catch (cause) { setError(errorDetails(cause)); }
+    } catch (cause) { setError(scriptError(cause)); }
     finally { setAction(null); }
   };
 
@@ -256,36 +265,38 @@ export function ScriptsApp() {
     if (!ids.length) return;
     setAction("deleting");
     setError("");
+    setFailures([]);
     setMessage(`正在删除 ${ids.length} 个脚本…`);
     try {
-      const failed: string[] = [];
+      const failed: Array<{ id: string; reason: string }> = [];
       for (const id of ids) {
         try { await call("delete", { id }); }
-        catch (cause) { failed.push(id); }
+        catch (cause) { failed.push({ id, reason: scriptError(cause) }); }
       }
-      if (ids.includes(selected) && !failed.includes(selected)) {
+      if (ids.includes(selected) && !failed.some((failure) => failure.id === selected)) {
         choose(undefined, true);
         setView("manager");
         history.replaceState(null, "", "#manage");
       }
       setDeleteIds([]);
       await refresh();
-      setCheckedIds((current) => current.filter((id) => !ids.includes(id) || failed.includes(id)));
+      setCheckedIds((current) => current.filter((id) => !ids.includes(id) || failed.some((failure) => failure.id === id)));
       setMessage(failed.length ? `已删除 ${ids.length - failed.length} 个；${failed.length} 个失败。` : `已删除 ${ids.length} 个脚本`);
-      if (failed.length) setError("操作未完成，请检查设置后重试。");
-    } catch (cause) { setError(errorDetails(cause)); }
+      if (failed.length) setFailures(failed);
+    } catch (cause) { setError(scriptError(cause)); }
     finally { setAction(null); }
   };
 
   const toggle = async (id: string, enable: boolean) => {
     setAction("toggling");
     setError("");
+    setFailures([]);
     setMessage(enable ? "正在启用脚本…" : "正在停用脚本…");
     try {
       await call("setEnabled", { id, enabled: enable });
       await refresh(false);
       setMessage(enable ? "脚本已启用" : "脚本已停用");
-    } catch (cause) { setError(errorDetails(cause)); }
+    } catch (cause) { setError(scriptError(cause)); }
     finally { setAction(null); }
   };
 
@@ -293,12 +304,13 @@ export function ScriptsApp() {
     if (!formReady || !parsed.js[0].code.trim()) return;
     setAction("formatting");
     setError("");
+    setFailures([]);
     setFieldErrors({});
     setMessage("正在格式化代码…");
     try {
       updateField("code", await formatUserScriptCode(parsed.js[0].code));
       setMessage("代码已格式化");
-    } catch (cause) { setMessage("代码格式化失败。"); setError(errorDetails(cause)); }
+    } catch (cause) { setMessage("代码格式化失败。"); setError(scriptError(cause)); }
     finally { setAction(null); }
   };
 
@@ -306,7 +318,7 @@ export function ScriptsApp() {
     setAction("refreshing");
     setMessage("正在刷新状态…");
     try { await refresh(); setMessage("状态已刷新"); }
-    catch (cause) { setError(errorDetails(cause)); }
+    catch (cause) { setError(scriptError(cause)); }
     finally { setAction(null); }
   };
 
@@ -329,17 +341,18 @@ export function ScriptsApp() {
     if (!ids.length) return;
     setAction("toggling");
     setError("");
+    setFailures([]);
     try {
-      const failed: string[] = [];
+      const failed: Array<{ id: string; reason: string }> = [];
       for (const id of ids) {
         if (disabledIds.includes(id) === !enable) continue;
         try { await call("setEnabled", { id, enabled: enable }); }
-        catch (cause) { failed.push(id); }
+        catch (cause) { failed.push({ id, reason: scriptError(cause) }); }
       }
       await refresh(false);
       setMessage(failed.length ? `操作完成，${failed.length} 个脚本失败。` : `已${enable ? "启用" : "停用"}所选脚本`);
-      if (failed.length) setError("操作未完成，请检查设置后重试。");
-    } catch (cause) { setError(errorDetails(cause)); }
+      if (failed.length) setFailures(failed);
+    } catch (cause) { setError(scriptError(cause)); }
     finally { setAction(null); }
   };
 
@@ -358,10 +371,11 @@ export function ScriptsApp() {
   const loadImport = async (file?: File) => {
     if (!file) return;
     setError("");
+    setFailures([]);
     setImportScripts(null);
     setOverwriteIds([]);
     try { setImportScripts(parseImport(await file.text())); }
-    catch (cause) { setError(errorDetails(cause)); }
+    catch (cause) { setError(scriptError(cause)); }
     if (fileInput.current) fileInput.current.value = "";
   };
 
@@ -369,8 +383,9 @@ export function ScriptsApp() {
     if (!importScripts) return;
     setAction("importing");
     setError("");
+    setFailures([]);
     try {
-      const failed: string[] = [];
+      const failed: Array<{ id: string; reason: string }> = [];
       let imported = 0;
       for (const script of importScripts) {
         const existing = scripts.some((item) => item.id === script.id);
@@ -378,14 +393,14 @@ export function ScriptsApp() {
         try {
           await call(existing ? "replace" : "create", script);
           imported++;
-        } catch (cause) { failed.push(script.id); }
+        } catch (cause) { failed.push({ id: script.id, reason: scriptError(cause) }); }
       }
       await refresh(false);
       setImportScripts(null);
       setOverwriteIds([]);
       setMessage(`已导入 ${imported} 个脚本${failed.length ? `，${failed.length} 个失败` : ""}。`);
-      if (failed.length) setError("操作未完成，请检查设置后重试。");
-    } catch (cause) { setError(errorDetails(cause)); }
+      if (failed.length) setFailures(failed);
+    } catch (cause) { setError(scriptError(cause)); }
     finally { setAction(null); }
   };
 
@@ -395,7 +410,8 @@ export function ScriptsApp() {
     {available === false && <Alert role="status"><AlertDescription>在 chrome://extensions 的 Surf Wax 详情页开启 Allow User Scripts，然后刷新状态。</AlertDescription></Alert>}
     {restoreError && <ErrorNotice summary="用户脚本恢复失败。" error={restoreError} />}
     {legacy !== undefined && <details><summary>无法迁移的旧数据（已保留）</summary><pre>{JSON.stringify(legacy, null, 2)}</pre></details>}
-    {error && <ErrorNotice summary="用户脚本操作失败。" error={error} />}
+    {error && <div role="alert" className="app-error-notice"><div className="app-error-heading">用户脚本操作失败。</div><details><summary>错误详情</summary><div className="app-error-detail">{error}</div></details></div>}
+    {failures.length > 0 && <div role="alert">操作失败：<ul>{failures.map(({ id, reason }) => <li key={id}>{id}：{reason}</li>)}</ul></div>}
     {message && <p role="status" className="scripts-message">{message}</p>}
     <div id="scripts-content">
       {view === "manager" ? <Card>

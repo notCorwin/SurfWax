@@ -495,7 +495,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
               onClick={() => onGoalModeChange(!goalMode)}>
               {goalMode ? "目标模式" : "普通模式"}
             </Button>
-            <Select value={reasoning.selected ?? undefined} disabled={!reasoning.ready || locked || !reasoning.choices.length}
+            <Select value={reasoning.selected ?? ""} disabled={!reasoning.ready || locked || !reasoning.choices.length}
               onValueChange={(value) => settings.select(value as ReasoningEffort)}>
               <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"
                 className="composer-select shrink-0 gap-1 px-2">

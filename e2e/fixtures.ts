@@ -323,7 +323,9 @@ export async function enableUserScripts(context: BrowserContext, extensionId: st
   await settings.goto(`chrome://extensions/?id=${extensionId}`);
   const toggle = settings.locator("extensions-toggle-row#allow-user-scripts cr-toggle#crToggle");
   await expect(toggle).toBeVisible();
-  if (await toggle.evaluate((element) => element.getAttribute("aria-checked") ?? element.getAttribute("aria-pressed")) !== "true") await toggle.click();
+  if (await toggle.evaluate((element) => element.getAttribute("aria-checked") ?? element.getAttribute("aria-pressed")) !== "true") {
+    await Promise.all([extensionPage.waitForEvent("load"), toggle.click()]);
+  }
   await expect.poll(() => extensionPage.evaluate(() => typeof chrome.userScripts)).toBe("object");
   await settings.close();
 }
