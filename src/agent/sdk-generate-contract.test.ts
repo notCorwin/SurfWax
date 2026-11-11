@@ -373,7 +373,7 @@ it("honors explicit Google generateContent over a catalog interactions route", a
   expect(new URL((fetch.mock.calls[0]![0] as Request).url).pathname).toBe("/v1beta/models/test:generateContent");
 });
 
-it.each([429, 503, "timeout"] as const)("publishes authoritative backoff for %s and preserves SDK request count", async (failure) => {
+it.each([429, 503, "timeout", "network"] as const)("publishes authoritative backoff for %s and preserves SDK request count", async (failure) => {
   const logger = new EventLogger({ store: createMemoryEventStore() });
   logger.beginRun("retry", "run");
   let calls = 0;
@@ -385,6 +385,7 @@ it.each([429, 503, "timeout"] as const)("publishes authoritative backoff for %s 
       if (request.method === "GET") return Response.json({ data: [] });
       if (++calls === 1) {
         if (failure === "timeout") throw new DOMException("https://secret.test/?api_key=never-render", "TimeoutError");
+        if (failure === "network") throw new TypeError("https://secret.test/?api_key=never-render");
         return Response.json({ error: { message: "secret response" } }, { status: failure, headers: { "Retry-After": "0.01" } });
       }
       return Response.json(completion("openai-chat-completions", false));
@@ -395,6 +396,8 @@ it.each([429, 503, "timeout"] as const)("publishes authoritative backoff for %s 
   const retries = events.filter(event => event.type === "request.retry");
   expect(retries).toHaveLength(1);
   expect(retries[0].runId).toBe("run");
+  if (typeof failure === "string") expect((retries[0].retry as { reason: string }).reason).toBe(failure);
+  else expect(retries[0].content).toMatchObject({ status: failure });
   expect(events.filter(event => event.type === "model.request.retrying")).toHaveLength(0);
   const starts = events.filter(event => event.type === "request.started");
   expect(starts.at(-1)!.id).toBeGreaterThan(retries[0].id);

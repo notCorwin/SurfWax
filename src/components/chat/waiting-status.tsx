@@ -45,7 +45,7 @@ export function updateWaitingPhase(previous: WaitingPhase | undefined, event: Lo
     const delayMs = value?.delayMs;
     if (typeof delayMs !== "number" || !Number.isFinite(delayMs) || delayMs <= 0) return { runId: event.runId, phase: "processing", eventId: event.id };
     const failure = classifyModelFailure(value?.status || content?.status ? { status: value?.status ?? content?.status }
-      : fromLogValue(event.error, event.valueEncoding) ?? (content?.reason === "network" ? { name: "NetworkError" } : undefined));
+      : fromLogValue(event.error, event.valueEncoding) ?? (content?.reason === "network" ? { name: "NetworkError" } : undefined), "model-request");
     retry = { attempt: value?.attempt ?? 1, until: (Number.isFinite(timestamp) ? timestamp : Date.now()) + delayMs, reason: modelFailureMessages[value?.reason && Object.hasOwn(modelFailureMessages, value.reason) ? value.reason as keyof typeof modelFailureMessages : failure] };
   }
   return { runId: event.runId, phase, eventId: event.id, retry,

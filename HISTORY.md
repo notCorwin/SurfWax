@@ -80,7 +80,7 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 来源：`src/agent/context-projection.ts`、`src/agent/context-choice.ts`、`src/agent/transport.ts`、`src/components/chat/local-composer.tsx`。
 
-模型请求的重试原因与等待状态来自 Canonical 请求生命周期，仅展示结构化错误分类对应的安全文案，不将提供商原始错误体写入用户提示。倒计时按事件中的实际延迟计算，共享低频时钟并在到期或卸载时停止；新请求、停止和终态清除旧等待，其他运行的迟到事件不能覆盖当前状态。该反馈不证明模型正在思考，也不改变重试策略。
+模型请求的重试原因与等待状态来自 Canonical 请求生命周期，仅展示结构化错误分类对应的安全文案，不将提供商原始错误体写入用户提示。通用 `TypeError` 只有在可信模型请求边界才可解释为 fetch 网络故障；普通 UI 错误保持安全的未知分类，结构化 status、code 与 cause 仍按同一分类规则处理。倒计时按事件中的实际延迟计算，共享低频时钟并在到期或卸载时停止；新请求、停止和终态清除旧等待，其他运行的迟到事件不能覆盖当前状态。该反馈不证明模型正在思考，也不改变重试策略。
 
 来源：`fdf724f`，见 `src/model-error.ts`、`src/agent/model.ts`、`src/components/chat/waiting-status.tsx`、`src/components/chat/use-activity-clock.ts`。
 

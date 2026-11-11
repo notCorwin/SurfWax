@@ -84,7 +84,7 @@ export async function retryModelOperation<T>(operation: () => Promise<T>, option
       if (!isRecoverableModelError(error, options.signal)) throw error;
       const delayMs = retryBackoffDelay(++attempt);
       await options.logger?.append({ type: "model.request.retrying", conversationId: options.conversationId, runId,
-        content: { purpose: options.purpose }, error, retry: { attempt, delayMs, reason: classifyModelFailure(error) } });
+        content: { purpose: options.purpose }, error, retry: { attempt, delayMs, reason: classifyModelFailure(error, "model-request") } });
       await waitForModelRetry(delayMs, options.signal, options.sleep);
     }
   }
@@ -282,7 +282,7 @@ export function createRetryingFetch(options: {
           conversationId: options.conversationId, runId,
           error,
           content: { url, method, error, reason: "network", diagnosis: "Check endpoint connectivity, CORS, and provider configuration while retrying." },
-          retry: { attempt: retries, delayMs, reason: classifyModelFailure(error) },
+          retry: { attempt: retries, delayMs, reason: classifyModelFailure(error, "model-request") },
           latencyMs: Math.max(0, now() - startedAt),
         });
         await waitForModelRetry(delayMs, signal, options.sleep);

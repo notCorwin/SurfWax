@@ -1,6 +1,6 @@
 /** Fixed presentation vocabulary, derived only from structured provider/transport fields. */
 export type ModelFailure = "auth" | "rate-limit" | "service" | "timeout" | "network" | "unknown";
-export function classifyModelFailure(error: unknown): ModelFailure {
+export function classifyModelFailure(error: unknown, boundary?: "model-request"): ModelFailure {
   const seen = new Set<unknown>();
   let current = error;
   let fallback: ModelFailure = "unknown";
@@ -13,7 +13,8 @@ export function classifyModelFailure(error: unknown): ModelFailure {
     if (status === 408 || status === 504) return "timeout";
     if (typeof status === "number" && status >= 500) return "service";
     if (value.name === "TimeoutError" || ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"].includes(String(value.code))) return "timeout";
-    if (value.name === "TypeError" || value.name === "NetworkError" || ["ECONNRESET", "ECONNREFUSED", "EPIPE", "UND_ERR_SOCKET"].includes(String(value.code))) fallback = "network";
+    // Fetch uses TypeError, but the same type also describes ordinary UI bugs.
+    if ((boundary === "model-request" && value.name === "TypeError") || value.name === "NetworkError" || ["ECONNRESET", "ECONNREFUSED", "EPIPE", "UND_ERR_SOCKET"].includes(String(value.code))) fallback = "network";
     current = value.cause;
   }
   return fallback;

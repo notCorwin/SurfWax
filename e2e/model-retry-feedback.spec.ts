@@ -59,27 +59,31 @@ test("pause during backoff cancels the retry and a new run remains usable", asyn
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("transport timeouts show classified backoff and clear after the existing retries", async () => {
+for (const failure of ["timeout", "network"] as const) {
+test(`transport ${failure} failures show classified backoff and clear after the existing retries`, async () => {
   const provider = await startProvider([textResponse("TIMEOUT_RECOVERED"), textResponse("title")]);
   const opened = await openExtension();
   try {
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    await opened.page.evaluate((baseURL) => {
+    await opened.page.evaluate(({ baseURL, failure }) => {
       const original = window.fetch.bind(window);
       let attempts = 0;
       window.fetch = async (input, init) => {
         const request = new Request(input, init);
         if (request.url === `${baseURL}/chat/completions` && request.method === "POST" && (await request.clone().json()).tools?.length) {
           document.documentElement.dataset.retryRequests = String(++attempts);
-          if (attempts <= 5) throw new DOMException("SECRET https://secret.test/?api_key=secret", "TimeoutError");
+          if (attempts <= 5) {
+            if (failure === "network") throw new TypeError("SECRET https://secret.test/?api_key=secret");
+            throw new DOMException("SECRET https://secret.test/?api_key=secret", "TimeoutError");
+          }
         }
         return original(request);
       };
-    }, provider.baseURL);
+    }, { baseURL: provider.baseURL, failure });
     await opened.page.getByTestId("composer-input").fill("hello");
     await opened.page.getByTestId("composer-input").press("Enter");
     const retry = opened.page.getByTestId("request-retry");
-    await expect(retry).toContainText("请求超时");
+    await expect(retry).toContainText(failure === "timeout" ? "请求超时" : "网络连接中断");
     await expect(retry).toContainText(/第 [45] 次自动重试：[2-5] 秒后重试/);
     const text = await retry.innerText();
     await expect(retry).not.toHaveText(text);
@@ -89,6 +93,7 @@ test("transport timeouts show classified backoff and clear after the existing re
     await expect(opened.page.locator("html")).toHaveAttribute("data-retry-requests", "6");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
+}
 
 test("closing the native panel during backoff cancels its request and leaves no stale retry on reopen", async () => {
   const provider = await startProvider([{ status: 503, error: "busy", headers: { "retry-after": "3" } }, textResponse("AFTER_CLOSE"), textResponse("title")]);

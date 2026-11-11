@@ -3,6 +3,7 @@ import { EventLogger } from "@/logging";
 import { createMemoryEventStore } from "@/memory-event-store";
 import { updateWaitingPhase } from "./waiting-status";
 import { errorDetails } from "@/components/ui/error-notice";
+import { classifyModelFailure } from "@/model-error";
 
 it("isolates backoff by run and clears it at the actual request boundary and terminal", async () => {
   const logger = new EventLogger({ store: createMemoryEventStore() });
@@ -27,4 +28,11 @@ it("isolates backoff by run and clears it at the actual request boundary and ter
   expect(errorDetails({ statusCode: 401, message: "SECRET" })).toBe("认证失败，请检查 API 密钥和访问权限。");
   expect(errorDetails({ statusCode: 503, message: "SECRET" })).toBe("服务暂时不可用，请稍后重试。");
   expect(errorDetails(new Error("SECRET https://secret.test/?api_key=secret"))).not.toMatch(/SECRET|secret.test/);
+  const uiError = new TypeError("SECRET https://secret.test/?api_key=secret");
+  expect(errorDetails(uiError)).toBe("操作未完成，请检查设置后重试。");
+  expect(errorDetails(new Error("SECRET", { cause: uiError }))).toBe("操作未完成，请检查设置后重试。");
+  expect(classifyModelFailure(uiError, "model-request")).toBe("network");
+  expect(errorDetails(new Error("SECRET", { cause: { statusCode: 401 } }))).toBe("认证失败，请检查 API 密钥和访问权限。");
+  expect(errorDetails(new Error("SECRET", { cause: { code: "ECONNRESET" } }))).toContain("网络连接中断");
+  expect(errorDetails(new Error("SECRET", { cause: { code: "ETIMEDOUT" } }))).toContain("请求超时");
 });

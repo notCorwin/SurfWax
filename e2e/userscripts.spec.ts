@@ -30,8 +30,10 @@ test(
       await manager.locator("#script-code .cm-content").fill("console.log('test')");
       await manager.getByRole("button", { name: "保存", exact: true }).click();
       await expect(manager.getByRole("alert")).toContainText("matches");
-      await manager.evaluate(() => window.dispatchEvent(new ErrorEvent("error", { error: new Error("secret-marker stack-marker raw-response-marker") })));
+      await manager.evaluate(() => window.dispatchEvent(new ErrorEvent("error", { error: new TypeError("secret-marker stack-marker raw-response-marker") })));
       await expect(manager.getByText("发生未处理的错误，请重试操作。")).toBeVisible();
+      await expect(manager.locator("body")).toContainText("操作未完成，请检查设置后重试。");
+      await expect(manager.locator("body")).not.toContainText("网络连接中断");
       await expect(manager.locator("body")).not.toContainText("secret-marker");
       await expect(manager.locator("body")).not.toContainText("stack-marker");
       await expect(manager.locator("body")).not.toContainText("raw-response-marker");
