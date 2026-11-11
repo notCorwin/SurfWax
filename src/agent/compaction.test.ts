@@ -101,19 +101,43 @@ describe("context choices and summary", () => {
     expect(second.messages).toContainEqual(raw[2]);
     expect(second.messages).toContainEqual(extended.at(-1));
 
+    logger.beginRun("one", "original");
     await logger.appendMessage("one", { id: "user", role: "user", parts: [{ type: "text", text: "Retry this request" }] }, { parentId: null });
+    await logger.append({ type: "model.context.appended", conversationId: "one", content: { anchorMessageId: "user", partCount: 1, message: { role: "user", content: "Original observation" } } });
     await logger.appendMessage("one", { id: "prior-reply", role: "assistant", parts: [{ type: "text", text: "Prior branch answer" }] }, { parentId: "user" });
     const projection = new IncrementalActiveContext(logger, "one");
-    expect((await projection.read()).branchIds).toEqual(["user", "prior-reply"]);
+    const original = await projection.read();
+    expect(original.branchIds).toEqual(["user", "prior-reply"]);
     // Changing the run's head must invalidate a cached projection even when no
     // events arrive, without changing the durable idle branch selection.
-    const retry = await projection.read("user");
+    logger.beginRun("one", "retry");
+    await logger.append({ type: "model.context.appended", conversationId: "one", content: { anchorMessageId: "user", partCount: 1, message: { role: "user", content: "Retry observation" } } });
+    const retry = await projection.read("user", "retry");
     expect(retry.branchIds).toEqual(["user"]);
     expect(JSON.stringify(retry.messages)).not.toContain("Prior branch answer");
+    expect(JSON.stringify(retry.messages)).toContain("Retry observation");
+    expect(JSON.stringify(retry.messages)).not.toContain("Original observation");
+    // The attempt is part of cache validity even when no new event was appended.
+    expect(JSON.stringify((await projection.read("user", "original")).raw)).toContain("Original observation");
+    expect((await projection.read("user", "retry")).raw).toEqual(retry.raw);
     expect(retry.checkpoint).toBeUndefined();
-    expect((await projection.read()).branchIds).toEqual(["user", "prior-reply"]);
+    logger.beginRun("one", "failed-without-output");
+    await logger.append({ type: "model.context.appended", conversationId: "one", content: { anchorMessageId: "user", partCount: 1, message: { role: "user", content: "Failed attempt observation" } } });
+    await logger.append({ type: "conversation.failed", conversationId: "one", content: null });
+    logger.endRun("one", "failed-without-output");
+    expect((await projection.read()).raw).toEqual(original.raw);
+    expect((await new IncrementalActiveContext(logger, "one").read()).raw).toEqual(original.raw);
     expect((await logger.repository("one")).headId).toBe("prior-reply");
     await expect(projection.read("uncommitted-head")).rejects.toThrow("上下文锚点尚未保存");
+    await logger.appendMessage("legacy", { id: "legacy-user", role: "user", parts: [{ type: "text", text: "Old input" }] }, { parentId: null });
+    await logger.appendMessage("legacy", { id: "legacy-answer", role: "assistant", parts: [{ type: "text", text: "Old answer" }] }, { parentId: "legacy-user" });
+    for (const runId of [undefined, "unowned-legacy", "known-sibling"]) await logger.append({ type: "model.context.appended", conversationId: "legacy", runId,
+      content: { anchorMessageId: "legacy-user", partCount: 1, message: { role: "user", content: runId ?? "Unscoped observation" } } });
+    await logger.append({ type: "conversation.finished", conversationId: "legacy", runId: "known-sibling", content: { messageId: "other-answer" } });
+    const legacy = JSON.stringify((await new IncrementalActiveContext(logger, "legacy").read()).raw);
+    expect(legacy).toContain("Unscoped observation");
+    expect(legacy).toContain("unowned-legacy");
+    expect(legacy).not.toContain("known-sibling");
   });
 
   it("does not write a checkpoint when one fragment fails", async () => {

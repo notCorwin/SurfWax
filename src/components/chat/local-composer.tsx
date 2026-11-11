@@ -11,7 +11,7 @@ import { ErrorNotice } from "@/components/ui/error-notice";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { registerBackgroundRequest, waitForConversationRun } from "@/agent/coordinator";
+import { getRunIdentity, registerBackgroundRequest, waitForConversationRun } from "@/agent/coordinator";
 import { IncrementalActiveContext } from "@/agent/context-choice";
 import { modelDiagnosticContext } from "@/agent/diagnostics";
 import { contextPressure } from "@/agent/compaction";
@@ -141,6 +141,8 @@ export const ContextIndicator = memo(function ContextIndicator({ config, logger,
     let loading = initialThread.isLoading;
     const contextHead = () => { const thread = runtime.getState(); return thread.isRunning ? thread.messages.at(-1)?.id : undefined; };
     let headId = contextHead();
+    const contextRun = () => runtime.getState().isRunning ? getRunIdentity()?.runId : undefined;
+    let activeRunId = contextRun();
     const controller = new AbortController();
     const unregisterRequest = registerBackgroundRequest(controller, conversationId);
     controller.signal.addEventListener("abort", unregisterRequest, { once: true });
@@ -157,7 +159,7 @@ export const ContextIndicator = memo(function ContextIndicator({ config, logger,
           const current = version;
           try {
             const resolvedLimit = await limit;
-            const canonical = await projection.read(headId);
+            const canonical = await projection.read(headId, activeRunId);
             const pressure = await contextPressure({
               raw: canonical.raw,
               branchIds: canonical.branchIds,
@@ -200,7 +202,8 @@ export const ContextIndicator = memo(function ContextIndicator({ config, logger,
     const unsubscribeRuntime = runtime.thread.subscribe(() => {
       // A retry's active branch can differ from the persisted idle selection.
       const nextHead = contextHead();
-      if (runtime.getState().isLoading !== loading || nextHead !== headId) { headId = nextHead; schedule(); }
+      const nextRun = contextRun();
+      if (runtime.getState().isLoading !== loading || nextHead !== headId || nextRun !== activeRunId) { headId = nextHead; activeRunId = nextRun; schedule(); }
     });
     const unsubscribe = logger.subscribe((event) => {
       if (event.type !== "log.cleared" && (event.conversationId !== conversationId || !CONTEXT_USAGE_EVENTS.has(event.type))) return;

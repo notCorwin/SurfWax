@@ -76,6 +76,10 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 来源：`f9aaa1a`，见 `src/agent/context-choice.ts`、`src/agent/runner.ts`、`src/agent/transport.ts`、`src/components/chat/local-composer.tsx`。
 
+首次回复尚未持久化时，补充观察虽锚定共享用户消息，仍归属其实际运行；可证明归属的投影只纳入当前 Assistant 分支的运行及明确的活跃运行；无法归属的旧记录保留原锚定语义，不能借此放行已知兄弟运行。重试和无输出失败的观察不能污染旧答案分支，当前重试也不能丢失自己的新观察。运行身份与 head、日志代次共同决定投影缓存和 UI 计数失效；切回或重载旧分支须恢复相同的原始模型上下文，而不只比较取整百分比。
+
+来源：`src/agent/context-projection.ts`、`src/agent/context-choice.ts`、`src/agent/transport.ts`、`src/components/chat/local-composer.tsx`。
+
 ## 工作模式与完成判定
 
 ### 工作模式通过显式工具结束

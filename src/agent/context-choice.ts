@@ -9,8 +9,8 @@ import { resolveModelLimit, type ModelLimit } from "./model-limits";
 import { modelDiagnosticContext } from "./diagnostics";
 import { projectModelMessages } from "./context-projection";
 
-export async function modelMessages(messages: ConversationMessage[], events: readonly LogEvent[] = []): Promise<ModelMessage[]> {
-  return projectModelMessages(messages, events);
+export async function modelMessages(messages: ConversationMessage[], events: readonly LogEvent[] = [], activeRunId?: string): Promise<ModelMessage[]> {
+  return projectModelMessages(messages, events, activeRunId);
 }
 
 export async function activeContext(logger: EventLogger, conversationId: string, headId?: string) {
@@ -32,18 +32,19 @@ export class IncrementalActiveContext {
   private others: LogEvent[] = [];
   private snapshot?: ActiveContextSnapshot;
   private snapshotHead?: string;
+  private snapshotRun?: string;
   private messages = new Map<string, { firstRaw: LogEvent; firstValid?: LogEvent; latestValid?: LogEvent }>();
 
   constructor(private logger: EventLogger, private conversationId: string) {}
 
-  async read(headId?: string): Promise<ActiveContextSnapshot> {
+  async read(headId?: string, activeRunId?: string): Promise<ActiveContextSnapshot> {
     let batch = await this.logger.contextProjectionEvents(this.conversationId, this.afterId);
     if (this.epoch !== undefined && this.epoch !== batch.epoch) {
       this.afterId = -1; this.others = []; this.messages.clear(); this.snapshot = undefined;
       batch = await this.logger.contextProjectionEvents(this.conversationId);
     }
     this.epoch = batch.epoch;
-    if (!batch.value.length && this.snapshot && this.snapshotHead === headId) return this.snapshot;
+    if (!batch.value.length && this.snapshot && this.snapshotHead === headId && this.snapshotRun === activeRunId) return this.snapshot;
     for (const event of batch.value) {
       this.afterId = Math.max(this.afterId, event.id);
       if (event.type !== "conversation.message") { this.others.push(event); continue; }
@@ -74,10 +75,11 @@ export class IncrementalActiveContext {
       if (!isSyntheticTerminalMessage(item.message)) ui.unshift(item.message);
       id = item.parentId;
     }
-    const raw = await modelMessages(ui, projected);
+    const raw = await modelMessages(ui, projected, activeRunId);
     const branchIds = ui.map((message) => message.id);
     const { checkpoint, messages } = await effectiveContext(projected, branchIds, raw);
     this.snapshotHead = headId;
+    this.snapshotRun = activeRunId;
     return this.snapshot = { ui, raw, events: projected, branchIds, checkpoint, messages };
   }
 }

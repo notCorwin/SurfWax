@@ -22,7 +22,7 @@ export type ConversationTransport = {
   }): Promise<SidePanelMessage>;
 };
 type ResponseObserver = (event: LanguageModelCallEndEvent<any>) => void | Promise<void>;
-type AgentFactory = (signal: AbortSignal, branchIds: string[], resumed?: boolean, onResponse?: ResponseObserver, shouldYield?: () => boolean, contextAnchor?: () => { messageId: string; partCount: number }) => Agent<never, any, any, any> | Promise<Agent<never, any, any, any>>;
+type AgentFactory = (signal: AbortSignal, branchIds: string[], resumed?: boolean, onResponse?: ResponseObserver, shouldYield?: () => boolean, contextAnchor?: () => { messageId: string; partCount: number; runId?: string }) => Agent<never, any, any, any> | Promise<Agent<never, any, any, any>>;
 type ToolPart = Extract<SidePanelMessage["parts"][number], { toolCallId: string }>;
 export type RefreshObserver = { drain(): Promise<SidePanelMessage[]>; hasPending?(): boolean; dispose(): void };
 
@@ -183,7 +183,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
           lease.signal.throwIfAborted();
           const canonicalMessages = await withSavedMetadata(response.parts.length ? [...initial, response] : initial);
           historyEvents = (await logger.contextProjectionEvents(conversationId)).value;
-          const messages = await modelMessages(canonicalMessages as ConversationMessage[], historyEvents);
+          const messages = await modelMessages(canonicalMessages as ConversationMessage[], historyEvents, currentRunId);
           logger.setRunPhase(currentRunId, phase++);
           let captured = false;
           try {
@@ -205,7 +205,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
             }, () => refreshObserver?.hasPending?.() ?? false, () => {
               const anchor = response.parts.length ? response : initial.at(-1);
               if (!anchor) throw new Error("模型上下文缺少可持久化的消息锚点。");
-              return { messageId: anchor.id, partCount: anchor.parts.length };
+              return { messageId: anchor.id, partCount: anchor.parts.length, runId: currentRunId };
             });
             resumed = true;
             await runAgent.generate({

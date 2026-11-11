@@ -1,15 +1,36 @@
 import { convertToModelMessages, type ModelMessage, type UIMessage } from "ai";
-import { fromLogValue, type ConversationMessage, type LogEvent } from "../logging";
+import { conversationMessageHeader, fromLogValue, type ConversationMessage, type LogEvent } from "../logging";
 import { prepareToolMessages } from "../chrome/tool";
 import { materializeToolCatalog } from "./tool-catalog";
 
 type Boundary = { eventId: number; offset: number; message: ModelMessage | UIMessage; ui: boolean; assistant?: ConversationMessage };
 
 /** Internal model messages have durable positions without changing the visible branch tree. */
-export async function projectModelMessages(messages: readonly ConversationMessage[], events: readonly LogEvent[]): Promise<ModelMessage[]> {
+export async function projectModelMessages(messages: readonly ConversationMessage[], events: readonly LogEvent[], activeRunId?: string): Promise<ModelMessage[]> {
+  const assistants = new Set(messages.filter(message => message.role === "assistant").map(message => message.id));
+  const sharedInputs = new Set(messages.filter(message => message.role !== "assistant").map(message => message.id));
+  const branchRuns = new Set<string>(), knownRuns = new Set<string>();
+  for (const event of events) {
+    if (!event.runId) continue;
+    const header = conversationMessageHeader(event);
+    if (header?.valid && !sharedInputs.has(header.id)) {
+      knownRuns.add(event.runId);
+      if (assistants.has(header.id)) branchRuns.add(event.runId);
+    } else if (["conversation.finished", "conversation.failed", "conversation.aborted"].includes(event.type)) {
+      knownRuns.add(event.runId);
+      const content = fromLogValue(event.content, event.valueEncoding) as { messageId?: string } | undefined;
+      if (content?.messageId && assistants.has(content.messageId)) branchRuns.add(event.runId);
+    }
+  }
+  if (activeRunId) { branchRuns.add(activeRunId); knownRuns.add(activeRunId); }
   const boundaries = new Map<string, Boundary[]>();
   for (const event of events) {
     if (event.type !== "model.context.appended" && event.type !== "agent.goal.continued") continue;
+    // Initial observations anchor to a shared user before a reply exists. Their
+    // run still belongs only to its eventual assistant branch or active attempt.
+    // Unowned legacy history retains its anchor semantics; a known sibling or
+    // failed attempt cannot use that uncertainty to enter this branch.
+    if (event.type === "model.context.appended" && event.runId && knownRuns.has(event.runId) && !branchRuns.has(event.runId)) continue;
     const value = fromLogValue(event.content, event.valueEncoding) as Record<string, unknown> | undefined;
     if (!value || typeof value !== "object") continue;
     const ui = event.type === "agent.goal.continued";

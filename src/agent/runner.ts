@@ -42,7 +42,7 @@ export type CreateAgentOptions = {
   onResponse?: (event: LanguageModelCallEndEvent<any>) => void | Promise<void>;
   shouldYield?: () => boolean;
   goalMode?: boolean;
-  contextAnchor?: () => { messageId: string; partCount: number };
+  contextAnchor?: () => { messageId: string; partCount: number; runId?: string };
 };
 
 
@@ -187,7 +187,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber }) => {
       if (stepNumber === 0) reviewRequirements = goalRequirements(messages);
       logger?.telemetry({ type: "model.context.preparing", conversationId: options.conversationId, content: { stepNumber } });
-      let canonical = options.contextAnchor && canonicalContext ? await canonicalContext.read(options.contextAnchor().messageId) : undefined;
+      const currentAnchor = options.contextAnchor?.();
+      let canonical = currentAnchor && canonicalContext ? await canonicalContext.read(currentAnchor.messageId, currentAnchor.runId) : undefined;
       let raw = canonical?.raw ?? [...initialMessages, ...responseMessages];
       if (canonical) options.compactor?.useBranch(canonical.branchIds);
       let prepared = await options.compactor?.prepare(canonical?.raw ?? messages, stepNumber) ?? canonical?.messages ?? messages;
@@ -217,7 +218,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         const saved = await logger.append({ type: "model.context.appended", conversationId: options.conversationId,
           content: { anchorMessageId: anchor.messageId, partCount: anchor.partCount, message: supplemental } });
         if (!saved) throw new DOMException("日志维护已阻止模型上下文保存。", "AbortError");
-        canonical = await canonicalContext!.read(anchor.messageId);
+        canonical = await canonicalContext!.read(anchor.messageId, anchor.runId);
         raw = canonical.raw;
         options.compactor?.useBranch(canonical.branchIds);
         prepared = canonical.messages;

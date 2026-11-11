@@ -131,6 +131,24 @@ test(
         100_000,
       );
       await options.close();
+      const projection = () => opened.page.evaluate(async (dev) => {
+        const { EventLogger, fromLogValue } = await import(`${dev}/src/logging.ts`);
+        const { activeContext } = await import(`${dev}/src/agent/context-choice.ts`);
+        const logger = new EventLogger();
+        const hash = async (value: unknown) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value)))))
+          .map(byte => byte.toString(16).padStart(2, "0")).join("");
+        try {
+          const conversationId = (await logger.messageEvents()).at(-1).conversationId;
+          const snapshot = await activeContext(logger, conversationId);
+          return { branchIds: snapshot.branchIds, digest: await hash(snapshot.raw),
+            lastText: snapshot.ui.at(-1)?.parts.filter((part: any) => part.type === "text").map((part: any) => part.text).join("").slice(0, 40),
+            messages: await Promise.all(snapshot.raw.map(async (message: any) => ({ role: message.role, characters: JSON.stringify(message).length, digest: await hash(message) }))),
+            supplemental: await Promise.all(snapshot.events.filter((event: any) => event.type === "model.context.appended").map(async (event: any) => {
+              const content = fromLogValue(event.content, event.valueEncoding);
+              return { eventId: event.id, runId: event.runId, anchorMessageId: content.anchorMessageId, partCount: content.partCount, digest: await hash(content.message) };
+            })) };
+        } finally { logger.dispose(); }
+      }, process.env.SURFWAX_DEV_SERVER_URL!);
       const indicator = opened.page.getByTestId("context-indicator");
       await expect(indicator).toHaveAttribute("data-state", "ready");
       const initial = Number(await indicator.getAttribute("data-used-percent"));
@@ -166,7 +184,10 @@ test(
           return longPercent;
         })
         .toBeGreaterThan(initial + 5);
-
+      const originalProjection = await projection();
+      const observed = await opened.context.newPage();
+      await observed.goto(`${provider.origin}/target`);
+      await observed.evaluate(() => { document.title = "R2_CURRENT_TAB"; });
       await opened.page.getByTestId("replay-message-button").click();
       await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
       await expect(indicator).toHaveAttribute("data-state", "ready");
@@ -180,7 +201,9 @@ test(
         const retryInput = JSON.stringify(request.messages);
         expect(retryInput).toContain("pending request");
         expect(retryInput).not.toContain("LONG_BRANCH");
+        expect(retryInput).toContain("R2_CURRENT_TAB");
       }
+      expect(JSON.stringify(agentRequests()[1].messages).match(/<browser-context>/g)).toHaveLength(1);
       expect(agentRequests()[2].messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "retry-branch-tabs" }));
       await expect
         .poll(async () =>
@@ -194,6 +217,10 @@ test(
       await expect(opened.page.locator(".markdown-body").last()).toContainText(
         "LONG_BRANCH",
       );
+      await expect.poll(async () => (await projection()).lastText).toContain("LONG_BRANCH");
+      const restoredProjection = await projection();
+      await test.info().attach("context-branch-projections", { contentType: "application/json", body: Buffer.from(JSON.stringify({ originalProjection, restoredProjection }, null, 2)) });
+      expect(restoredProjection.digest).toBe(originalProjection.digest);
       await expect
         .poll(async () =>
           Number(await indicator.getAttribute("data-used-percent")),
@@ -202,15 +229,20 @@ test(
 
       // A rejected retry must use the requested input while preserving the idle
       // selected reply, including after reopening its canonical history.
+      await observed.evaluate(() => { document.title = "R3_FAILED_ATTEMPT_TAB"; });
       await opened.page.getByTestId("replay-message-button").click();
       await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
       await expect(opened.page.locator(".markdown-body").last()).toContainText("LONG_BRANCH");
       expect(agentRequests()).toHaveLength(4);
       expect(JSON.stringify(agentRequests()[3].messages)).not.toMatch(/LONG_BRANCH|SHORT_BRANCH/);
+      expect(JSON.stringify(agentRequests()[3].messages)).toContain("R3_FAILED_ATTEMPT_TAB");
+      expect(JSON.stringify(agentRequests()[3].messages).match(/<browser-context>/g)).toHaveLength(1);
+      expect((await projection()).digest).toBe(originalProjection.digest);
       await opened.page.reload();
       await opened.page.getByTestId("conversation-menu").click();
       await opened.page.locator(".conversation-select").filter({ hasText: "上下文分支测试" }).click();
       await expect(opened.page.locator(".markdown-body").last()).toContainText("LONG_BRANCH");
+      expect((await projection()).digest).toBe(originalProjection.digest);
 
       await opened.page.getByTestId("edit-message-button").click();
       await opened.page.getByTestId("edit-message-input").fill("EDITED_BRANCH_REQUEST");
