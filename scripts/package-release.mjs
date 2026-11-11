@@ -23,12 +23,12 @@ const isInside = (parent, candidate) => {
   const path = relative(parent, candidate);
   return !isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`);
 };
-const buildRequested = process.argv[2] === '--build';
+if (process.argv.length !== 3 || process.argv[2] !== '--build') throw new Error('Release packaging requires --build to build from the checked-out source.');
 const repository = realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
 const gitDirectory = realpathSync(execFileSync('git', ['rev-parse', '--absolute-git-dir'], { encoding: 'utf8' }).trim());
 const gitEntry = resolve(repository, '.git');
 const outputRequested = resolve(process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
-const buildDirectoryRequested = resolve((buildRequested ? undefined : process.argv[2]) ?? process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
+const buildDirectoryRequested = resolve(process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
 if (isInside(gitEntry, outputRequested)) throw new Error('SURFWAX_RELEASE_DIR must not be inside the Git metadata directory.');
 if (isInside(gitEntry, buildDirectoryRequested)) throw new Error('SURFWAX_DEV_OUT_DIR must not be inside the Git metadata directory because Vite clears the build directory.');
 const output = canonicalPath(outputRequested);
@@ -48,6 +48,8 @@ if (outputIsInsidePublic) throw new Error('SURFWAX_RELEASE_DIR must not equal or
 if (isInside(publicDirectory, buildDirectory)) throw new Error('SURFWAX_DEV_OUT_DIR must not equal or be nested under public because Vite copies that directory into every build.');
 const ignoredPublicInputs = execFileSync('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--', 'public'], { encoding: 'utf8' });
 if (ignoredPublicInputs.trim()) throw new Error(`Release packaging refuses ignored files under public because Vite copies them into the build:\n${ignoredPublicInputs.trim()}`);
+const ignoredEnvInputs = execFileSync('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--', '.env', '.env.*'], { cwd: repository, encoding: 'utf8' });
+if (ignoredEnvInputs.trim()) throw new Error(`Release packaging refuses ignored Vite environment files:\n${ignoredEnvInputs.trim()}`);
 const buildIsInsideRepository = isInside(repository, buildDirectory);
 if (buildIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${buildDirectory}${sep}`]).status !== 0) {
   throw new Error('SURFWAX_DEV_OUT_DIR must be outside the Git worktree or ignored by Git so the build cannot make the worktree dirty.');
@@ -69,7 +71,7 @@ const versionTagsAtHead = execFileSync('git', ['tag', '--points-at', 'HEAD', '--
 const mismatchedVersionTags = versionTagsAtHead.filter(tag => tag !== expectedTag);
 if (mismatchedVersionTags.length > 0) throw new Error(`Checked-out version tag ${mismatchedVersionTags.join(', ')} differs from package version ${expectedTag}`);
 
-if (buildRequested) {
+{
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const installEnvironment = { ...process.env };
   delete installEnvironment.NODE_ENV;
@@ -125,7 +127,7 @@ try {
     if (await readFile(`${archive}.sha256`, 'utf8') !== checksumText) throw new Error(`Existing checksum differs for version ${version}; refusing to overwrite ${archive}.sha256`);
   }
   const notes = join(staging, 'release-notes.md');
-  await writeFile(notes, `# Surf Wax ${version}\n\nCommit: ${commit}\n\nChrome 138+; Manifest V3. This archive is tied to this version and commit.\n\nThe side panel uses shadcn/ui, GFM/math/code rendering and frame-batched rendering of completed responses. Recoverable model requests retry with a maximum 5-second delay; closing the panel aborts model and tool work. New sessions snapshot the system prompt and complete tool catalog in the canonical event log. User Scripts and interaction protection cover all touched pages and frames. All checks, packaging, and delivery are manual. Checks run locally under Node 24, including Chrome 138/current and 120Hz render traces; this package was generated from a clean Git worktree.\n\nDownload the ZIP and checksum, verify SHA-256, extract it, and use Chrome's Load unpacked on the directory containing manifest.json. Chrome Web Store installations update through the store; unpacked installations must be updated manually.\n\nRequired permissions: debugger, downloads, scripting, sidePanel, storage, tabs, unlimitedStorage, userScripts; website access: all URLs. Downloads are created only when you explicitly choose to save a file; no runtime permission prompt is required.\n\nConversation data and full browser/tool results stay in the local canonical event log and are sent directly to your configured model endpoint when used as model context. See PRIVACY.md in the repository for details.\n`);
+  await writeFile(notes, `# Surf Wax ${version}\n\nSource checkout: ${commit}\n\nThe script installed dependencies from the lockfile, built from a clean Git worktree, checked the built manifest, entrypoints and asset size limits, and generated this ZIP and its SHA-256 checksum. These checks do not constitute browser or performance testing.\n\nDownload the ZIP and checksum, verify SHA-256, extract it, and use Chrome's Load unpacked on the directory containing manifest.json. Chrome Web Store installations update through the store; unpacked installations must be updated manually.\n\nRequired permissions: debugger, downloads, scripting, sidePanel, storage, tabs, unlimitedStorage, userScripts; website access: all URLs.\n`);
   // The unversioned notes describe this invocation; immutable versioned assets above never replace files.
   await rename(notes, join(output, 'release-notes.md'));
 } finally { await rm(staging, { recursive: true, force: true }); }
