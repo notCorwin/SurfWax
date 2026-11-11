@@ -350,3 +350,58 @@ test("large candidate contexts keep complete inline pairs and original artifact 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("BUDGET_CONTEXT_OK", { timeout: 60_000 });
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
+
+test("text tools require rendered evidence rather than hidden source", async () => {
+  test.setTimeout(120_000);
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => {
+      document.body.innerHTML = `<script type="text/plain" id="source">r.ok?'Ready':'Stamp rejected'</script>
+        <p id="status">Waiting for stamp</p>
+        <div style="display:none"><p id="hidden">Ready</p></div>
+        <div style="opacity:0"><p id="transparent">Ready</p></div>
+        <div style="visibility:hidden"><p id="invisible">Ready</p></div>
+        <p id="mixed">Visible<span style="display:none">Ready</span><span style="opacity:0">Ready</span></p>
+        <p id="empty"></p><p id="offscreen" style="position:absolute;top:2500px">Offscreen text</p>
+        <button id="start">Start real stamp</button>
+        <iframe id="child" srcdoc="<p id='frame-status'>Frame ready</p>"></iframe>`;
+      document.querySelector('#start')!.addEventListener('click', () => {
+        setTimeout(() => { document.querySelector('#status')!.textContent = 'Ready'; }, 500);
+      });
+    });
+    const css = (value: string) => ({ by: "css", value });
+    const steps: { name: string; input: object; expected: Record<string, any> }[] = [
+      { name: "verify_state", input: { target: { by: "text", value: "Ready", exact: true }, textIncludes: "Ready", timeoutMs: 200 }, expected: { ok: true, result: { verified: false, present: false, actual: null } } },
+      { name: "verify_state", input: { target: css("#status"), textIncludes: "Ready" }, expected: { ok: true, result: { verified: false, actual: "Waiting for stamp" } } },
+      ...["#source", "#hidden", "#transparent", "#invisible"].flatMap(value => [
+        { name: "verify_state", input: { target: css(value), textEquals: "" }, expected: { ok: true, result: { verified: false, present: true, actual: null } } },
+        { name: "verify_state", input: { target: css(value), state: "hidden" }, expected: { ok: true, result: { verified: true, actual: false } } },
+      ]),
+      { name: "read_text", input: { target: css("#source") }, expected: { ok: false, error: { code: "text-unavailable" } } },
+      { name: "read_text", input: { target: css("#mixed") }, expected: { ok: true, result: "Visible" } },
+      { name: "read_elements", input: { target: css("#mixed") }, expected: { ok: true, result: { items: [{ text: "Visible" }] } } },
+      { name: "verify_state", input: { target: css("#mixed"), textIncludes: "Ready" }, expected: { ok: true, result: { verified: false, actual: "Visible" } } },
+      { name: "read_text", input: { target: css("#offscreen") }, expected: { ok: true, result: "Offscreen text" } },
+      { name: "read_text", input: { target: { ...css("#frame-status"), frame: { by: "css", value: "#child" } } }, expected: { ok: true, result: "Frame ready" } },
+      { name: "click", input: { target: css("#start") }, expected: { ok: true } },
+      { name: "verify_state", input: { target: { by: "text", value: "Ready", exact: true }, textEquals: "Ready", timeoutMs: 5000 }, expected: { ok: true, result: { verified: true, actual: "Ready", present: true } } },
+    ];
+    responses.push(commandResponse(steps[0]!.name, steps[0]!.input, "rendered-0"));
+    steps.forEach((step, index) => responses.push(request => {
+      expect(lastTool(request)).toMatchObject(step.expected);
+      const next = steps[index + 1];
+      return next ? commandResponse(next.name, next.input, `rendered-${index + 1}`) : textResponse("RENDERED_TEXT_OK");
+    }));
+    responses.push(textResponse("渲染文本回归"));
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Check rendered text evidence");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("RENDERED_TEXT_OK", { timeout: 100_000 });
+    expect(await target.locator("#status").innerText()).toBe("Ready");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});

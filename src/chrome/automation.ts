@@ -1,4 +1,5 @@
 import { SNAPSHOT_CANDIDATE_CONTEXT, semanticContexts, type CandidateAssociation } from "./candidate-context";
+import { RENDERED_TEXT_SOURCE } from "./rendered-text";
 import type { EventLogger } from "../logging";
 import { ElementIds } from "./element-ids";
 import { resolveSampledElement } from "./sampled-element";
@@ -404,7 +405,11 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
     return out;
   };
   const all = root => roots(root).flatMap(item => [...(item.querySelectorAll?.("*") || [])]);
-  const visibleText = el => normalize(el.innerText === undefined ? el.textContent : el.innerText);
+  const textCache = new WeakMap();
+  const visibleText = el => {
+    if (!textCache.has(el)) { const text = (${RENDERED_TEXT_SOURCE}).call(el); textCache.set(el, text === null ? null : normalize(text)); }
+    return textCache.get(el);
+  };
   const labelText = root => {
     if (["SCRIPT", "STYLE", "NOSCRIPT"].includes(root.nodeName) || root.ownerDocument?.head?.contains(root)) return "";
     if (root.nodeName === "INPUT" && ["button", "submit", "reset"].includes(root.type)) return root.value;
@@ -417,7 +422,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
     return result;
   };
   const matches = (el, query) => {
-    const equal = (actual, expected) => query.exact ? normalize(actual) === normalize(expected) : normalize(actual).toLowerCase().includes(normalize(expected).toLowerCase());
+    const equal = (actual, expected) => actual === null ? false : query.exact ? normalize(actual) === normalize(expected) : normalize(actual).toLowerCase().includes(normalize(expected).toLowerCase());
     if (query.kind === "role") return roleOf(el) === query.value && (!query.name || equal(nameOf(el), query.name));
     if (query.kind === "text") return equal(visibleText(el), query.value) && ![...el.children].some(child => equal(visibleText(child), query.value));
     if (query.kind === "label") {
@@ -452,7 +457,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
         continue;
       }
       if (item.kind === "filter") {
-        if (item.hasText !== undefined) current = current.filter(el => visibleText(el).toLowerCase().includes(normalize(item.hasText).toLowerCase()));
+        if (item.hasText !== undefined) current = current.filter(el => visibleText(el)?.toLowerCase().includes(normalize(item.hasText).toLowerCase()));
         if (item.has) current = current.filter(el => resolve(el, item.has).length > 0);
         continue;
       }
@@ -468,7 +473,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
         current = [...new Set(current.filter(Boolean))];
       } else current = [...new Set(found)];
     }
-    if (locator.hasText) current = current.filter(el => visibleText(el).toLowerCase().includes(normalize(locator.hasText).toLowerCase()));
+    if (locator.hasText) current = current.filter(el => visibleText(el)?.toLowerCase().includes(normalize(locator.hasText).toLowerCase()));
     if (locator.has) current = current.filter(el => resolve(el, locator.has).length > 0);
     if (locator.index !== undefined) { const index = locator.index < 0 ? current.length + locator.index : locator.index; current = index >= 0 && index < current.length ? [current[index]] : []; }
     return [...new Set(current)];
@@ -476,7 +481,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
   const result = resolve(rootDocument || document, spec);
   if (metadata === "nodes") return result;
   if (!metadata) return result[0] || null;
-  return result.map(el => ({ role: roleOf(el), name: nameOf(el), tag: el.tagName.toLowerCase(), text: visibleText(el).slice(0, 120) }));
+  return result.map(el => ({ role: roleOf(el), name: nameOf(el), tag: el.tagName.toLowerCase(), text: visibleText(el)?.slice(0, 120) ?? null }));
 }`;
 
 const SEARCH_META_SOURCE = String.raw`function(includeIdentity) {
@@ -487,10 +492,11 @@ const SEARCH_META_SOURCE = String.raw`function(includeIdentity) {
     H1:"heading", H2:"heading", H3:"heading", H4:"heading", H5:"heading", H6:"heading", NAV:"navigation", MAIN:"main", ARTICLE:"article", ASIDE:"complementary", FOOTER:"contentinfo", HEADER:"banner", UL:"list", OL:"list", LI:"listitem", DIALOG:"dialog", PROGRESS:"progressbar"
   }[el.tagName] || (el.tagName === "INPUT" ? ({checkbox:"checkbox",radio:"radio",range:"slider",number:"spinbutton",search:"searchbox",button:"button",submit:"button",reset:"button"}[el.type] || "textbox") : "generic"));
   const name = normalize(el.getAttribute("aria-label") || (() => { const ids = el.getAttribute("aria-labelledby"); return ids && ids.split(/\s+/).map(id => el.getRootNode().getElementById?.(id)?.textContent || "").join(" "); })() || (el.labels ? [...el.labels].map(label => label.textContent).join(" ") : "") || el.getAttribute("alt") || el.getAttribute("title") || el.textContent || el.value);
-  const text = normalize(el.innerText === undefined ? el.textContent : el.innerText);
+  const renderedText = (${RENDERED_TEXT_SOURCE}).call(el);
+  const text = renderedText === null ? null : normalize(renderedText);
   const identityTooLarge = String(role).length + name.length > 2_000_000;
-  return { connected: el.isConnected, role: String(role).slice(0, 80), name: name.slice(0, 160), ...(includeIdentity ? identityTooLarge ? { identityTooLarge: true } : { identityRole: String(role), identityName: name } : {}), text: text.slice(0, 120), tag: el.tagName.toLowerCase(),
-    ...(String(role).length > 80 ? {roleTruncated:true} : {}), ...(name.length > 160 ? {nameTruncated:true} : {}), ...(text.length > 120 ? {textTruncated:true} : {}) };
+  return { connected: el.isConnected, role: String(role).slice(0, 80), name: name.slice(0, 160), ...(includeIdentity ? identityTooLarge ? { identityTooLarge: true } : { identityRole: String(role), identityName: name } : {}), text: text?.slice(0, 120) ?? null, tag: el.tagName.toLowerCase(),
+    ...(String(role).length > 80 ? {roleTruncated:true} : {}), ...(name.length > 160 ? {nameTruncated:true} : {}), ...(text !== null && text.length > 120 ? {textTruncated:true} : {}) };
 }`;
 
 export class AutomationRuntime {
@@ -1639,14 +1645,19 @@ export class AutomationRuntime {
         if (!["text", "value", "visible", "enabled", "editable", "checked"].includes(String(condition))) throw automationError("invalid-condition", { condition });
         const objectId = await this.resolveConditionTarget(session, spec);
         if (!objectId) return { present: false, actual: null };
-        const observation = await this.callOn(this.objectSession(session, objectId), objectId, `function(condition) {
+        const targetSession = this.objectSession(session, objectId);
+        if (condition === "text" || condition === "visible") {
+          const frameId = await this.actionFrameId(session, targetSession, objectId, spec);
+          if (!await this.frameOwnersVisible(session, frameId)) return { present: true, actual: condition === "text" ? null : false };
+        }
+        const observation = await this.callOn(targetSession, objectId, `function(condition) {
           if (!this.isConnected) return { present: false, actual: null };
           let actual, invalidChecked = false;
-          if (condition === "text") actual = typeof this.innerText === "string" ? this.innerText : null;
+          if (condition === "text") actual = (${RENDERED_TEXT_SOURCE}).call(this);
           else if (condition === "value") actual = typeof this.value === "string" ? this.value : null;
           else if (condition === "visible") {
-            const rect = this.getBoundingClientRect(), style = getComputedStyle(this);
-            actual = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+            const rect = this.getBoundingClientRect();
+            actual = rect.width > 0 && rect.height > 0 && this.checkVisibility({opacityProperty:true,visibilityProperty:true,contentVisibilityAuto:true});
           } else if (condition === "enabled") actual = !(${DISABLED_STATE_SOURCE}).call(this);
           else if (condition === "editable") {
             const kind = (${TEXT_INPUT_KIND_SOURCE}).call(this);
@@ -1684,6 +1695,13 @@ export class AutomationRuntime {
       if (["textContent", "innerText", "inputValue", "getAttribute"].includes(operation)) {
         const objectId = await this.resolveOne(session, spec);
         const targetSession = this.objectSession(session, objectId);
+        if (operation === "innerText") {
+          const frameId = await this.actionFrameId(session, targetSession, objectId, spec);
+          if (!await this.frameOwnersVisible(session, frameId)) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
+          const text = await this.callOn(targetSession, objectId, `function(){return (${RENDERED_TEXT_SOURCE}).call(this)}`);
+          if (text === null) throw automationError("text-unavailable", { reason: "rendered-text-not-confirmed" });
+          return text;
+        }
         const property = operation === "inputValue" ? "value" : operation;
         return this.callOn(targetSession, objectId, `function(name){ return name === "getAttribute" ? this.getAttribute(arguments[1]) : this[name]; }`, [property, args[0]]);
       }
@@ -2613,10 +2631,10 @@ export class AutomationRuntime {
         for (const node of current) {
           if (hasText !== undefined) {
             const text = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: node.objectId,
-              functionDeclaration: "function(){return String(this.innerText===undefined?this.textContent:this.innerText).replace(/\\s+/g,' ').trim()}",
+              functionDeclaration: `function(){return (${RENDERED_TEXT_SOURCE}).call(this)}`,
               returnByValue: true });
             if (text.exceptionDetails) throw new Error(text.exceptionDetails.exception?.description || text.exceptionDetails.text);
-            if (!String(text.result?.value ?? "").toLowerCase().includes(hasText.replace(/\s+/g, " ").trim().toLowerCase())) continue;
+            if (typeof text.result?.value !== "string" || !text.result.value.replace(/\s+/g, " ").trim().toLowerCase().includes(hasText.replace(/\s+/g, " ").trim().toLowerCase())) continue;
           }
           if (has && !(await walk(node, has)).length) continue;
           filtered.push(node);
