@@ -1514,7 +1514,7 @@ export class EventLogger {
   async contextProjectionEvents(conversationId: string, afterId = -1): Promise<{ value: LogEvent[]; epoch: string }> {
     if (!Number.isSafeInteger(afterId) || afterId < -1) throw new Error("Invalid context event cursor");
     const types = [...RUN_EVENT_TYPES, "conversation.message", "conversation.branch.selected", "conversation.deleted", "conversation.restored",
-      "tool.started", "tool.finished", "tool.failed", ...CONTEXT_EVENT_TYPES, "agent.goal.continued"];
+      "tool.started", "tool.finished", "tool.failed", "automation.action.attempt", ...CONTEXT_EVENT_TYPES, "agent.goal.continued"];
     return this.readCanonicalSnapshot(async (store, floor) => {
       const start = Math.max(floor, afterId);
       const events = store.byTypes ? await store.byTypes(types, conversationId, start)

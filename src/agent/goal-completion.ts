@@ -33,9 +33,11 @@ export const GOAL_DESCRIPTION = "Finish only after all work and background jobs 
 export const GOAL_INSTRUCTIONS = "\n\nContinue until the user's outcome is achieved or a genuine user dependency prevents further progress. Plain text does not end work. Call complete_goal alone with a structured outcome and evidence from this run. A dispatched action is not proof of the outcome; cite at least one successful observation. For each effectUnknown, inspect or otherwise observe the relevant state after that action, explain what was established, and include its evidenceId in that observation's resolves array. A verified absence may permit a safe recovery action; continue to the requested outcome before reporting completion. verify_state evidence must report verified=true. Do not report a recoverable error as a user blocker.\n- complete_goal: Report a completed answer, a browser outcome supported by tool evidence, or a genuine user-dependent blocker.";
 
 type ReceiptValue = string | number | boolean | null | ReceiptValue[] | { [key: string]: ReceiptValue };
-type ActionReceipt = { input?: { [key: string]: ReceiptValue }; result?: { [key: string]: ReceiptValue }; labels?: { [key: string]: string }; truncated?: true };
+type ObservedTarget = { source: "automation.action.attempt"; order: number; role: string; name: string; ref?: string; truncated?: true };
+type ObservedTargets = { values: ObservedTarget[]; truncated?: true };
+type ActionReceipt = { observedTargets?: ObservedTarget[]; input?: { [key: string]: ReceiptValue }; result?: { [key: string]: ReceiptValue }; labels?: { [key: string]: string }; truncated?: true };
 type Evidence = { id: string; name: string; success: boolean; effectUnknown: boolean; order: number; pageObserved?: true; partialObservation?: true; receipt?: ActionReceipt };
-type Cache = { runId: string; cursor: number; epoch?: string; entries: Map<string, Evidence> };
+type Cache = { runId: string; cursor: number; epoch?: string; entries: Map<string, Evidence>; targets: Map<string, ObservedTargets> };
 const caches = new WeakMap<EventLogger, Map<string, Cache>>();
 
 function object(value: unknown): Record<string, unknown> {
@@ -47,8 +49,8 @@ function verification(output: unknown): unknown {
   return object(value.verification).verified ?? result.verified ?? (value.envelopeWrapped === true ? object(result.result).verified : undefined) ?? value.verified;
 }
 /** Retain effect identities, never raw page bodies, file bytes or large inputs. */
-function actionReceipt(input: unknown, output: unknown): ActionReceipt {
-  const receipt: ActionReceipt = {};
+function actionReceipt(input: unknown, output: unknown, observed?: ObservedTargets): ActionReceipt {
+  const receipt: ActionReceipt = { ...(observed?.values.length ? { observedTargets: observed.values } : {}), ...(observed?.truncated ? { truncated: true } : {}) };
   let remaining = 4096;
   const short = (value: unknown, depth = 0): ReceiptValue | undefined => {
     if (value === null || typeof value === "boolean") return value;
@@ -117,7 +119,7 @@ function actionReceipt(input: unknown, output: unknown): ActionReceipt {
   }
   return receipt;
 }
-function projectEvidence(id: string, name: string, output: unknown, failed: boolean, order: number, input?: unknown): Evidence {
+function projectEvidence(id: string, name: string, output: unknown, failed: boolean, order: number, input?: unknown, observed?: ObservedTargets): Evidence {
   const value = object(output);
   const snapshot = object(value.pageSnapshot);
   const pageObserved = typeof snapshot.observationId === "string" && snapshot.observationId.length > 0
@@ -125,7 +127,7 @@ function projectEvidence(id: string, name: string, output: unknown, failed: bool
     && ["full", "delta"].includes(String(snapshot.mode)) && Array.isArray(snapshot.items)
     && snapshot.pending !== true && snapshot.unavailable !== true && snapshot.partial !== true;
   return { id, name, order, effectUnknown: object(value.error).effectUnknown === true,
-    ...(!OBSERVATION_TOOLS.has(name) || name === "get_job" ? { receipt: actionReceipt(input, output) } : {}),
+    ...(!OBSERVATION_TOOLS.has(name) || name === "get_job" ? { receipt: actionReceipt(input, output, observed) } : {}),
     ...(pageObserved ? { pageObserved: true as const } : {}),
     ...(name === "inspect_page" && value.partial === true ? { partialObservation: true as const } : {}),
     success: !failed && value.ok !== false && !["running", "blocked", "failed", "cancelled", "interrupted"].includes(String(value.state))
@@ -151,21 +153,43 @@ export async function runEvidence(logger: EventLogger, conversationId: string, r
   let runs = caches.get(logger);
   if (!runs) { runs = new Map(); caches.set(logger, runs); }
   let cache = runs.get(conversationId);
-  if (!cache || cache.runId !== runId) { cache = { runId, cursor: -1, entries: new Map() }; runs.set(conversationId, cache); }
+  if (!cache || cache.runId !== runId) { cache = { runId, cursor: -1, entries: new Map(), targets: new Map() }; runs.set(conversationId, cache); }
   let batch = await logger.contextProjectionEvents(conversationId, cache.cursor);
   if (cache.epoch && cache.epoch !== batch.epoch) {
-    cache = { runId, cursor: -1, entries: new Map() }; runs.set(conversationId, cache);
+    cache = { runId, cursor: -1, entries: new Map(), targets: new Map() }; runs.set(conversationId, cache);
     batch = await logger.contextProjectionEvents(conversationId);
   }
   cache.epoch = batch.epoch;
   for (const event of batch.value) {
     cache.cursor = Math.max(cache.cursor, event.id);
-    if (event.runId !== runId || !event.toolCallId || (event.type !== "tool.finished" && event.type !== "tool.failed")) continue;
+    if (event.runId !== runId || !event.toolCallId) continue;
     const content = object(fromLogValue(event.content, event.valueEncoding));
+    if (event.type === "automation.action.attempt") {
+      // These candidates were resolved and validated by browser automation.
+      // Requested selectors and post-action snapshots cannot establish which
+      // control was actually actionable before it disappeared or changed.
+      if (content.reason !== "actionable" || content.candidateCount !== 1 || !Array.isArray(content.candidates) || content.candidates.length !== 1) continue;
+      const candidate = object(content.candidates[0]);
+      if (typeof candidate.role !== "string" || typeof candidate.name !== "string") continue;
+      const target: ObservedTarget = { source: "automation.action.attempt", order: event.id,
+        role: candidate.role.slice(0, 80), name: candidate.name.slice(0, 256),
+        ...(typeof candidate.ref === "string" ? { ref: candidate.ref.slice(0, 256) } : {}),
+        ...(candidate.role.length > 80 || candidate.name.length > 256 || typeof candidate.ref === "string" && candidate.ref.length > 256 ? { truncated: true as const } : {}) };
+      const observed = cache.targets.get(event.toolCallId) ?? { values: [] };
+      if (!observed.values.some(value => value.role === target.role && value.name === target.name && value.ref === target.ref)) {
+        if (observed.values.length < 8) observed.values.push(target);
+        else observed.truncated = true;
+      }
+      cache.targets.set(event.toolCallId, observed);
+      const receipt = cache.entries.get(event.toolCallId)?.receipt;
+      if (receipt) { receipt.observedTargets = observed.values; if (observed.truncated) receipt.truncated = true; }
+      continue;
+    }
+    if (event.type !== "tool.finished" && event.type !== "tool.failed") continue;
     if (typeof content.toolName !== "string" || content.toolName === "complete_goal") continue;
     cache.entries.set(event.toolCallId, projectEvidence(event.toolCallId, content.toolName,
       fromLogValue(event.output, event.valueEncoding), event.type === "tool.failed", event.id,
-      fromLogValue(event.input, event.valueEncoding)));
+      fromLogValue(event.input, event.valueEncoding), cache.targets.get(event.toolCallId)));
   }
   return [...cache.entries.values()];
 }

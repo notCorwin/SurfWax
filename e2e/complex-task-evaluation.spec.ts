@@ -1,7 +1,11 @@
 import { expect } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventLogger } from "../src/logging";
+import { createMemoryEventStore } from "../src/memory-event-store";
+import { actionHistory, runEvidence } from "../src/agent/goal-completion";
 import {
+  assistantResponse,
   commandResponse,
   configure,
   dispose,
@@ -122,6 +126,7 @@ for (const seed of [17])
           (window as any).businessOrders.push(submitted);
           document.querySelector("#status")!.textContent =
             "Submitted " + submitted.order;
+          document.querySelector("#submit")!.remove();
         };
       });
       const targetInFrame = (by: string, value: string) => ({
@@ -213,13 +218,19 @@ for (const seed of [17])
           );
         },
         (request) => {
-          checkpoints.verify = lastTool(request);
-          return textResponse("SCRIPTED_TASK_DONE");
+          const result = lastTool(request);
+          checkpoints.verify = result;
+          return assistantResponse({ content: "SCRIPTED_TASK_DONE", tool_calls: [{ id: "complete-order", type: "function", function: {
+            name: "complete_goal", arguments: JSON.stringify({ taskType: "browser", status: "completed", evidence: [
+              { evidenceId: (checkpoints.frames as any).evidenceId, observation: "The initial frame observation identified the checkout before submission." },
+              { evidenceId: result.evidenceId, observation: "The final status confirms the requested order was submitted." },
+            ] }),
+          } }] });
         },
         textResponse("跨框架订单"),
       );
       await (
-        await configure(opened.context, opened.page, provider.baseURL)
+        await configure(opened.context, opened.page, provider.baseURL, undefined, { goalMode: true })
       ).close();
       await target.bringToFront();
       await opened.page
@@ -232,6 +243,9 @@ for (const seed of [17])
         "SCRIPTED_TASK_DONE",
         { timeout: 60_000 },
       );
+
+      await expect.poll(async () => (await readEvents(opened.page)).filter(event => event.type === "conversation.finished").length).toBe(1);
+      await expect(frame.locator("#submit")).toHaveCount(0);
 
       // The business judge reads the application state independently of the LLM
       // and of tool receipts; the model's final text is never the pass criterion.
@@ -262,6 +276,26 @@ for (const seed of [17])
         result: { verified: true },
       });
       events = await readEvents(opened.page);
+      const reviewRequest = provider.requests.find(request => request.messages?.some((message: any) => message.role === "system" && String(message.content).startsWith("SURFWAX_GOAL_REVIEW")));
+      expect(reviewRequest).toBeTruthy();
+      const reviewInput = JSON.parse(reviewRequest!.messages.findLast((message: any) => message.role === "user").content);
+      const submitted = reviewInput.actionHistory.find((entry: any) => entry.receipt?.input?.target?.id === buttonRef);
+      const attempt = events.find(event => event.type === "automation.action.attempt" && event.toolCallId === "submit-order" && event.content?.reason === "actionable");
+      expect(submitted?.receipt).toMatchObject({ observedTargets: [{ source: "automation.action.attempt", order: attempt!.id, role: "button", name: "Submit order", ref: buttonRef }] });
+      expect(submitted.receipt.labels?.target).toBeUndefined();
+      // A fresh projection must retain the same identity from durable events,
+      // even though the successful action removed the button from the page.
+      const replay = new EventLogger({ store: createMemoryEventStore(structuredClone(events)) });
+      const finished = events.find(event => event.type === "conversation.finished")!;
+      const replayed = actionHistory(await runEvidence(replay, finished.conversationId, finished.runId));
+      expect(replayed.find(entry => entry.receipt.input?.target && (entry.receipt.input.target as any).id === buttonRef)?.receipt.observedTargets).toEqual(submitted.receipt.observedTargets);
+      expect(reviewInput.context.evidenceOrder).toContain("other entries newest first");
+      const observed = reviewInput.context.excerpts.filter((entry: any) => entry.role !== "user");
+      const resultExcerpt = (toolCallId: string) => observed.findIndex((entry: any) => entry.excerpt.some((part: any) => part.type === "tool-result" && part.toolCallId === toolCallId));
+      expect(resultExcerpt("frames")).toBeGreaterThan(resultExcerpt("submit-order"));
+      expect(resultExcerpt("verify-status")).toBeLessThan(resultExcerpt("submit-order"));
+      expect(observed.every((entry: any) => Number.isSafeInteger(entry.order))).toBe(true);
+      expect(observed.map((entry: any) => entry.order)).toEqual(observed.map((entry: any) => entry.order).sort((left: number, right: number) => right - left));
       const terminals = events.filter(
         (event) =>
           ["tool.finished", "tool.failed"].includes(event.type) &&

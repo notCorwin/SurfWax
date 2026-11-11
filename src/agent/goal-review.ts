@@ -15,7 +15,7 @@ Return only JSON: {"accept":boolean,"reason":string,"remaining":string[]}.
 remaining lists only additional agent actions or observations required before the proposed status can be accepted. If accept=true, remaining must be empty. For an accepted blocked proposal, the required user action belongs to proposedGoal.userAction; do not put that user action or work after the dependency is resolved in remaining.
 Accept completed only if every requested outcome is established AND assistant text in the conversation delivers the requested facts, source links and other requested output. The completion tool does not accept a summary; do not require repeated output or an unsolicited recap. An action returning success is not business success. An invalid search yielding zero results does not establish absence. A rejected submission does not establish the requested successful outcome. Do not invent missing requirements or require optional extras.
 Accept blocked only if observed evidence establishes authentication, missing user-only information or a genuine external dependency. A failed locator, rejected action or untried recovery alone is not an external dependency. The requested user action must address that proven dependency.
-actionHistory is the complete canonical action receipt ledger for this run, grouped with count and first/last order. Use it to check cumulative constraints and earlier attempts even when older conversation excerpts are omitted. Receipt labels come from post-action snapshots, so combine them with original targets and earlier evidence rather than treating them as immutable dispatch identities. Count ALL performed submissions, including rejected submissions or submitting the wrong data: a later corrected file does not reset a requested "submit once" constraint. Never trust an assistant's claimed action count over this ledger. Declining before dispatch is distinct from a performed action. An irreversibly violated requirement cannot be declared completed; require an observed, legitimate recovery or an honest, evidence-backed dependency.
+actionHistory is the complete canonical action receipt ledger for this run, grouped with count and first/last order. Use it to check cumulative constraints and earlier attempts even when older conversation excerpts are omitted. observedTargets come from successful pre-dispatch actionability checks, with their canonical event order and source; they describe observed candidates, not requested selectors or proof of the business outcome. Other receipt labels come from post-action snapshots, so combine them with original targets and earlier evidence rather than treating them as immutable dispatch identities. Count ALL performed submissions, including rejected submissions or submitting the wrong data: a later corrected file does not reset a requested "submit once" constraint. Never trust an assistant's claimed action count over this ledger. Declining before dispatch is distinct from a performed action. An irreversibly violated requirement cannot be declared completed; require an observed, legitimate recovery or an honest, evidence-backed dependency.
 Check the entire objective, including follow-up corrections. Honest admission of missing work is not completion. When evidence excerpts are insufficient, return accept=false and specify the targeted observation still needed, rather than asserting a failure or success. Be concise and actionable.`;
 
 const verdictSchema = z.object({ accept: z.boolean(), reason: z.string().trim().min(1), remaining: z.array(z.string().trim().min(1)) }).strict();
@@ -24,7 +24,7 @@ export type GoalVerdict = z.infer<typeof verdictSchema>;
 // The reviewer reads bounded excerpts, never a second unbounded copy of page
 // history. Excerpt boundaries are explicit; missing evidence cannot pass review.
 export function goalReviewContext(messages: readonly ModelMessage[], maxChars = 48_000, requirements?: readonly ModelMessage[], evidenceIds: readonly string[] = []): string {
-  const entries: Array<{ role: string; excerpt: unknown; truncated: boolean }> = [];
+  const entries: Array<{ role: string; excerpt: unknown; truncated: boolean; order?: number }> = [];
   let available = Math.max(0, maxChars);
   const excerpt = (source: unknown, budget: number): { value: unknown; truncated: boolean; used: number } => {
     let remaining = budget, truncated = false;
@@ -84,17 +84,21 @@ export function goalReviewContext(messages: readonly ModelMessage[], maxChars = 
   let observed = 0;
   available = Math.min(48_000, available);
   const cited = new Set(evidenceIds);
-  const observations = relevant.filter((message) => message.role !== "user").reverse().sort((left, right) => {
+  const observations = relevant.flatMap((message, order) => message.role === "user" ? [] : [{ message, order }]).reverse().sort((left, right) => {
     const referenced = (message: ModelMessage) => Array.isArray(message.content) && message.content.some((part) => part.type === "tool-result" && cited.has(part.toolCallId));
-    return Number(referenced(right)) - Number(referenced(left));
+    return Number(referenced(right.message)) - Number(referenced(left.message));
   });
-  for (const message of observations) {
+  const selected: typeof entries = [];
+  for (const { message, order } of observations) {
     if (available <= 0) break;
     const part = excerpt(message.content, Math.min(8_000, available));
-    entries.push({ role: message.role, excerpt: part.value, truncated: part.truncated });
+    selected.push({ role: message.role, excerpt: part.value, truncated: part.truncated, order });
     available -= part.used; observed++;
   }
-  return JSON.stringify({ excerpts: entries, requirementsTruncated, omittedMessages: observations.length - observed, evidenceOrder: "original user requirements first; other entries newest first" });
+  // Citation priority chooses what fits; it must not rewrite observation time.
+  entries.push(...selected.sort((left, right) => right.order! - left.order!));
+  return JSON.stringify({ excerpts: entries, requirementsTruncated, omittedMessages: observations.length - observed,
+    evidenceOrder: "original user requirements first; other entries newest first; order is the original conversation position" });
 }
 
 /** Only model-independent user messages, captured before history compaction. */
