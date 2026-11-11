@@ -77,7 +77,7 @@ export function partitionArtifact(value: unknown): { graph: ArtifactGraph; parts
 }
 
 /** Read only selected sections; reconstruct the reachable V5 graph when values contain aliases or cycles. */
-export async function readPartitionedArtifact(graph: ArtifactGraph, read: Reader, selection: ArtifactSelection, id: number, readBuckets: BucketReader): Promise<unknown> {
+export async function readPartitionedArtifact(graph: ArtifactGraph, read: Reader, selection: ArtifactSelection, id: number, readBuckets: BucketReader, metadataOnly = false): Promise<unknown> {
   let synthetic: any;
   const requests = new Map<string, Promise<ArtifactPart[]>>();
   const parts = (node: number, section?: string, first?: number, last?: number) => {
@@ -203,6 +203,17 @@ export async function readPartitionedArtifact(graph: ArtifactGraph, read: Reader
     }
     const entry = await property(node, info, String(part));
     if (entry === undefined) throw missing(); token = entry;
+  }
+  if (metadataOnly) {
+    if (Array.isArray(token) && token[0] === 0) {
+      const value = token[1];
+      return { type: typeof value, ...(typeof value === "string" ? { total: value.length } : isText(value) ? { type: "string", total: value.l } : {}) };
+    }
+    if (!Array.isArray(token) || token[0] !== 1)
+      return { type: token?.[0] === 2 ? "undefined" : token?.[0] === 3 ? "number" : "bigint" };
+    const info = await header(token[1]);
+    const total = info.type === "array" ? info.length : ["map", "set"].includes(info.type) ? info.size : info.type === "buffer" ? info.byteLength : info.type === "view" ? info.length : undefined;
+    return { type: info.type, ...(total === undefined ? {} : { total }), keys: info.selectionKeys?.filter((key: unknown) => typeof key === "string") };
   }
   if (selection.offset === undefined && selection.limit === undefined) return materialize(token);
   const offset = Math.max(0, Math.trunc(selection.offset ?? 0) || 0);

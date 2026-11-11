@@ -1641,7 +1641,15 @@ export class EventLogger {
     return loaded.value;
   }
 
+  async resultMetadata(id: number, path: Array<string | number>, conversationId?: string): Promise<{ type: string; total?: number; keys?: string[] }> {
+    return await this.readResult(id, { path }, conversationId, true) as { type: string; total?: number; keys?: string[] };
+  }
+
   async result(id: number, selection: { path?: string | Array<string | number>; offset?: number; limit?: number } = {}, conversationId?: string): Promise<unknown> {
+    return this.readResult(id, selection, conversationId);
+  }
+
+  private async readResult(id: number, selection: { path?: string | Array<string | number>; offset?: number; limit?: number }, conversationId?: string, metadataOnly = false): Promise<unknown> {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid result event ID");
     for (const field of ["offset", "limit"] as const) {
       const value = selection[field];
@@ -1672,7 +1680,7 @@ export class EventLogger {
           return part.section.startsWith(prefix) && /^(?:0|[1-9]\d*)$/.test(suffix)
             && Number.isSafeInteger(bucket) && bucket >= first && bucket <= last;
         });
-      });
+      }, metadataOnly);
       return { partitioned: true as const, value };
     });
     if (loaded.partitioned) return loaded.value;
@@ -1692,6 +1700,10 @@ export class EventLogger {
       if (value === null || typeof value !== "object" && typeof value !== "string" || !Object.hasOwn(Object(value), part))
         throw Object.assign(new Error(`Tool result ${id} has no path ${JSON.stringify(path)}`), { code: "result-path-not-found" });
       value = (value as any)[part];
+    }
+    if (metadataOnly) {
+      const total = typeof value === "string" || Array.isArray(value) ? value.length : isMap(value) ? mapSizeOf(value) : isSet(value) ? setSizeOf(value) : isArrayBuffer(value) ? arrayBufferLength(value) : ArrayBuffer.isView(value) ? viewLayout(value).length : undefined;
+      return { type: typeof value, ...(total === undefined ? {} : { total }), ...(value && typeof value === "object" ? { keys: Object.keys(value).filter(key => key.length <= 128).slice(0, 16) } : {}) };
     }
     if (selection.offset !== undefined || selection.limit !== undefined) {
       if (!Array.isArray(value) && typeof value !== "string" && !isMap(value) && !isSet(value) && !isArrayBuffer(value) && !ArrayBuffer.isView(value)) {

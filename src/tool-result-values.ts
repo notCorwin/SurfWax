@@ -1,3 +1,4 @@
+export const TOOL_RESULT_BYTES = 8 * 1024;
 import { arrayBufferLength, arrayViewName, assertPlainGraphObject, dateISOString, dateValue, graphProperties, isArrayBuffer, isDate, isMap, isRegExp, isSet, mapEntries, regexpFlagString, regexpSource, setValues, viewLayout } from "./log-graph";
 const RESULT_SIDECAR_FIELDS = new Set(["evidenceId", "resultType", "undefinedPaths", "holePaths", "numberPaths", "bigintPaths", "typePaths", "undefinedCount", "holeCount", "numberCount", "bigintCount", "typeCount", "undefinedPathsAccess", "holePathsAccess", "numberPathsAccess", "bigintPathsAccess", "typePathsAccess", "undefinedPathsOversizedItem", "holePathsOversizedItem", "numberPathsOversizedItem", "bigintPathsOversizedItem", "typePathsOversizedItem", "pathsNote", "envelopeWrapped"]);
 

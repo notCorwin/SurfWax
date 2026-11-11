@@ -1,0 +1,102 @@
+{
+  "base": "9dd4bdaa648830b4f5936f9a12acc2a5ec68386f",
+  "original": {
+    "scenario": "long-manifest",
+    "originalClassification": "unknown",
+    "originalOutcome": "timed_out",
+    "originalReasons": [
+      "conversation_outcome_unknown",
+      "business_incorrect",
+      "lifecycle_unknown",
+      "jobs_unknown"
+    ],
+    "report": ".dev/verification/release-acceptance-20261112-luna/reports/1794420475760-17-3c3da653-117f-4fba-8700-a3e9b4adfcad.json",
+    "events": ".dev/verification/release-acceptance-20261112-luna/events/1794420475760-17-3c3da653-117f-4fba-8700-a3e9b4adfcad.json",
+    "reportSha256": "6dd701946e81f0065ae9a555b103f97cf9835924dc9bd1c7b99def15b059bbfa",
+    "eventsSha256": "60b95734864a532fedebdd3e4207cb6a0c1bf5a58b4ed169bac4c1dd83d1e33f"
+  },
+  "rawDuplicateEvidence": {
+    "artifactIds": [
+      76,
+      91,
+      104
+    ],
+    "paths": [
+      [
+        "elements"
+      ],
+      [
+        "result"
+      ],
+      [
+        "result"
+      ]
+    ],
+    "items": 60,
+    "identicalContentSha256": "be3fecfc54ccf6f36cab92f3e78e8d02d768e2280d7418c433a677ed9c4fd2b4",
+    "terminalIds": [
+      92,
+      105
+    ],
+    "oldRecommendedOffset": 0,
+    "oldRecommendedLimit": 23
+  },
+  "regression": {
+    "node": "24.22.2",
+    "browser": {
+      "title": [
+        "artifact-reading.spec.ts",
+        "large HTTP payloads and artifact reads preserve exact absolute progress without duplicate storage"
+      ],
+      "status": "passed",
+      "browser": "157.0.8103.39",
+      "project": "current",
+      "profile": "/var/folders/6w/xd0vzpj97rgbskfk5kd7vxrh0000gn/T/side-agent-e2e-YsYY55"
+    },
+    "developmentOnly": true,
+    "headless": true,
+    "noModelOrProviderApi": true,
+    "command": "npx --yes --package=node@24 node scripts/run-browser-tests.mjs e2e e2e/artifact-reading.spec.ts",
+    "report": ".dev/artifacts/1794423837233-e2e-bd6ad532-7af6-4f29-bb14-f419f428af13/html/index.html",
+    "reportSha256": "552343269eef42bbf71806c84de81f6d764efe2a91b656f04082002e4d5ec7f6",
+    "observed": {
+      "httpPages": 58,
+      "exactHttpBytes": 234191,
+      "exactItems": 60,
+      "stableArtifact": 167,
+      "oversizedCode": "artifact-selection-too-large",
+      "typedSidecars": true
+    },
+    "evidencePath": ".dev/artifacts/1794423837233-e2e-bd6ad532-7af6-4f29-bb14-f419f428af13/results/artifact-reading-large-HTT-11e82-s-without-duplicate-storage-current/artifact-reading.json",
+    "assertions": [
+      "HTTP access selects result.body; JSON containing 1200 items reconstructed exactly via absolute string ranges.",
+      "60 original items requested with limit100 return bounded pages; source ref remains stable; all items reconstructed exactly.",
+      "No new tool.result.data events during either pagination sequence.",
+      "Entire delivered response including evidenceId stays within unchanged 8192-byte budget.",
+      "Oversized object/array item/string item returns no-progress partial error and a useful narrower path, without nextAccess; narrowing succeeds.",
+      "Array holes, non-finite numbers and bigints retain relative sidecars; partitioned bigint scalar remains readable.",
+      "EventLogger.result and internal artifacts.read still return native raw values."
+    ]
+  },
+  "checks": {
+    "tsc --noEmit": "passed",
+    "vitest run": {
+      "files": 7,
+      "tests": 24,
+      "status": "passed"
+    },
+    "git diff --check": "passed"
+  },
+  "boundaries": [
+    "No real model rerun; original unknown/timed_out classification unchanged.",
+    "No full UI or MV3 restart/persistent recovery regression run.",
+    "Map/Set/binary pagination retains the existing native codec; this Chrome regression covers array/string paging and typed scalar sidecars, not exhaustive binary forms."
+  ],
+  "integration": {
+    "inspectedOnly": "d95f01f6e9e6e09ed24ae6db784e1fc02e0f4d75",
+    "noCherryPickOrDependency": true,
+    "nativeArtifactsReadRawValueContract": "unchanged",
+    "catalogNote": "Both independent changes increment v45 to v46; integrator should give their combined catalog a fresh version."
+  },
+  "review": "Self-reviewed against AGENTS.md/HISTORY and d95f01f6; no subagent or Markdown changes per explicit task instruction."
+}

@@ -1,3 +1,4 @@
+import { readArtifactPage } from "./artifact-read";
 import type { EventLogger } from "../logging";
 import type { BrowserTarget } from "../types";
 import { AutomationRuntime, FILE_UPLOAD_FUNCTION, LocatorFacade } from "./automation";
@@ -570,8 +571,8 @@ export class ChromeExecutor {
     const combined = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
     try {
       throwIfAborted(combined);
-      const result = await this.awaitAbort(this.logger.result(input.artifactId, { path: input.path, offset: input.offset, limit: input.limit }, context.conversationId), combined);
-      return { ok: true, result };
+      const result = await this.awaitAbort(readArtifactPage(this.logger, input, context.conversationId, combined, context.logIdentity?.toolCallId ?? context.toolCallId), combined);
+      return result;
     } finally { if (timer !== undefined) clearTimeout(timer); }
   }
 

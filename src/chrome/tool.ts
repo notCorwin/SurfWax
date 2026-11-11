@@ -1,5 +1,5 @@
 import { logIO } from "../log-io";
-import { normalizationExceedsBudget, normalizeResultEnvelope } from "../tool-result-values";
+import { normalizationExceedsBudget, normalizeResultEnvelope, TOOL_RESULT_BYTES } from "../tool-result-values";
 import { isArrayBuffer } from "../log-graph";
 import { dynamicTool, type ToolCallRepairFunction } from "ai";
 import { z } from "zod";
@@ -15,7 +15,7 @@ import { createDeadline } from "../deadline";
 import { ARTIFACT_READ_NOTE, artifactReadSelection, nativeArtifactPageLimit as nativePageLimit } from "../artifact-selection";
 
 const timeoutMs = z.number().int().positive().optional();
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v46";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v47";
 export const inspectInputSchema = z.object({ timeoutMs, since: z.string().min(1).max(256).optional().describe("Compare with this completely delivered observation ID from the same tab, run and scope. Omit to reuse the latest valid baseline automatically."), full: z.boolean().optional().describe("Request a complete new baseline instead of an automatic delta when prior rows are unavailable."), tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional().describe("Restrict inspection to one matching element. To inspect a frame use region:{by:\"css\",value:\"html\",frame:{ref:\"frameRef\"}}; frame is not a top-level inspect_page field. Prefer a structured target. A plain string is a CSS selector, except supported locator expressions such as getByRole('button', {name:'Save'})."),
   fields: z.array(z.enum(["text", "state", "actions"])).min(1).optional().describe("Fields to include; defaults to visible text, state and measured layout. IDs are always present; actionable=true identifies a single element usable as target:{id}. Request actions for supported action hints."), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -164,7 +164,9 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? jobRef?.info.error ?? (result as any).result?.error : undefined;
             const artifact = (result as any)?.result?.artifact;
             const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: recoveryError(failure, definition.name) } : result;
-            if (definition.name === "inspect_page" && envelope && typeof envelope === "object"
+            if (definition.name === "read_artifact") {
+              output = result;
+            } else if (definition.name === "inspect_page" && envelope && typeof envelope === "object"
               && Object.hasOwn(envelope, "observationId") && Object.hasOwn(envelope, "items")) {
               inspectionDelivery = inspectionPageDelivery(result, identity?.toolCallId ?? toolCallId, value.cursor !== undefined);
               output = envelope;
@@ -266,7 +268,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
   })]));
 }
 
-const LARGE_RESULT_BYTES = 8 * 1024;
+const LARGE_RESULT_BYTES = TOOL_RESULT_BYTES;
 const INSPECTION_RESULT_BYTES = 16 * 1024;
 // Only the native, already-paginated inspection envelope gets the larger
 // allowance. Unknown wrappers and additional fields retain artifact handling.

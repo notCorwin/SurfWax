@@ -16,6 +16,16 @@ export function nativeArtifactPageLimit(value: unknown): number | undefined {
 /** Reuse the bounded search used by pagination errors before an invalid read occurs.
  * Inspect data properties only: describing a result must never execute getters. */
 export async function artifactReadSelection(value: unknown, path: readonly (string | number)[]) {
+  // HTTP metadata (URL, headers, status text) is not the response payload.
+  // Inspect own data properties only, including for worker/native results.
+  if (value && typeof value === "object") {
+    const body = Object.getOwnPropertyDescriptor(value, "body");
+    const status = Object.getOwnPropertyDescriptor(value, "status")?.value;
+    if (body && "value" in body && typeof status === "number") {
+      value = body.value;
+      path = [...path, "body"];
+    }
+  }
   const selectedPath = nativeArtifactPageLimit(value) !== undefined ? [...path] : await artifactPagePath(value, path, {
     keys: (item) => item && typeof item === "object" ? Object.keys(item) : [],
     field: (item, key) => Object.getOwnPropertyDescriptor(item, key)?.value,
@@ -72,6 +82,7 @@ export async function artifactPagePath<T>(
 ): Promise<(string | number)[] | undefined> {
   const queue = [{ value: root, path: [...path] }];
   let stringPath: (string | number)[] | undefined,
+    payloadStringPath: (string | number)[] | undefined,
     remaining = 32,
     incomplete = false;
   while (queue.length && remaining > 0) {
@@ -92,10 +103,13 @@ export async function artifactPagePath<T>(
         kind = await reader.kind(value),
         next = [...current.path, key];
       if (kind === "collection") return next;
-      if (kind === "string") stringPath ??= next;
+      if (kind === "string") {
+        stringPath ??= next;
+        if (["body", "text", "html", "content"].includes(key)) payloadStringPath ??= next;
+      }
       if (kind === "object" && next.length < path.length + 2)
         queue.push({ value, path: next });
     }
   }
-  return incomplete ? undefined : stringPath;
+  return incomplete ? undefined : payloadStringPath ?? stringPath;
 }
