@@ -3,6 +3,8 @@ import { abortAllConversationWork } from "../agent/coordinator";
 import { ensureConversationPrompt, PROMPT_TOOLS } from "../agent/prompt";
 import { createAgent, GOAL_INSTRUCTIONS, GOAL_TOOLS } from "../agent/runner";
 import { ContextCompactor } from "../agent/compaction";
+import { resolveModelLimit } from "../agent/model-limits";
+import { modelDiagnosticContext } from "../agent/diagnostics";
 import { createModel } from "../agent/model";
 import { ensureAutomaticContextSummary } from "../agent/context-choice";
 import { reasoningSettingsFor } from "../agent/reasoning";
@@ -42,8 +44,10 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
       await reasoning.ready;
       const languageModel = await createModel(config, logger, conversationId, { signal });
       signal.throwIfAborted();
+      const modelLimit = await resolveModelLimit(config, { signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
+      signal.throwIfAborted();
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt, branchIds);
-      return createAgent({ model: config, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor, logger, conversationId,
+      return createAgent({ model: config, modelLimit, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor, logger, conversationId,
         instructions: systemPrompt, prompt, signal, onResponse, shouldYield, contextAnchor, goalMode,
         compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal, prompt }) });
     }, logger, conversationId, () => executor.endRun(), async (signal) => {

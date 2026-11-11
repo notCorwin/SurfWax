@@ -1,8 +1,7 @@
-import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { runEvaluation } from "./evaluation/run-evaluation";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { promisify } from "node:util";
 import {
   closeServer,
   commandResponse,
@@ -12,50 +11,6 @@ import {
   textResponse,
   type MockResponse,
 } from "./fixtures";
-
-async function runHarness(
-  baseURL: string,
-  directory: string,
-  scenario = "cross-frame-order",
-  timeoutMs = 90_000,
-  extraEnv: Record<string, string> = {},
-  signal?: AbortSignal,
-) {
-  // The nested evaluator shares the outer test's installed Chrome and dev server.
-  const executablePath = test.info().project.use.launchOptions?.executablePath;
-  return promisify(execFile)(
-    process.execPath,
-    [
-      resolve("node_modules/@playwright/test/cli.js"),
-      "test",
-      "e2e/real-model-evaluation.spec.ts",
-      "--retries=0",
-      "--reporter=line",
-      "--trace=off",
-      `--output=${resolve(directory, "playwright")}`,
-    ],
-    {
-      signal,
-      timeout: timeoutMs + 30_000,
-      maxBuffer: 4 * 1024 * 1024,
-      env: {
-        ...process.env,
-        ...(executablePath ? { SURFWAX_CHROME_PATH: executablePath } : {}),
-        SURFWAX_REAL_MODEL_EVAL: "1",
-        SURFWAX_EVAL_PROVIDER: "local-mock",
-        SURFWAX_EVAL_MODEL: "test-model",
-        SURFWAX_EVAL_BASE_URL: baseURL,
-        SURFWAX_EVAL_API_KEY: "local-test-secret",
-        SURFWAX_EVAL_SCENARIO: scenario,
-        SURFWAX_EVAL_SEED: "17",
-        SURFWAX_EVAL_TIMEOUT_MS: String(timeoutMs),
-        SURFWAX_EVAL_REPORT_DIR: resolve(directory, "reports"),
-        SURFWAX_EVIDENCE_PATH: resolve(directory, "evidence"),
-        ...extraEnv,
-      },
-    },
-  );
-}
 
 async function readReport(directory: string) {
   const reports = await readdir(resolve(directory, "reports"));
@@ -171,16 +126,22 @@ test("a completed order with an unfinished background job remains unknown", asyn
   const provider = await startProvider(responses);
   const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
   try {
-    const failure = await runHarness(
-      provider.baseURL,
-      directory,
-      "cross-frame-order",
-      20_000,
-    ).then(
+    const failure = await runEvaluation({
+      upstream: provider.baseURL,
+      key: "local-test-secret",
+      providerName: "local-mock",
+      model: "test-model",
+      scenario: "cross-frame-order",
+      seed: 17,
+      taskTimeoutMs: 20_000,
+      suiteIdentity: null,
+      extensionDirectory: resolve(process.env.SURFWAX_EXTENSION_PATH!),
+      reportDirectory: resolve(directory, "reports"),
+    }).then(
       () => null,
       (error: unknown) => error,
     );
-    expect(failure).toMatchObject({ code: 1 });
+    expect(failure).toMatchObject({ message: "Evaluation did not complete with the required results; see the report" });
     expect(accepted).toMatchObject({ accepted: true, complete: false });
     expect(await readReport(directory)).toMatchObject({
       outcome: "timed_out",
@@ -191,6 +152,35 @@ test("a completed order with an unfinished background job remains unknown", asyn
       jobsSettled: null,
       reasons: expect.arrayContaining(["jobs_unknown"]),
     });
+  } finally {
+    await closeServer(provider.server);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test("closes evaluation resources when report persistence fails", async () => {
+  const provider = await startProvider([textResponse("Done"), textResponse("Order")]);
+  const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-cleanup-"));
+  const reportDirectory = resolve(directory, "reports");
+  const resources = () => process.getActiveResourcesInfo()
+    .filter((type) => type === "TCPServerWrap" || type === "ProcessWrap").sort();
+  const before = resources();
+  try {
+    await writeFile(reportDirectory, "not a directory");
+    await expect(runEvaluation({
+      upstream: provider.baseURL,
+      key: "local-test-secret",
+      providerName: "local-mock",
+      model: "test-model",
+      scenario: "cross-frame-order",
+      seed: 17,
+      taskTimeoutMs: 1,
+      suiteIdentity: null,
+      extensionDirectory: resolve(process.env.SURFWAX_EXTENSION_PATH!),
+      reportDirectory,
+    })).rejects.toMatchObject({ code: "EEXIST" });
+    await expect.poll(resources).toEqual(before);
   } finally {
     await closeServer(provider.server);
     await rm(directory, { recursive: true, force: true });

@@ -58,6 +58,8 @@
 
 请求容量判断集中在 `src/agent/context-budget.ts`：固定提示和工具定义先检查，超过自动压缩阈值时按增长保护决定是否压缩，最终仍必须检查完整请求是否超出输入预算。运行器负责提供压缩、补充浏览器输入和持久化适配；压缩后重新计入补充输入，不能只检查摘要大小。
 
+模型限制由装配层解析并作为本次运行的快照传给运行器；压力估算和摘要生成也接收明确的限制，不自行读取模型目录。图像输入优先服从用户显式设置，否则使用同一限制快照中的输入模态。压缩和运行器测试使用真实事件记录器及内存事件存储，避免用全局网络替身或手写日志接口模拟这些边界。该隔离验证不替代模型目录解析、取消及浏览器端到端行为的验证。
+
 ## 工作模式与完成判定
 
 ### 工作模式通过显式工具结束
@@ -421,3 +423,9 @@ ShadowRoot 在拓扑采集和对象解析期间被添加或移除时，使当前
 保留的 SDK 契约通过真实 SDK 和模拟 HTTP 响应检查 OpenAI Responses、Anthropic Messages、Google Interactions 与 OpenAI 兼容 Chat Completions 的工具结果往返、恢复和取消；它使用显式端点和 Custom Provider 配置，不证明普通 Provider 的自动端点选择或其他 SDK 的行为。确定性浏览器任务使用脚本化模型响应；真实模型评估必须显式启用，因此常规测试通过不证明模型任务能力。快照测试覆盖所列可见性场景，不证明所有绘制与动态页面边界；删除既有细分回归是本次精简接受的覆盖取舍。
 
 来源：`src/logging.test.ts`、`src/agent/runner.test.ts`、`src/agent/sdk-generate-contract.test.ts`、`e2e/snapshot-visibility.spec.ts`、`e2e/context.spec.ts`、`e2e/lifecycle.spec.ts`、`e2e/real-model-evaluation.spec.ts`。
+
+### 评估器入口与执行职责
+
+2026-11-11 将真实模型评估的环境参数解析与执行流程拆分：真实模型入口保留显式启用和外层超时，确定性负控直接调用同一个评估执行器，避免嵌套启动 Playwright。报告、指纹、任务截止判断和后台作业证据仍由共享执行流程产生；普通测试通过不代表真实模型能力通过。
+
+来源：`e2e/real-model-evaluation.spec.ts`、`e2e/real-model-harness.spec.ts`、`e2e/evaluation/options.ts`、`e2e/evaluation/run-evaluation.ts`。

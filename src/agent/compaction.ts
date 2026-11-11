@@ -2,9 +2,8 @@ import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import { fromLogValue, stringifyLogSafe, type EventLogger, type LogEvent } from "../logging";
 import type { ModelConfig } from "../types";
 import { createPromptSnapshot, readPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./prompt";
-import { inputBudget, resolveModelLimit, type ModelLimit } from "./model-limits";
+import { inputBudget, type ModelLimit } from "./model-limits";
 import { retryModelOperation } from "./model";
-import { modelDiagnosticContext } from "./diagnostics";
 import { estimateInput, estimatePromptInput, hasSummarizableHistory } from "./context-budget";
 import { contextPrompt } from "./context-prompt";
 
@@ -142,12 +141,10 @@ function summarySourceCount(raw: readonly ModelMessage[], limit: ModelLimit): nu
 
 export async function contextPressure(options: {
   raw: ModelMessage[]; branchIds: string[]; events: LogEvent[]; model: ModelConfig;
-  limit?: ModelLimit; signal?: AbortSignal;
-  logger?: EventLogger; conversationId?: string;
+  limit: ModelLimit;
   instructions?: unknown; tools?: readonly Record<string, unknown>[]; goalMode?: boolean;
-}): Promise<{ limit: ModelLimit; estimated: number; threshold: number; messages: ModelMessage[] } | undefined> {
-  const limit = options.limit ?? await resolveModelLimit(options.model, { signal: options.signal, diagnosticContext: modelDiagnosticContext(options.logger, options.conversationId) });
-  if (!limit) return undefined;
+}): Promise<{ limit: ModelLimit; estimated: number; threshold: number; messages: ModelMessage[] }> {
+  const { limit } = options;
   const { checkpoint, messages } = await effectiveContext(options.events, options.branchIds, options.raw);
   const currentEstimate = estimateInput(messages);
   const contextVersion = checkpoint?.eventId ?? 0;
@@ -188,9 +185,9 @@ export async function contextPressure(options: {
 }
 
 export async function summarizeContext(options: {
-  raw: ModelMessage[]; branchIds: string[]; uiCount: number; model: ModelConfig;
+  raw: ModelMessage[]; branchIds: string[]; uiCount: number;
   languageModel: LanguageModel; logger: EventLogger; conversationId: string;
-  signal: AbortSignal; limit?: ModelLimit;
+  signal: AbortSignal; limit: ModelLimit;
   /** Runtime input may contain supplemental browser state. Only raw fingerprints persisted history. */
   prepared?: ModelMessage[]; stepNumber?: number; prompt?: PromptSnapshot; force?: boolean;
 }): Promise<string> {
@@ -201,8 +198,7 @@ export async function summarizeContext(options: {
   // Every trigger (in-run pressure, overflow recovery, and post-turn upkeep)
   // converges here. Reuse an already committed checkpoint for the exact same
   // branch instead of allowing sequential triggers to summarize it twice.
-  const limit = options.limit ?? await resolveModelLimit(options.model, { signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
-  if (!limit) throw new Error("无法取得模型上下文窗口；请手动设置窗口大小。");
+  const { limit } = options;
   const sourceCount = options.force ? raw.length : summarySourceCount(raw, limit);
   if (!options.force && priorCheckpoint && sourceCount <= priorCheckpoint.sourceCount) return priorCheckpoint.summary;
   const source = priorCheckpoint
@@ -334,7 +330,6 @@ export class ContextCompactor {
   private baseDigest = "";
   private modelDigest = "";
   private contextVersion = 0;
-  private warned = false;
   private events?: LogEvent[];
   private compactedBaseEstimate?: number;
 
@@ -395,12 +390,12 @@ export class ContextCompactor {
     const { model, logger, conversationId, signal, branchIds } = this.options;
     signal.throwIfAborted();
     await summarizeContext({ raw, prepared, stepNumber, branchIds, uiCount: branchIds.length,
-      model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt, force });
+      languageModel, logger, conversationId, signal, limit, prompt: this.prompt, force });
     this.events = await logger.conversation(conversationId);
     let { checkpoint, messages } = await effectiveContext(this.events, branchIds, raw);
     if (!force && estimateInput(messages) >= estimateInput(prepared)) {
       await summarizeContext({ raw, prepared, stepNumber, branchIds, uiCount: branchIds.length,
-        model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt, force: true });
+        languageModel, logger, conversationId, signal, limit, prompt: this.prompt, force: true });
       this.events = await logger.conversation(conversationId);
       ({ checkpoint, messages } = await effectiveContext(this.events, branchIds, raw));
     }
@@ -418,11 +413,6 @@ export class ContextCompactor {
     const { model, logger, conversationId, signal, branchIds } = this.options;
     signal.throwIfAborted();
     if (stepNumber > 0) return undefined;
-    const limit = await resolveModelLimit(model, { signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
-    if (!limit && !this.warned) {
-      void logger.append({ type: "context.limit.unavailable", conversationId, content: { model: model.model } });
-      this.warned = true;
-    }
     this.events ??= await logger.conversation(conversationId);
     const { checkpoint, messages } = await effectiveContext(this.events, branchIds, rawMessages);
     this.prompt = this.prompt ?? readPromptSnapshot(this.events, branchIds);

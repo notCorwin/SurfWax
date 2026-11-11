@@ -8,9 +8,8 @@ import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
-import { modelDiagnosticContext } from "./diagnostics";
 import { safeDiagnosticText } from "../diagnostic-error";
-import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-limits";
+import { inputBudget, type ModelLimit } from "./model-limits";
 import { resolvedBaseURL, sdkFor } from "./model-sdks";
 import type { ContextCompactor } from "./compaction";
 import { fitContextRequest } from "./context-budget";
@@ -30,6 +29,7 @@ import { createPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./promp
 
 export type CreateAgentOptions = {
   model: ModelConfig;
+  modelLimit: ModelLimit;
   executor: ChromeExecutor;
   languageModel: LanguageModel;
   reasoning?: ReasoningEffort;
@@ -72,7 +72,6 @@ function usesClaudePromptCache(config: ModelConfig): boolean {
 
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
-  const diagnosticContext = modelDiagnosticContext(logger, options.conversationId);
   let callId: string | undefined;
   let boundTabId: number | undefined;
   const scheduler = new ToolScheduler(PROGRAM_TOOL_REGISTRY.map(({ name }) => name), () => options.executor.pendingBackgroundJobs?.() ?? []);
@@ -80,10 +79,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   const toolOptions = {
     logger, conversationId: options.conversationId, scheduler, runSignal: options.signal,
     callId: () => callId,
-    visualEnabled: (() => {
-      let supported: Promise<boolean> | undefined;
-      return () => supported ??= modelSupportsImages(options.model, { signal: options.signal, diagnosticContext });
-    })(),
+    visualEnabled: async () => options.model.imageInput === "enabled"
+      || options.model.imageInput !== "disabled" && (options.modelLimit.inputModalities?.includes("image") ?? false),
   };
   const tools = createProgramTools(options.executor, toolOptions);
   const localResults: ReturnType<typeof localEvidence>[] = [];
@@ -123,10 +120,10 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
           if (!goalCallAlone) return { ok: false, error: { code: "goal-call-not-alone", message: "Call complete_goal alone after observing all other tool results." } };
           if (pending.length) return { ok: false, error: { code: "background-jobs-pending", message: "Wait for all background jobs to finish before completing the goal." } };
           if (invalid) return { ok: false, error: { code: "goal-evidence-invalid", message: invalid } };
-          const reviewLimit = await (limit ??= resolveModelLimit(options.model, { signal: deadline.signal, diagnosticContext }));
-          const budget = reviewLimit ? { input: inputBudget(reviewLimit), output: Math.min(reviewLimit.output ?? 2048, Math.max(1, Math.floor(reviewLimit.context / 4))) } : undefined;
+          const reviewLimit = options.modelLimit;
+          const budget = { input: inputBudget(reviewLimit), output: Math.min(reviewLimit.output ?? 2048, Math.max(1, Math.floor(reviewLimit.context / 4))) };
           const proposed = input as z.infer<typeof GOAL_SCHEMA>;
-          const context = goalReviewContext(reviewContext, budget ? Math.floor(budget.input * 0.75) : undefined, reviewRequirements,
+          const context = goalReviewContext(reviewContext, Math.floor(budget.input * 0.75), reviewRequirements,
             proposed.taskType === "browser" ? proposed.evidence.map((item) => item.evidenceId) : []);
           const history = actionHistory(evidence);
           const key = JSON.stringify([input, context, history]);
@@ -158,7 +155,6 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     const last = toolOrder.at(-1)!;
     tools[last] = { ...tools[last]!, providerOptions: { ...tools[last]!.providerOptions, anthropic: { ...tools[last]!.providerOptions?.anthropic, cacheControl: { type: "ephemeral" } } } };
   }
-  let limit: ReturnType<typeof resolveModelLimit> | undefined;
   const currentInstructions = () => createPromptSnapshot(options.compactor?.prompt?.source ?? initialPrompt.source).instructions + (options.goalMode ? GOAL_INSTRUCTIONS : "");
   const wireInstructions = () => cacheClaude ? { role: "system" as const, content: currentInstructions(), providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } } : currentInstructions();
   const currentTools = () => options.goalMode ? GOAL_TOOLS : PROMPT_TOOLS;
@@ -201,7 +197,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       const browserChanged = stepNumber === 0 || nextBrowserDigest !== browserDigest;
       browserDigest = nextBrowserDigest;
       if (browserChanged) logger?.telemetry({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
-      const modelLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal, diagnosticContext }));
+      const modelLimit = options.modelLimit;
       const prepareMessages = async (source: typeof prepared) => {
         const readArtifact = logger ? (id: number, selection?: { path: Array<string | number> }) => logger.result(id, selection, options.conversationId ?? "") : undefined;
         // Replayed tool JSON has scrubbed image bytes. Extract this step's new
@@ -245,7 +241,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       return {
         instructions: wireInstructions(),
         activeTools: activeTools(),
-        maxOutputTokens: options.model.maxTokensOverride ?? modelLimit?.output ?? 128_000,
+        maxOutputTokens: options.model.maxTokensOverride ?? modelLimit.output ?? 128_000,
         messages: outgoing,
       };
     },

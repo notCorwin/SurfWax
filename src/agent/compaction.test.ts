@@ -1,38 +1,13 @@
 import type { ModelMessage } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
-import { type EventLogger, type LogEvent } from "../logging";
+import { EventLogger, type LogEvent } from "../logging";
+import { createMemoryEventStore } from "../memory-event-store";
 import { effectiveContext, summarizeContext } from "./compaction";
 
 function fixture() {
   const events: LogEvent[] = [];
-  const logger = {
-    toolIdentity: (_conversationId: string, toolCallId: string) => ({
-      toolCallId,
-      toolCallIdCanonical: true,
-    }),
-    async append(record: Partial<LogEvent>) {
-      const event = {
-        id: events.length + 1,
-        timestamp: new Date().toISOString(),
-        content: null,
-        ...record,
-      } as LogEvent;
-      events.push(event);
-      return event;
-    },
-    telemetry(record: Partial<LogEvent>) {
-      events.push({
-        id: events.length + 1,
-        timestamp: new Date().toISOString(),
-        content: null,
-        ...record,
-      } as LogEvent);
-    },
-    async conversation() {
-      return [...events];
-    },
-  } as unknown as EventLogger;
+  const logger = new EventLogger({ store: createMemoryEventStore(events) });
   const generate = vi.fn(async (_options?: unknown) => ({
     content: [{ type: "text" as const, text: "Keep the user's constraints." }],
     finishReason: { unified: "stop" as const, raw: "stop" },
@@ -43,24 +18,18 @@ function fixture() {
     warnings: [],
   }));
   const languageModel = new MockLanguageModelV4({
-    doGenerate: generate as any,
+    doGenerate: generate,
   });
-  const model = {
-    baseURL: "https://provider.test/v1",
-    providerSettings: { apiKey: "key" },
-    model: "test",
-    contextWindowOverride: 8_000,
-  };
   const raw: ModelMessage[] = [
     { role: "user", content: "Old user details " + "a".repeat(7_000) },
     { role: "assistant", content: "Old findings " + "b".repeat(7_000) },
   ];
-  return { events, logger, generate, languageModel, model, raw };
+  return { events, logger, generate, languageModel, raw };
 }
 
 describe("context choices and summary", () => {
   it("retains recent tool call/result pairs and user corrections while incrementally summarizing older history", async () => {
-    const { events, logger, model, languageModel, generate } = fixture();
+    const { events, logger, languageModel, generate } = fixture();
     const raw: ModelMessage[] = [
       { role: "user", content: "Original goal" },
       { role: "assistant", content: "old findings " + "x".repeat(8000) },
@@ -92,7 +61,6 @@ describe("context choices and summary", () => {
     const options = {
       branchIds: ["branch"],
       uiCount: 1,
-      model,
       languageModel,
       logger,
       conversationId: "one",
@@ -134,7 +102,7 @@ describe("context choices and summary", () => {
   });
 
   it("does not write a checkpoint when one fragment fails", async () => {
-    const { events, logger, model, raw } = fixture();
+    const { events, logger, raw } = fixture();
     let calls = 0;
     const languageModel = new MockLanguageModelV4({
       doGenerate: async () => {
@@ -160,7 +128,6 @@ describe("context choices and summary", () => {
         raw,
         branchIds: ["u", "a"],
         uiCount: 2,
-        model,
         languageModel,
         logger,
         conversationId: "one",

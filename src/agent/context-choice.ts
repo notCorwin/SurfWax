@@ -5,7 +5,8 @@ import { conversationMessageHeader, type ConversationMessage, type EventLogger, 
 import type { ModelConfig } from "../types";
 import { contextPressure, effectiveContext, summarizeContext } from "./compaction";
 import { createModel } from "./model";
-import type { ModelLimit } from "./model-limits";
+import { resolveModelLimit, type ModelLimit } from "./model-limits";
+import { modelDiagnosticContext } from "./diagnostics";
 import { projectModelMessages } from "./context-projection";
 
 export async function modelMessages(messages: ConversationMessage[], events: readonly LogEvent[] = []): Promise<ModelMessage[]> {
@@ -84,16 +85,17 @@ export async function ensureAutomaticContextSummary(
 ): Promise<boolean> {
   signal.throwIfAborted();
   const source = await activeContext(logger, conversationId);
+  const limit = options.limit ?? await resolveModelLimit(model, { signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
   const pressure = await contextPressure({ raw: source.raw, branchIds: source.branchIds, events: source.events,
-    model, signal, limit: options.limit, instructions: options.instructions, tools: options.tools, goalMode: options.goalMode });
-  if (!options.forced && (!pressure || pressure.estimated <= pressure.threshold)) return false;
-  if (!options.forced && pressure && !hasSummarizableHistory(pressure.messages, pressure.limit)) return false;
+    model, limit, instructions: options.instructions, tools: options.tools, goalMode: options.goalMode });
+  if (!options.forced && pressure.estimated <= pressure.threshold) return false;
+  if (!options.forced && !hasSummarizableHistory(pressure.messages, pressure.limit)) return false;
   if (!source.raw.length) return false;
   // Fixed instructions/schema overhead cannot be reduced by re-summarizing an unchanged prefix.
   if (!options.forced && source.checkpoint?.sourceCount === source.raw.length) return false;
   const languageModel = options.languageModel ?? await createModel(model, logger, conversationId, { signal });
   signal.throwIfAborted();
   await summarizeContext({ raw: source.raw, branchIds: source.branchIds, uiCount: source.ui.length,
-    model, languageModel, logger, conversationId, signal, limit: options.limit ?? pressure?.limit, force: options.forced });
+    languageModel, logger, conversationId, signal, limit, force: options.forced });
   return true;
 }

@@ -155,10 +155,6 @@ export const ContextIndicator = memo(function ContextIndicator({ config, logger,
           const current = version;
           try {
             const resolvedLimit = await limit;
-            if (!resolvedLimit) {
-              if (active && current === version) publishUsage({ state: "unavailable" });
-              continue;
-            }
             const canonical = await projection.read();
             const pressure = await contextPressure({
               raw: canonical.raw,
@@ -167,16 +163,15 @@ export const ContextIndicator = memo(function ContextIndicator({ config, logger,
               model: config,
               goalMode,
               limit: resolvedLimit,
-              signal: controller.signal,
             });
             if (!active || current !== version) continue;
-            const next: ContextUsage = pressure ? {
+            const next: ContextUsage = {
               state: "ready",
               estimated: pressure.estimated,
               budget: inputBudget(pressure.limit),
               limit: pressure.limit,
               usedPercent: contextUsedPercent(pressure.estimated, pressure.limit),
-            } : { state: "unavailable" };
+            };
             publishUsage(next);
           } catch {
             if (active && current === version) publishUsage({ state: "unavailable" });

@@ -431,9 +431,9 @@ export function modelLimitKey(config: ModelConfig): string {
 export function resolveModelLimit(
   config: ModelConfig,
   options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; onDiagnostic?: (diagnostic: ModelDiagnostic) => void; diagnosticContext?: ModelDiagnosticContext } = {},
-): Promise<ModelLimit | undefined> {
+): Promise<ModelLimit> {
   const key = modelLimitKey(config);
-  const task = async (operationId = crypto.randomUUID()): Promise<ModelLimit | undefined> => {
+  const task = async (operationId = crypto.randomUUID()): Promise<ModelLimit> => {
     try {
       const catalog = await loadModelCatalog({ ...options, diagnosticOperationId: operationId });
       const catalogRevision = catalogRevisions.get(catalog) ?? cachedCatalogRevision();
@@ -465,12 +465,6 @@ export function resolveModelLimit(
 
 export function inputBudget(limit: ModelLimit): number {
   return Math.min(limit.input ?? Number.POSITIVE_INFINITY, limit.context);
-}
-
-export async function modelSupportsImages(config: ModelConfig, options: Parameters<typeof resolveModelLimit>[1] = {}): Promise<boolean> {
-  if (config.imageInput === "enabled") return true;
-  if (config.imageInput === "disabled") return false;
-  return (await resolveModelLimit({ ...config, contextWindowOverride: undefined }, options))?.inputModalities?.includes("image") ?? false;
 }
 
 export function contextUsedPercent(estimated: number, limit: ModelLimit): number {

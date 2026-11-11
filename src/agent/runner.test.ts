@@ -1,7 +1,9 @@
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
+import type { ModelConfig } from "../types";
 import type { ChromeExecutor } from "../chrome/executor";
 import { EventLogger, type LogEvent } from "../logging";
+import { createMemoryEventStore } from "../memory-event-store";
 import { createAgent } from "./runner";
 
 const usage = {
@@ -34,21 +36,7 @@ const config = {
 };
 function memoryLog() {
   const events: LogEvent[] = [];
-  const logger = new EventLogger({
-    store: {
-      async append(event) {
-        const saved = { ...event, id: events.length + 1 };
-        events.push(saved);
-        return saved;
-      },
-      async all() {
-        return [...events];
-      },
-      async clear() {
-        events.splice(0);
-      },
-    },
-  });
+  const logger = new EventLogger({ store: createMemoryEventStore(events) });
   logger.beginRun("conversation", "run");
   return { events, logger };
 }
@@ -60,6 +48,27 @@ function browserExecutor(extra = {}) {
 }
 
 describe("createAgent", () => {
+  it.each([
+    [undefined, ["text", "image"], true],
+    [undefined, ["text"], false],
+    ["enabled", ["text"], true],
+    ["disabled", ["text", "image"], false],
+  ] as const)("uses resolved image modalities %s / %j with explicit settings taking precedence", async (imageInput, modalities, enabled) => {
+    const runProgram = vi.fn(async (_input: unknown, _signal?: AbortSignal, _context?: Parameters<ChromeExecutor["runProgram"]>[2]) => ({ ok: true }));
+    let step = 0;
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => ++step === 1 ? tool("navigate", "navigate", { url: "https://test/" }) : text(),
+    });
+    await createAgent({
+      model: { ...config, imageInput } satisfies ModelConfig,
+      modelLimit: { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual", inputModalities: [...modalities] },
+      languageModel: model,
+      executor: browserExecutor({ runProgram }),
+    }).generate({ prompt: "navigate" });
+    expect(runProgram).toHaveBeenCalledOnce();
+    expect(runProgram.mock.calls[0]?.[2]?.visualEnabled).toBe(enabled);
+  });
+
   it("executes concurrent SDK tool calls in model order and waits for the prior result to be recorded", async () => {
     const { events, logger } = memoryLog();
     let release!: () => void;
@@ -119,6 +128,7 @@ describe("createAgent", () => {
     });
     const pending = createAgent({
       model: config,
+      modelLimit: { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" },
       languageModel: model,
       executor,
       logger,
@@ -148,6 +158,7 @@ describe("createAgent", () => {
     });
     await createAgent({
       model: config,
+      modelLimit: { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" },
       languageModel: model,
       executor,
       logger,

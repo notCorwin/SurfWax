@@ -9,6 +9,8 @@ import { ErrorNotice } from "../components/ui/error-notice";
 import { safeDiagnosticError } from "../diagnostic-error";
 import { generateConversationTitle } from "../conversations";
 import { activeContext, ensureAutomaticContextSummary } from "../agent/context-choice";
+import { resolveModelLimit } from "../agent/model-limits";
+import { modelDiagnosticContext } from "../agent/diagnostics";
 import { contextPressure } from "../agent/compaction";
 import { activeRunIdentity, claimConversationRun, registerBackgroundRequest } from "../agent/coordinator";
 import { EventLogger, fromLogValue, rebuildConversationList, stringifyLogSafe } from "../logging";
@@ -267,9 +269,11 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
         const overflow = lastRun?.type === "conversation.failed"
           && /context.{0,30}(length|window|token)|maximum.{0,30}token/i.test(JSON.stringify(lastRun.error))
           && (!before.checkpoint || before.checkpoint.eventId < lastRun.id);
-        const pressure = await contextPressure({ raw: before.raw, branchIds: before.branchIds, events: before.events, model: config, signal: controller.signal, logger, conversationId, goalMode });
+        const limit = await resolveModelLimit(config, { signal: controller.signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
+        controller.signal.throwIfAborted();
+        const pressure = await contextPressure({ raw: before.raw, branchIds: before.branchIds, events: before.events, model: config, limit, goalMode });
         if (!active) return;
-        if (!force && !overflow && (!pressure || pressure.estimated <= pressure.threshold)) {
+        if (!force && !overflow && pressure.estimated <= pressure.threshold) {
           setContextStatus(before.checkpoint ? { message: "历史上下文已被压缩成摘要", error: false } : undefined);
           return;
         }
@@ -280,7 +284,7 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
         if (!active) { controller.abort("sidepanel-closed"); return; }
         setCompactionBusy(true);
         setCompactionError("");
-        await ensureAutomaticContextSummary(logger, conversationId, config, lease.signal, { forced: force || overflow, limit: pressure?.limit, goalMode });
+        await ensureAutomaticContextSummary(logger, conversationId, config, lease.signal, { forced: force || overflow, limit, goalMode });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (active && !controller.signal.aborted && !lease?.signal.aborted && !message.includes("已有任务运行")) {
