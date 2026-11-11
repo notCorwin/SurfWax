@@ -4,7 +4,7 @@ import { expect, test, openExtension, dispose } from './fixtures';
 
 test('large HTTP payloads and artifact reads preserve exact absolute progress without duplicate storage', async () => {
   const items = Array.from({ length: 1200 }, (_, index) => ({ index, text: `${index}:海🌊${'x'.repeat(160)}` }));
-  const body = JSON.stringify({ items });
+  const body = JSON.stringify({ items, messages: [{ text: 'ordinary HTTP data' }], integrity: 'complete', hasMore: true, nextOffset: 1 });
   const server = createServer((_request, response) => { response.setHeader('content-type', 'application/json'); response.end(body); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const opened = await openExtension();
@@ -71,7 +71,35 @@ test('large HTTP payloads and artifact reads preserve exact absolute progress wi
         const typedPage = await call('read_artifact', { artifactId: typed.id, offset: 1, limit: 3 });
         check(JSON.stringify(typedPage.holePaths) === '[[0]]' && typedPage.numberPaths[0].path[0] === 1 && typedPage.bigintPaths[0].path[0] === 2, 'relative typed sidecars');
         check((await logger.result(id, { path: ['result'], offset: 20, limit: 40 }, conversationId)).length === 40, 'raw contract');
-        return { httpPages: pages, exactHttpBytes: new TextEncoder().encode(text).length, exactItems: received.length, stableArtifact: id, oversizedCode: blocked.error.code, typedSidecars: true };
+        // Use the extension's real indexed Canonical store for provenance checks;
+        // the memory store above intentionally has no native run/tool index.
+        const canonical = new EventLogger();
+        const canonicalConversation = crypto.randomUUID();
+        canonical.beginRun(canonicalConversation, crypto.randomUUID());
+        const canonicalExecutor = new ChromeExecutor({ logger: canonical });
+        const canonicalTools = createProgramTools(canonicalExecutor, { logger: canonical, conversationId: canonicalConversation });
+        const storeOwned = async (toolName: string, value: any) => {
+          const identity = canonical.toolIdentity(canonicalConversation, crypto.randomUUID());
+          await canonical.append({ type: 'tool.started', conversationId: canonicalConversation, ...identity, content: { toolName } });
+          return canonical.append({ type: 'tool.result.data', conversationId: canonicalConversation, ...identity, content: {}, output: { result: value } });
+        };
+        const read = (input: any) => canonicalTools.read_artifact.execute(input, { toolCallId: crypto.randomUUID(), messages: [] });
+        try {
+          const json = JSON.parse(text);
+          const ordinary = await storeOwned('send_extension_request', json);
+          const ordinaryPage = await read({ artifactId: ordinary.id, path: ['result', 'messages'] });
+          check(!ordinaryPage.sourcePagination && !ordinaryPage.sourcePaginationNote && JSON.stringify(ordinaryPage.result) === JSON.stringify(json.messages), 'HTTP JSON fields are payload, not diagnostic pagination');
+          check(JSON.stringify(await canonical.result(ordinary.id, { path: ['result'] }, canonicalConversation)) === text, 'ordinary HTTP JSON raw contract');
+          const nestedData = { messages: json.messages, integrity: json.integrity, hasMore: json.hasMore, nextOffset: json.nextOffset };
+          const diagnostic = await storeOwned('read_console', { messages: [{ data: { args: [{ value: nestedData }] } }], integrity: 'complete', hasMore: false });
+          const top = await read({ artifactId: diagnostic.id, path: ['result', 'messages'] });
+          check(top.sourcePagination?.hasMore === false, 'native indexed diagnostic origin is available');
+          const nestedPath = ['result', 'messages', 0, 'data', 'args', 0, 'value', 'messages'];
+          const nested = await read({ artifactId: diagnostic.id, path: nestedPath });
+          check(!nested.sourcePagination && !nested.sourcePaginationNote && JSON.stringify(nested.result) === JSON.stringify(json.messages), 'console argument fields do not become diagnostic pagination');
+          check(JSON.stringify(await canonical.result(diagnostic.id, { path: nestedPath }, canonicalConversation)) === JSON.stringify(json.messages), 'nested raw contract');
+        } finally { canonicalExecutor.dispose(); canonical.dispose(); }
+        return { httpPages: pages, exactHttpBytes: new TextEncoder().encode(text).length, exactItems: received.length, stableArtifact: id, oversizedCode: blocked.error.code, typedSidecars: true, diagnosticProvenanceControls: true };
       } finally { await executor.endRun(); executor.dispose(); logger.dispose(); }
     }, { dev: process.env.SURFWAX_DEV_SERVER_URL!, url: `http://127.0.0.1:${(server.address() as any).port}/payload`, items, body });
     expect(result.exactItems).toBe(60);

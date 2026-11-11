@@ -106,13 +106,19 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 审查的 `remaining` 只列当前所提状态获准前，智能体仍需补充的操作或观察；获准的 blocked 状态所需用户操作归入 `goal.userAction`。结构合法但 `accept:true` 且 `remaining` 非空时，规范为拒绝，保留具体原因和待办，不冒充审查服务故障，也不因此额外请求模型。Canonical 诊断同时保存原始答复与规范化标记；非法 JSON、截断和服务故障仍按各自错误路径处理，完成门槛不变。
 
+审查片段有界且优先保留引用，省略或截断旧观察不能推导为从未访问页面或执行操作。证据不足仍应拒绝当前完成提议，但须指出需要证明的用户要求，优先引用既有有效结果或补充针对性的只读观察，不能仅因片段缺失就要求重复副作用；累计动作约束与未知效果的核验要求保持不变。
+
 来源：`7fd6301`、`af5e79f`、`5e8d5fd`，见 `src/agent/goal-completion.ts`、`src/agent/goal-review.ts`、`src/logging.ts`。
 
 ### 完成工具不接收总结
 
-2026-11-04 先允许无总结完成，随后从完成协议中移除总结字段。用户要求的事实、链接和其他产出应在调用完成工具前通过 Assistant 正文交付；不额外要求一份完成回顾。
+2026-11-04 先允许无总结完成，随后从完成协议中移除总结字段。用户只要求浏览器操作时，以经验证的浏览器结果判断完成，不额外索要确认、报告或回顾；用户要求的事实、链接、文件和其他产出仍须在调用完成工具前按要求交付。
+
+目标模式中的纯文本不会自动结束运行。尚无获准的完成标记不等于业务尚未完成；续跑提示区分这两者，引导智能体核对真正缺项、补足被请求的交付或只读证据后重试完成工具，而非重做已验证副作用。该提示不自动接受完成、降低业务门槛或将 blocked 转成成功，也不保证模型不会误判。
 
 来源：[`c7ab3ef`](https://github.com/notCorwin/SurfWax/commit/c7ab3ef)、[`636b563`](https://github.com/notCorwin/SurfWax/commit/636b563)。
+
+当前协议见 `src/agent/goal-review.ts`、`src/agent/goal-completion.ts`、`src/agent/transport.ts`。
 
 ## 浏览器执行与数据
 
@@ -142,7 +148,13 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 控制台的 retained 模式只读当前会话与运行拥有的 Canonical 捕获，不依赖页面仍存活，也不重新连接或订阅来补造历史。游标固定读取高水位，读完后才显式 follow 新捕获；日志清除、运行租约或控制器改变使旧游标失效。结果保留原 scope、capture 与 source，并明确完整性未知或不完整，不能把未捕获的消息判为空。
 
+诊断源的分页与某份 Artifact 内数组的分页分别表达。大结果的工具摘要和模型读取页保留经验证的 `sourcePagination`；读完当前数组不等于源已读完，retained 扫描页即使没有匹配消息也须按原游标继续。缺少原调用范围时不从 `get_job` 参数猜造续页；捕获未知或不完整不能因数组结束而变成完整。
+
+诊断来源由 Canonical Artifact 身份与唯一的先前工具启动记录、原生 run/tool 索引证明，只允许已知顶层诊断 collection 布局。普通 HTTP JSON、控制台参数中同名字段和缺少身份或索引的存储都不能据形状获得 Harness 元数据；只读取父记录的有界标量，不扫描大数组或退回全日志。分页提示与引用元数据计入既有响应预算，内部原始 `artifacts.read` 数据契约保持不变。
+
 来源：`7d97108`，见 `src/chrome/executor.ts`、`src/logging.ts`、`src/chrome/tool.ts`。
+
+当前呈现边界见 `src/chrome/job-result.ts`、`src/chrome/artifact-read.ts`、`src/chrome/atomic-tools.ts`；完成协议与诊断呈现契约统一使用 catalog v52。模型能否正确消费这些提示仍须由独立 Luna 会话验证，不改写旧样本结果。
 
 ### 同批动作保持顺序，失败后保留诊断和清理通道
 
@@ -203,6 +215,10 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 ### 文件选择器可以在触发后发现
 
 2026-11-02 简化文件选择器流程：除了预订阅事件，也可从动作结果的 `fileChoosers` 或 `list_file_choosers` 获取句柄。2026-11-03 拆分上传工具后，选择器句柄交给 `upload_file_chooser`，已有文件输入框目标使用 `upload_file`。选择器可能由其他页面事件触发，必须核对来源；句柄在替换、导航、处理或运行结束后失效。
+
+上传在读取文件 URL、记录派发或赋值之前，以 Chrome 对同一已解析 objectId 返回的原生节点元数据检查 file input 类型与文件数量；类型按 HTML 的 ASCII 大小写规则匹配，`multiple` 按属性存在语义处理。可信前置拒绝可明确未派发，最终同节点同步守卫仍保留；前置之后的节点变化、异常和取消不能被改判为确定无副作用。后续成功或前置失败只结算自己的操作，不能清除先前未知效果，也不信任网页伪造的错误码、消息或 `effectUnknown:false`。
+
+来源：`src/chrome/automation.ts`、`src/chrome/executor.ts`、`src/chrome/program.ts`；该修复不改写原始运行的未知分类。
 
 来源：[`efadccd`](https://github.com/notCorwin/SurfWax/commit/efadccd)、[`e514df4`](https://github.com/notCorwin/SurfWax/commit/e514df4)。
 

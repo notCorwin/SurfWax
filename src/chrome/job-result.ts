@@ -1,5 +1,54 @@
 import { artifactReadSelection, nativeArtifactPageLimit } from "../artifact-selection";
 import { normalizationExceedsBudget, normalizeResultEnvelope } from "../tool-result-values";
+import type { EventLogger } from "../logging";
+
+export const SOURCE_PAGINATION_FIELDS = ["hasMore", "nextOffset", "nextCursor", "rangeComplete", "integrity", "reason"] as const;
+export const SOURCE_PAGINATION_NOTE = "Artifact hasMore/total cover only the stored slice. If sourcePagination.hasMore=true, continue the originating diagnostic tool with its nextOffset or nextCursor after reading this slice. Range completion does not prove complete capture.";
+const metadataEncoder = new TextEncoder();
+
+/** Bounded own data properties only; never execute a result's getters. */
+export function sourcePaginationOf(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const pagination: Record<string, unknown> = {};
+  try {
+    for (const key of SOURCE_PAGINATION_FIELDS) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      const field = descriptor && "value" in descriptor ? descriptor.value : undefined;
+      if (key === "hasMore" ? typeof field === "boolean" || field === null
+        : key === "rangeComplete" ? typeof field === "boolean"
+        : key === "nextOffset" ? Number.isSafeInteger(field) && field >= 0
+        : key === "integrity" ? ["complete", "incomplete", "unknown"].includes(field)
+        : typeof field === "string" && field.length <= (key === "nextCursor" ? 512 : 256)
+          && metadataEncoder.encode(JSON.stringify(field)).byteLength <= (key === "nextCursor" ? 512 : 256)) pagination[key] = field;
+    }
+  } catch { return undefined; }
+  return Object.hasOwn(pagination, "hasMore") || Object.hasOwn(pagination, "rangeComplete") ? pagination : undefined;
+}
+
+/** Only the known diagnostic record layouts may contribute harness metadata. */
+export async function readDiagnosticPagination(logger: EventLogger, artifactId: number, parentPath: (string | number)[], conversationId: string, signal?: AbortSignal, requestedCollection?: string): Promise<Record<string, unknown> | undefined> {
+  if (parentPath.length > 2 || parentPath.some(key => key !== "result")) return undefined;
+  const read = async <T>(task: () => Promise<T>) => { signal?.throwIfAborted(); const value = await task(); signal?.throwIfAborted(); return value; };
+  const origin = await read(() => logger.resultToolName(artifactId, conversationId));
+  if (origin !== "read_console" && origin !== "list_requests" || parentPath.length === 0 && origin !== "read_console") return undefined;
+  const root = await read(() => logger.resultMetadata(artifactId, [], conversationId));
+  if (parentPath.length === 2 && (!root.keys?.includes("envelopeWrapped")
+    || await read(() => logger.result(artifactId, { path: ["envelopeWrapped"] }, conversationId)) !== true)) return undefined;
+  const parent = parentPath.length ? await read(() => logger.resultMetadata(artifactId, parentPath, conversationId)) : root;
+  const collection = origin === "read_console" ? "messages" : "requests";
+  if (requestedCollection !== undefined && requestedCollection !== collection) return undefined;
+  if (!parent.keys?.includes(collection) || !parent.keys.includes("hasMore") || !parent.keys.includes("integrity")) return undefined;
+  if (parentPath.length === 0 && (!parent.keys.includes("mode")
+    || await read(() => logger.result(artifactId, { path: ["mode"] }, conversationId)) !== "retained")) return undefined;
+  const fields = await Promise.all(SOURCE_PAGINATION_FIELDS.filter(key => parent.keys!.includes(key)).map(async key => {
+    const path = [...parentPath, key];
+    const info = await read(() => logger.resultMetadata(artifactId, path, conversationId));
+    if (!(["boolean", "number", "string"].includes(info.type) || key === "hasMore" && info.type === "object" && !info.keys)
+      || info.total !== undefined && info.total > 512) return [];
+    return [[key, await read(() => logger.result(artifactId, { path }, conversationId))]];
+  }));
+  return sourcePaginationOf(Object.fromEntries(fields.flat()));
+}
 
 export type JobResultInfo = { limit?: number; page?: { path: (string | number)[]; limit: number }; error?: Record<string, unknown>; artifact?: Record<string, unknown>; screenshot?: Record<string, unknown>; inlineScreenshot?: boolean; visualContext?: Record<string, unknown> };
 const references = new WeakMap<object, { id: number; info: JobResultInfo }>();

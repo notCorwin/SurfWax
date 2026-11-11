@@ -1677,6 +1677,21 @@ export class EventLogger {
     return loaded.value;
   }
 
+  /** Resolve the trusted originating tool without inspecting artifact payloads. */
+  async resultToolName(id: number, conversationId: string): Promise<string | undefined> {
+    return this.readCanonical(async (store, floor) => {
+      if (id <= floor || !store.get || !store.byRunToolTypes) return undefined;
+      const artifact = await store.get(id);
+      if (artifact?.type !== "tool.result.data" || artifact.conversationId !== conversationId || !artifact.runId || !artifact.toolCallId) return undefined;
+      const starts = (await store.byRunToolTypes(artifact.runId, artifact.toolCallId, ["tool.started"], floor))
+        .filter(event => event.id > floor && event.id < id && event.type === "tool.started" && event.conversationId === conversationId
+          && event.runId === artifact.runId && event.toolCallId === artifact.toolCallId);
+      if (starts.length !== 1) return undefined;
+      const name = (fromLogValue(starts[0]!.content, starts[0]!.valueEncoding) as { toolName?: unknown } | undefined)?.toolName;
+      return typeof name === "string" ? name : undefined;
+    });
+  }
+
   async resultMetadata(id: number, path: Array<string | number>, conversationId?: string): Promise<{ type: string; total?: number; keys?: string[] }> {
     return await this.readResult(id, { path }, conversationId, true) as { type: string; total?: number; keys?: string[] };
   }

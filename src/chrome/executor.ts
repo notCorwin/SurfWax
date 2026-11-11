@@ -1,7 +1,7 @@
 import { readArtifactPage } from "./artifact-read";
 import { fromLogValue, type EventLogger } from "../logging";
 import type { BrowserTarget } from "../types";
-import { AutomationRuntime, FILE_UPLOAD_FUNCTION, LocatorFacade } from "./automation";
+import { AutomationRuntime, FILE_UPLOAD_FUNCTION, LocatorFacade, validateFileUploadTarget } from "./automation";
 import { requireDebuggee } from "./debuggee";
 import { decodeBridgeError, type BridgeError } from "./bridge-error";
 import { createDeadline, scheduleDeadline } from "../deadline";
@@ -868,6 +868,9 @@ export class ChromeExecutor {
       guard();
       const objectId = node?.object?.objectId;
       if (typeof objectId !== "string") throw new Error("CommandError[stale-chooser]: File chooser input is no longer available");
+      const described = await this.awaitAbort<{ node?: Parameters<typeof validateFileUploadTarget>[0] }>((this.bridge.call as any)("sendCommand", [chooser.source, "DOM.describeNode", { objectId }]), effectiveSignal);
+      guard();
+      validateFileUploadTarget(described?.node, files.length);
       intentReceipt = this.logger.append({ type: "browser.chooser.progress", conversationId: owner.conversationId, ...context.logIdentity,
         content: { chooserId: chooser.id, source: chooser.source, artifactIds: ids, state: "dispatched-unknown" } });
       const receipt = await this.awaitAbort(intentReceipt, effectiveSignal);

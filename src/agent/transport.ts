@@ -7,7 +7,7 @@ import { ensureConversationPrompt } from "./prompt";
 import { modelMessages } from "./context-choice";
 import { isContextOverflowError, isRecoverableModelError, retryBackoffDelay, waitForModelRetry } from "./model";
 import { toolProtocolRepair } from "./tool-protocol-error";
-import { releaseRunEvidence } from "./goal-completion";
+import { releaseRunEvidence, UNFINISHED_GOAL_INSTRUCTIONS } from "./goal-completion";
 
 export type SidePanelMessage = UIMessage<any, never, any>;
 export type ConversationTransport = {
@@ -261,7 +261,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
             const goalCompleted = [...response.parts].reverse().find((part) => "toolCallId" in part && "toolName" in part && part.toolName === "complete_goal"
               && part.state === "output-available" && part.output && typeof part.output === "object" && "ok" in part.output && part.output.ok === true);
             if (goalMode && !goalCompleted) {
-              await continueRun("unfinished-goal", "Goal mode is still active. Review the remaining requirements and execute the next useful action. Recover from tool errors using current observations and another supported approach when needed. Call complete_goal alone only with the verified outcome or evidence of an unavoidable user dependency; a progress update or failed approach is not completion.");
+              await continueRun("unfinished-goal", UNFINISHED_GOAL_INSTRUCTIONS);
               continue;
             }
             refreshObserver?.dispose();

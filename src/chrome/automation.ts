@@ -224,6 +224,18 @@ function automationError(code: string, detail: Record<string, unknown>): Automat
     ? { ...detail, recovery: "Use list_frames and specify the target frame, or inspect_page/find_elements and use a unique observed element ID." } : detail);
 }
 
+/** Validate Chrome's metadata for the exact resolved node before any upload effect. */
+export function validateFileUploadTarget(node: { nodeType?: number; nodeName?: string; localName?: string; attributes?: string[] } | undefined, fileCount: number): void {
+  const values = node?.attributes ?? [];
+  const attributes = new Map<string, string>();
+  for (let index = 0; index < values.length; index += 2)
+    attributes.set(values[index], values[index + 1]);
+  if (node?.nodeType !== 1 || node.nodeName !== "INPUT" || node.localName !== "input" || !/^[Ff][Ii][Ll][Ee]$/.test(attributes.get("type") ?? ""))
+    throw automationError("invalid-upload-target", { reason: "expected-file-input", recovery: "Use the file input in its target frame, or open a file chooser and use upload_file_chooser." });
+  if (fileCount > 1 && !attributes.has("multiple"))
+    throw automationError("invalid-file-count", { reason: "file-input-accepts-one-file", recovery: "Upload one artifact, or choose a file input that accepts multiple files." });
+}
+
 function validateLocator(spec: LocatorSpec): void {
   const visited = new Set<LocatorSpec>(), active = new Set<LocatorSpec>();
   const visit = (current: LocatorSpec) => {
@@ -1887,6 +1899,10 @@ export class AutomationRuntime {
             throw new Error("setInputFiles accepts { name, mimeType?, text | base64 | url }; local paths are not supported.");
           }
         }
+        // DOM metadata is returned by Chrome, not by author script. Keep the
+        // original object binding; a later node/type change remains uncertain
+        // once the upload is dispatched and the page-side guard rejects it.
+        validateFileUploadTarget(await this.describe(targetSession, objectId), requested.length);
         const files = await Promise.all(requested.map(async (file: any) => {
           if (file?.url) {
             await (dispatch ?? this.options.onDispatch)?.();

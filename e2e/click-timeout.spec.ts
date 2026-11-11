@@ -104,7 +104,7 @@ test("a covered click returns promptly with the page and can be retried after di
 });
 
 // Exercise production tools without a provider, through the standalone CDP adapter.
-test("atomic targets fail promptly and imports preserve dispatch certainty", async () => {
+test("atomic targets fail promptly and file operations preserve dispatch certainty", async () => {
   const { chromium } = await import("@playwright/test");
   const { createServer } = await import("node:http");
   const { connectToolRuntime } = await import("../src/standalone/runtime");
@@ -359,6 +359,118 @@ test("atomic targets fail promptly and imports preserve dispatch certainty", asy
     );
     expect(JSON.stringify(terminals)).toContain('"effectUnknown":false');
     expect(JSON.stringify(terminals)).toContain('"effectUnknown":true');
+
+    const artifactId = runtime.events.find(
+      (event) => event.type === "tool.result.data" && (event.content as any)?.filename === "manifest.txt",
+    )!.id;
+    await page.evaluate(() => {
+      document.body.insertAdjacentHTML("beforeend", '<input id="upload" type="FILE" multiple="false"><input id="single" type="file"><input id="not-file" type=" file ">');
+      document.body.dataset.uploadEvents = "";
+      for (const type of ["input", "change"])
+        document.addEventListener(type, (event) => {
+          if ((event.target as HTMLElement).id === "upload" || (event.target as HTMLElement).id === "single")
+            document.body.dataset.uploadEvents += `${(event.target as HTMLElement).id}:${type};`;
+        });
+    });
+    const upload = (target: string, artifactIds: number | number[] = artifactId, signal?: AbortSignal) =>
+      call("upload_file", { target: { by: "css", value: target }, artifactId: artifactIds }, signal);
+    const invalidUploads: [string, number | number[], string][] = [
+      ["iframe", artifactId, "invalid-upload-target"],
+      ["#not-file", artifactId, "invalid-upload-target"],
+      ["#single", [artifactId, artifactId], "invalid-file-count"],
+    ];
+    for (const [target, ids, code] of invalidUploads) {
+      const start = runtime.events.length;
+      const result = await upload(target, ids);
+      expect(result).toMatchObject({ ok: false, error: { code, effectUnknown: false } });
+      const evidence = runtime.events.slice(start);
+      expect(evidence.some((event) => event.type === "browser.job.progress" && (event.content as any)?.state === "dispatched-unknown")).toBe(false);
+      expect(evidence.find((event) => event.type === "browser.job.state" && (event.content as any)?.state === "failed")?.output).toMatchObject({ ok: false, error: { code, effectUnknown: false } });
+      expect(evidence.find((event) => event.type === "tool.failed")?.output).toMatchObject({ ok: false, error: { code, effectUnknown: false } });
+      await expect(page.locator("body")).toHaveAttribute("data-upload-events", "");
+      expect(await page.locator("#single").evaluate((element: HTMLInputElement) => element.files!.length)).toBe(0);
+    }
+    expect(await upload("#upload", [artifactId, artifactId])).toMatchObject({ ok: true });
+    expect(await page.locator("#upload").evaluate(async (element: HTMLInputElement) => Promise.all([...element.files!].map((file) => file.text())))).toEqual(["original bytes", "original bytes"]);
+    await expect(page.locator("body")).toHaveAttribute("data-upload-events", "upload:input;upload:change;");
+
+    const beforeUpload = new AbortController();
+    runtime.logger.append = async (...args) => {
+      const event = args[0] as any;
+      const result = await originalAppend(...args);
+      if (event.type === "browser.job.progress" && event.content?.operation === "page.locator.setInputFiles" && event.content?.state === "not-dispatched") beforeUpload.abort();
+      return result;
+    };
+    expect(await upload("#single", artifactId, beforeUpload.signal)).toMatchObject({ ok: false, error: { effectUnknown: false } });
+    runtime.logger.append = originalAppend;
+    expect(await page.locator("#single").evaluate((element: HTMLInputElement) => element.files!.length)).toBe(0);
+    await expect(page.locator("body")).toHaveAttribute("data-upload-events", "upload:input;upload:change;");
+
+    const identity = runtime.events.find((event) => event.type === "tool.started")!;
+    const runProgram = (code: string, toolCallId: string) => runtime.executor.runProgram({ code }, undefined, {
+      conversationId: identity.conversationId!, toolCallId,
+      logIdentity: runtime.logger.toolIdentity(identity.conversationId!, toolCallId),
+    });
+    // Internal file URLs must not be fetched for a known invalid target/count.
+    const beforeRequests = hits;
+    expect(await runProgram(`return await page.locator('iframe').setInputFiles({name:'unused.txt',url:${JSON.stringify(`${origin}/file`)}});`, "upload-url-invalid-target")).toMatchObject({ ok: false, result: { error: { effectUnknown: false } } });
+    expect(await runProgram(`return await page.locator('#single').setInputFiles([{name:'unused.txt',url:${JSON.stringify(`${origin}/file`)}},{name:'other.txt',text:'other'}]);`, "upload-url-invalid-count")).toMatchObject({ ok: false, result: { error: { effectUnknown: false } } });
+    expect(hits).toBe(beforeRequests);
+
+    // A replacement during the write-ahead receipt must reject the original
+    // node, never heal the selector to a replacement or claim no dispatch.
+    runtime.logger.append = async (...args) => {
+      const event = args[0] as any;
+      if (event.type === "browser.job.progress" && event.content?.operation === "page.locator.setInputFiles" && event.content?.state === "dispatched-unknown")
+        await page.locator("#single").evaluate((element) => element.replaceWith(element.cloneNode(true)));
+      return originalAppend(...args);
+    };
+    expect(await upload("#single")).toMatchObject({ ok: false, error: { effectUnknown: true } });
+    runtime.logger.append = originalAppend;
+    expect(await page.locator("#single").evaluate((element: HTMLInputElement) => element.files!.length)).toBe(0);
+
+    // Once files and events have been applied, even a failure claiming to be a
+    // validation error cannot reset certainty. Later operations settle only
+    // their own sequence, including when the program catches every failure.
+    let failAppliedUpload = true;
+    runtime.logger.append = async (...args) => {
+      const event = args[0] as any;
+      if (failAppliedUpload && event.type === "browser.job.progress" && event.content?.operation === "page.locator.setInputFiles" && event.content?.state === "completed") {
+        failAppliedUpload = false;
+        throw Object.assign(new Error("AutomationError[invalid-upload-target]: synthetic page-like failure"), { effectUnknown: false });
+      }
+      return originalAppend(...args);
+    };
+    const sequenceStart = runtime.events.length;
+    expect(await runProgram(`
+      try { await page.locator('#single').setInputFiles({name:'first.txt',text:'first'}); } catch {}
+      await page.locator('#upload').setInputFiles({name:'later.txt',text:'later'});
+      try { await page.locator('iframe').setInputFiles({name:'unused.txt',text:'unused'}); } catch {}
+      return 'caught';
+    `, "upload-keeps-earlier-unknown")).toMatchObject({ ok: false, result: { error: { effectUnknown: true } } });
+    runtime.logger.append = originalAppend;
+    expect(await page.locator("#single").evaluate((element: HTMLInputElement) => element.files![0].text())).toBe("first");
+    expect(await page.locator("#upload").evaluate((element: HTMLInputElement) => element.files![0].text())).toBe("later");
+    const progress = runtime.events.slice(sequenceStart).filter((event) => event.type === "browser.job.progress" && (event.content as any)?.operation === "page.locator.setInputFiles");
+    expect(progress.some((event) => (event.content as any)?.state === "completed")).toBe(true);
+    expect(progress.some((event) => (event.content as any)?.state === "not-dispatched" && (event.error as any)?.effectUnknown === false)).toBe(true);
+    expect(progress.some((event) => (event.content as any)?.state === "dispatched-unknown" && (event.error as any)?.effectUnknown === true)).toBe(true);
+
+    const applied = new AbortController();
+    const appliedStart = runtime.events.length;
+    runtime.logger.append = async (...args) => {
+      const event = args[0] as any;
+      const result = await originalAppend(...args);
+      if (event.type === "browser.job.progress" && event.content?.operation === "page.locator.setInputFiles" && event.content?.state === "completed") applied.abort();
+      return result;
+    };
+    expect(await upload("#single", artifactId, applied.signal)).toMatchObject({ ok: false, error: { effectUnknown: true } });
+    runtime.logger.append = originalAppend;
+    expect(await page.locator("#single").evaluate((element: HTMLInputElement) => element.files![0].text())).toBe("original bytes");
+    expect(await upload("iframe")).toMatchObject({ ok: false, error: { effectUnknown: false } });
+    expect(await upload("#single")).toMatchObject({ ok: true });
+    const unknownUploadJob = runtime.events.slice(appliedStart).find((event) => event.type === "browser.job.state" && (event.content as any)?.state === "cancelled")!;
+    expect(JSON.stringify(await call("get_job", { jobId: (unknownUploadJob.content as any).jobId }))).toContain('"effectUnknown":true');
   } finally {
     runtime.logger.append = originalAppend;
     await runtime.close();

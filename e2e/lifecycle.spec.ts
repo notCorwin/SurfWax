@@ -193,6 +193,9 @@ test("a recoverable complete-response failure retries without repeating a comple
       const output = JSON.parse(request.messages.findLast((message: any) => message.role === "tool").content);
       expect(output).toMatchObject({ ok: false, error: { code: "goal-incomplete" } });
       expect(output.error.message).toContain(remaining);
+      return textResponse("PROGRESS_NOTE_ONLY");
+    },
+    () => {
       return commandResponse("inspect_page", { full: true }, "final-state");
     },
     (request) => {
@@ -241,7 +244,7 @@ test("a recoverable complete-response failure retries without repeating a comple
     const agentRequests = provider.requests.filter((request) =>
       request.tools?.some((tool: any) => tool.function.name === "click"),
     );
-    expect(agentRequests).toHaveLength(5);
+    expect(agentRequests).toHaveLength(6);
     expect(agentRequests[2].messages).toEqual(agentRequests[1].messages);
     const resumedContext = JSON.stringify(agentRequests[2].messages);
     expect(resumedContext).toContain("RETRY_EFFECT_ACCEPTED");
@@ -252,6 +255,7 @@ test("a recoverable complete-response failure retries without repeating a comple
       ),
     ).toHaveLength(1);
     const events = await readNativeEvents(native.panel);
+    expect(events.filter(event => event.type === "agent.goal.continued" && (event.content as { reason?: string })?.reason === "unfinished-goal")).toHaveLength(1);
     const reviews = events.filter(event => event.type === "agent.goal.review.finished");
     expect(reviews).toHaveLength(2);
     expect(reviews[0].content).toMatchObject({ accept: false, remaining: [remaining], responseText: rawReview, normalization: "accept-with-remaining" });
