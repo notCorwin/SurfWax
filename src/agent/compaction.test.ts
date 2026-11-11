@@ -122,6 +122,7 @@ describe("context choices and summary", () => {
     expect((await projection.read("user", "retry")).raw).toEqual(retry.raw);
     expect(retry.checkpoint).toBeUndefined();
     logger.beginRun("one", "failed-without-output");
+    await logger.append({ type: "conversation.submitted", conversationId: "one", content: { messageId: "user" } });
     await logger.append({ type: "model.context.appended", conversationId: "one", content: { anchorMessageId: "user", partCount: 1, message: { role: "user", content: "Failed attempt observation" } } });
     await logger.append({ type: "conversation.failed", conversationId: "one", content: null });
     logger.endRun("one", "failed-without-output");

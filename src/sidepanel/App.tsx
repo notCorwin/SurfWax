@@ -12,6 +12,7 @@ import { activeContext, ensureAutomaticContextSummary } from "../agent/context-c
 import { resolveModelLimit } from "../agent/model-limits";
 import { modelDiagnosticContext } from "../agent/diagnostics";
 import { contextPressure } from "../agent/compaction";
+import { hasSummarizableHistory } from "../agent/context-budget";
 import { activeRunIdentity, claimConversationRun, registerBackgroundRequest } from "../agent/coordinator";
 import { EventLogger, fromLogValue, rebuildConversationList, stringifyLogSafe } from "../logging";
 import type { ModelConfig } from "../types";
@@ -273,7 +274,7 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
         controller.signal.throwIfAborted();
         const pressure = await contextPressure({ raw: before.raw, branchIds: before.branchIds, events: before.events, model: config, limit, goalMode });
         if (!active) return;
-        if (!force && !overflow && pressure.estimated <= pressure.threshold) {
+        if (!force && !overflow && (pressure.estimated <= pressure.threshold || !hasSummarizableHistory(pressure.messages, pressure.limit))) {
           setContextStatus(before.checkpoint ? { message: "历史上下文已被压缩成摘要", error: false } : undefined);
           return;
         }
