@@ -80,3 +80,17 @@ describe("tool protocol", () => {
     ).toBe(false);
   });
 });
+
+it("reports the recovery field and bounded copyable evidence IDs without accepting job IDs", async () => {
+  const { validateGoal } = await import("./goal-completion");
+  const entries = Array.from({ length: 20 }, (_, i) => ({ id: `tool:observed-${i}`, name: "inspect_page", success: true, pageObserved: true as const, effectUnknown: false, order: i }));
+  const goal = { taskType: "browser" as const, status: "blocked" as const, dependency: "authentication" as const, userAction: "Sign in",
+    evidence: [{ evidenceId: "tool:observed-19", observation: "Sign-in page" }], attemptedRecovery: [{ evidenceId: "tool:job-913", action: "Inspected" }] };
+  const error = validateGoal(goal, entries)!;
+  expect(error).toContain('attemptedRecovery');
+  expect(error).toContain('tool:job-913');
+  expect(error).toContain('tool:observed-19');
+  expect(error).not.toContain('tool:observed-11');
+  expect(validateGoal({ ...goal, attemptedRecovery: [{ evidenceId: "tool:observed-19", action: "Inspected" }] }, entries)).toBeUndefined();
+  expect(validateGoal({ ...goal, evidence: [{ evidenceId: "observed-19", observation: "Sign-in page" }] }, entries)).toContain('tool:observed-19');
+});

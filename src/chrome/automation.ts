@@ -1,4 +1,4 @@
-import { SNAPSHOT_CANDIDATE_CONTEXT, semanticContexts, type CandidateAssociation } from "./candidate-context";
+import { SNAPSHOT_CANDIDATE_CONTEXT, semanticContexts, automaticContexts, type CandidateAssociation } from "./candidate-context";
 import { RENDERED_TEXT_READER_SOURCE, RENDERED_TEXT_SOURCE } from "./rendered-text";
 import type { EventLogger } from "../logging";
 import { ElementIds } from "./element-ids";
@@ -66,6 +66,7 @@ type FrameDocument = { session: Session; frame: FrameRefRecord; promise: Promise
 type FrameListSnapshot = { id: string; session: Session; generation: number; revision: number; conversationId?: string; runId?: string; frames: Array<Record<string, unknown>> };
 type InspectSnapshot = {
   id: string; session: Session; generation: number; frameRevision: number; conversationId?: string; runId?: string;
+  contextFor: (wireId: string) => Record<string, unknown>;
   record: ObservationRecord; source: SnapshotItem[]; mode: "full" | "delta"; reset?: string;
   expected?: SnapshotPosition; eligibleForBaseline: boolean; baseObservationId?: string; delivery?: symbol;
   geometry: string; geometrySources: Debuggee[]; geometryStyles: readonly string[]; geometryDynamicParents?: Map<string, Set<number>>;
@@ -1315,12 +1316,14 @@ export class AutomationRuntime {
         if (!Number.isSafeInteger(index) || index < 0 || index > source.length) throw automationError("invalid-offset", { offset: index, total: source.length });
         position = { index, charOffset: 0 };
         const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, lines: captured.lines, wireItems, viewport, scopeKey, incomplete: true };
-        const contextFor = candidateRefs.size ? semanticContexts(observationId, normalized, packed, wireItems, Boolean(captured.partial)) : undefined;
+        let semanticIndex: ReturnType<typeof semanticContexts> | undefined;
+        const contextFor = (id: string) => (semanticIndex ??= semanticContexts(observationId, normalized, packed, wireItems, Boolean(captured.partial)))(id);
         // Session/generation and the guarded frame revision pin debugger and
         // document incarnations. Numeric backend IDs alone are never joined.
         const identityKey = (ref: RefRecord) => JSON.stringify([ref.debuggee.tabId, ref.debuggee.sessionId, ref.generation, ref.frameId, ref.backendNodeId]);
         const capturedRefs = new Map<string, SnapshotLine[]>();
-        if (candidateRefs.size) for (const row of normalized) {
+        const hasAutomaticTargets = source.some(item => item.actionable);
+        if (candidateRefs.size || hasAutomaticTargets) for (const row of normalized) {
           const ref = row.node?.ref ? session.refs.get(row.node.ref) : undefined;
           if (!ref?.frameId || row.node?.layoutScope !== ref.frameId) continue;
           const key = identityKey(ref), matches = capturedRefs.get(key) ?? [];
@@ -1350,7 +1353,16 @@ export class AutomationRuntime {
         })));
         guard();
         this.rememberObservation(record);
-        saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", ...(changes ? { baseObservationId: baseline!.observationId } : {}), geometry: captured.geometry, geometrySources: captured.geometrySources, geometryStyles: captured.geometryStyles, geometryDynamicParents: captured.geometryDynamicParents,
+        const wireSources = new Map(hasAutomaticTargets ? wireItems.map((item, index) => [item.id, packed[index]!.id]) : []);
+        const automaticContextFor = (id: string): Record<string, unknown> => {
+          const sourceId = wireSources.get(id), binding = this.elementIds.get(id);
+          const ref = binding && session.refs.get(binding.sourceId);
+          const matches = ref && capturedRefs.get(identityKey(ref));
+          if (captured.readOnly || !ref?.frameId || matches?.length !== 1 || matches[0]!.id !== sourceId)
+            return { status: "unknown", observationId, reason: "capture-identity-unproved" };
+          return contextFor(sourceId!);
+        };
+        saved = { contextFor: automaticContextFor, id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", ...(changes ? { baseObservationId: baseline!.observationId } : {}), geometry: captured.geometry, geometrySources: captured.geometrySources, geometryStyles: captured.geometryStyles, geometryDynamicParents: captured.geometryDynamicParents,
           ...(captured.partial && previous ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 && !captured.partial };
         this.inspectionSnapshots.set(saved.id, saved);
         while (this.inspectionSnapshots.size > 32) this.inspectionSnapshots.delete(this.inspectionSnapshots.keys().next().value!);
@@ -1363,16 +1375,24 @@ export class AutomationRuntime {
         const truncated = position.index > 0 || position.charOffset > 0 || page.hasMore;
         const reason = page.reason === "budget" ? "budget" : "slice";
         const baselineComplete = !saved.record.partial && (!saved.record.incomplete || advances && !page.hasMore && saved.eligibleForBaseline);
-        return { observationId: saved.id, tabId, documentId: generation,
+        const result = { observationId: saved.id, tabId, documentId: generation,
           ...(options.cursor === undefined ? { url: saved.record.url, title: saved.record.title } : { continuation: true }), viewport: saved.record.viewport,
           mode: saved.mode, ...(saved.baseObservationId ? { baseObservationId: saved.baseObservationId } : {}), ...(saved.record.partial ? { partial: true } : {}), ...(saved.record.limitations ? { limitations: saved.record.limitations } : {}), ...(saved.reset ? { reset: saved.reset } : {}),
-          items: page.fragments, ...(candidate.lookahead ? { lookahead: candidate.lookahead } : {}),
+          items: page.fragments,
+          ...(candidate.lookahead ? { lookahead: candidate.lookahead } : {}),
           ...(page.next ? { nextCursor: `${saved.id}:${page.next.index}:${page.next.charOffset}` } : {}),
           truncation: { truncated, total: saved.source.length, returned: page.fragments.length, offset: position.index, charOffset: position.charOffset,
             nextOffset: page.next?.index ?? saved.source.length, nextCharOffset: page.next?.charOffset ?? 0, budget: candidate.budget, used: page.usedBytes,
             ...(candidate.combinedBytes === undefined ? {} : { withLookahead: candidate.combinedBytes }),
             ...(truncated ? { reason, baselineComplete, ...(page.requiredBudget === undefined ? {} : { requiredBudget: page.requiredBudget }) }
               : { baselineComplete }) } };
+        // Presentation must not displace a deliverable item or make a minimum
+        // page fail: use only the remaining wire allowance, including metadata.
+        const allowance = options.wire ? options.wire.maxBytes
+          - new TextEncoder().encode(JSON.stringify({ ...result, evidenceId: options.wire.evidenceId })).byteLength
+          - ',"actionContexts":'.length : 3072;
+        const actionContexts = automaticContexts(page.fragments, saved.contextFor, Math.min(3072, allowance));
+        return actionContexts ? { ...result, actionContexts } : result;
       };
       let candidate: SnapshotWirePage;
       try {

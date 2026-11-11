@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { semanticContexts } from "./candidate-context";
+import { automaticContexts, semanticContexts } from "./candidate-context";
 import type { SnapshotLine } from "./snapshot-frame-tree";
 import { packSnapshot, projectSnapshotLine } from "./snapshot-repeat";
 
@@ -52,8 +52,9 @@ it("withdraws candidate association and snapshot together if the delivery lease 
   const { SNAPSHOT_DELIVERY_COMMIT } = await import("./snapshot-wire");
   const { SNAPSHOT_CANDIDATE_CONTEXT } = await import("./candidate-context");
   const snapshot = { observationId: "observation", tabId: 1, documentId: 0, url: "https://example.test", title: "test",
-    viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items: [],
-    truncation: { truncated: false, total: 0, returned: 0, offset: 0, charOffset: 0, nextOffset: 0, nextCharOffset: 0, budget: 16000, used: 0, baselineComplete: true } };
+    viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items: [{ id: "automatic-target", actionable: true }],
+    actionContexts: { targets: [{ targetId: "automatic-target", context: { status: "unknown", observationId: "observation", reason: "unproved" } }] },
+    truncation: { truncated: false, total: 1, returned: 1, offset: 0, charOffset: 0, nextOffset: 1, nextCharOffset: 0, budget: 16000, used: 0, baselineComplete: true } };
   let canceled = false;
   Object.defineProperty(snapshot, SNAPSHOT_DELIVERY_COMMIT, { value: { begin: () => false, finish: () => { throw new Error("must not finish"); }, cancel: () => { canceled = true; } } });
   Object.defineProperty(snapshot, SNAPSHOT_CANDIDATE_CONTEXT, { value: new Map([["candidate", { context: { status: "verified", observationId: "observation", visibleLabels: [{ text: "Current" }] } }]]) });
@@ -65,4 +66,81 @@ it("withdraws candidate association and snapshot together if the delivery lease 
   expect(canceled).toBe(true);
   expect(output.pageSnapshot).toBeUndefined();
   expect(output.elements[0]).toEqual({ status: "identity-unknown", context: { status: "unknown", reason: "snapshot-unavailable" } });
+  const inspection: any = await createProgramTools(executor as any).inspect_page.execute!({}, { toolCallId: "inspect", messages: [], context: {} });
+  expect(inspection.items).toBeUndefined();
+  expect(inspection.actionContexts).toBeUndefined();
+});
+
+
+it("indexes 500 candidates once, shares container work, and bounds delivered associations", () => {
+  let reads = 0;
+  const input = [row("root", 0, "RootWebArea"), row("group", 1, "group"), row("label", 2, "StaticText", { name: "Visible shared label", textWhitespaceProven: true }),
+    ...Array.from({ length: 500 }, (_, i) => row(`button-${i}`, 2, "button", { ref: `ref-${i}` }))];
+  const rows = input.map(entry => ({ ...entry, get node() { reads++; return entry.node; } }));
+  const packed = packSnapshot(rows);
+  const wire = packed.map((entry, i) => ({ ...projectSnapshotLine(entry), id: `wire-${i}`, ...(entry.node?.ref ? { actionable: true as const } : {}) }));
+  reads = 0;
+  const lookup = semanticContexts("observation", rows, packed, wire, true);
+  const indexedReads = reads;
+  for (let i = 0; i < 500; i++) expect(lookup(`button-${i}`)).toMatchObject({ status: "verified", partial: true, visibleLabels: [{ text: "Visible shared label" }] });
+  expect(reads - indexedReads).toBeLessThan(10);
+  expect(indexedReads).toBeLessThan(rows.length * 10);
+  const byWire = new Map(wire.map((item, i) => [item.id, packed[i]!.id]));
+  const output = automaticContexts(wire, id => lookup(byWire.get(id)!))!;
+  expect(Buffer.byteLength(JSON.stringify(output))).toBeLessThanOrEqual(3072);
+  expect(output.omitted).toBeGreaterThan(0);
+  expect(automaticContexts(wire, id => lookup(byWire.get(id)!), 0)).toBeUndefined();
+  const minimal = automaticContexts(wire, id => lookup(byWire.get(id)!), 80)!;
+  expect(minimal).toEqual({ targets: [], omitted: 500 });
+  expect(Buffer.byteLength(JSON.stringify(minimal))).toBeLessThanOrEqual(80);
+  for (const pair of output.targets) expect(wire.some(item => item.id === pair.targetId && item.actionable)).toBe(true);
+  expect(automaticContexts([], lookup)).toBeUndefined();
+  expect(automaticContexts([{ id: "removed", change: "removed" }], lookup)).toBeUndefined();
+  console.log(JSON.stringify({ candidates: 500, indexedNodeReads: indexedReads, queryNodeReads: reads - indexedReads,
+    associationBytes: Buffer.byteLength(JSON.stringify(output)), delivered: output.targets.length, omitted: output.omitted }));
+});
+
+it("does not associate across frame ancestry or invent hidden text", () => {
+  const result = context([row("item", 0, "listitem"), row("hidden", 1, "StaticText", { name: "unproved secret" }),
+    row("button", 1, "button", { ref: "ref", layoutScope: "other-frame" })]);
+  expect(result).toMatchObject({ status: "unknown", reason: "missing-semantic-container" });
+  expect(JSON.stringify(result)).not.toContain("unproved secret");
+});
+
+
+it("keeps packed partial associations inside wire budgets and paginates only actual targets", async () => {
+  const { selectSnapshotWirePage } = await import("./snapshot-wire");
+  const { diffSnapshot } = await import("./snapshot-pagination");
+  const rows = [row("root", 0, "RootWebArea"), row("list", 1, "list"), row("item", 2, "listitem"),
+    row("label", 3, "StaticText", { name: "Visible label", textWhitespaceProven: true }),
+    ...Array.from({ length: 30 }, (_, i) => row(`button-${i}`, 3, "button", { ref: `ref-${i}`, name: "Process" }))];
+  const packed = packSnapshot(rows);
+  const wire = packed.map((entry, i) => ({ ...projectSnapshotLine(entry), id: `wire-${i}`, ...(entry.node?.ref ? { actionable: true as const } : {}) }));
+  const original = JSON.stringify(wire);
+  const lookup = semanticContexts("observation", rows, packed, wire, true);
+  const byWire = new Map(wire.map((item, i) => [item.id, packed[i]!.id]));
+  const contextFor = (id: string) => lookup(byWire.get(id)!);
+  let position = { index: 0, charOffset: 0 }, pages = 0, delivered = 0;
+  const envelope = (candidate: any) => ({ items: candidate.page.fragments, partial: true, actionContexts: automaticContexts(candidate.page.fragments, contextFor) });
+  for (;;) {
+    const page = selectSnapshotWirePage(wire, { budget: 12000, maxBytes: 1600, evidenceId: "tool:test", mode: "full", position }, envelope);
+    const output = envelope(page);
+    expect(Buffer.byteLength(JSON.stringify({ ...output, evidenceId: "tool:test" }))).toBeLessThanOrEqual(1600);
+    for (const pair of output.actionContexts?.targets ?? []) {
+      expect(page.page.fragments.some(item => item.id === pair.targetId && item.actionable)).toBe(true);
+      expect(pair.context).toMatchObject({ partial: true, visibleLabels: [{ text: "Visible label" }] });
+      delivered++;
+    }
+    pages++;
+    if (!page.page.next) break;
+    position = page.page.next;
+    expect(pages).toBeLessThan(100);
+  }
+  expect(pages).toBeGreaterThan(1);
+  expect(delivered).toBeGreaterThan(0);
+  expect(JSON.stringify(wire)).toBe(original);
+  expect(automaticContexts(diffSnapshot(wire, wire), contextFor)).toBeUndefined();
+  const delta = diffSnapshot(wire, wire.map(item => item.actionable ? { ...item, name: "Changed" } : item));
+  expect(delta.every(item => item.change === "updated")).toBe(true);
+  expect(automaticContexts(delta, contextFor)!.targets[0]!.context).toMatchObject({ observationId: "observation", visibleLabels: [{ text: "Visible label" }] });
 });

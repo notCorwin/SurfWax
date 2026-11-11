@@ -219,12 +219,16 @@ export function validateGoal(goal: Goal, entries: Evidence[]): string | undefine
   if (goal.taskType === "answer") return entries.length ? "Answer mode is only available when this run has done no browser work; cite browser evidence instead." : undefined;
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const cited = goal.evidence.map(({ evidenceId }) => byId.get(evidenceId));
-  if (cited.some((entry) => !entry)) {
-    const missing = goal.evidence.filter((_, index) => !cited[index]).map((item) => item.evidenceId);
-    const matches = entries.filter((entry) => missing.some((id) => entry.id.endsWith(`:${id}`)));
+  const unknownEvidence = (field: string, ids: string[]) => {
+    const missing = ids.filter(id => !byId.has(id));
+    if (!missing.length) return undefined;
+    const matches = entries.filter((entry) => missing.some((id) => entry.id.endsWith(`:${id}`))).slice(-8);
     const choices = (matches.length ? matches : entries.filter(successful).slice(-8)).map((entry) => ({ evidenceId: entry.id, tool: entry.name }));
-    return `Unknown evidenceId ${JSON.stringify(missing)}. Copy the exact evidenceId from a terminal result in this run, including its phase prefix; provider tool-call IDs are not evidence IDs. Available results: ${JSON.stringify(choices)}.`;
-  }
+    const fields = ids.flatMap((id, index) => byId.has(id) ? [] : [`${field}[${index}].evidenceId`]);
+    return `Unknown evidenceId in ${fields.join(", ")}: ${JSON.stringify(missing)}. Copy the exact evidenceId from a terminal result in this run, including its phase prefix; job IDs and provider tool-call IDs are not evidence IDs. Available results: ${JSON.stringify(choices)}.`;
+  };
+  const evidenceError = unknownEvidence("evidence", goal.evidence.map(item => item.evidenceId));
+  if (evidenceError) return evidenceError;
   if (cited.some((entry) => entry?.partialObservation)) return "A partial page snapshot is not complete evidence; obtain a reliable observation before citing it.";
   for (let index = 0; index < goal.evidence.length; index++) {
     const entry = cited[index]!;
@@ -235,7 +239,8 @@ export function validateGoal(goal: Goal, entries: Evidence[]): string | undefine
     }
   }
   if (goal.status === "blocked") {
-    if (goal.attemptedRecovery.some(({ evidenceId }) => !byId.has(evidenceId))) return "Each attempted recovery must reference an actual terminal tool result from this run.";
+    const recoveryError = unknownEvidence("attemptedRecovery", goal.attemptedRecovery.map(item => item.evidenceId));
+    if (recoveryError) return recoveryError;
     if (!cited.some((entry) => entry && observation(entry))) return "A blocker requires a successful observation, not only failed or retryable operations.";
     return undefined;
   }

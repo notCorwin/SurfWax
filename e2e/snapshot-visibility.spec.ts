@@ -212,7 +212,7 @@ test("omits hidden same-origin and cross-origin frames and includes them after t
   }
 });
 
-test("find candidates carry current semantic row labels into the next provider request", async () => {
+test("automatic actionable contexts permit a unique click and find observes recycled rows", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const ledger: string[] = [];
@@ -252,11 +252,17 @@ test("find candidates carry current semantic row labels into the next provider r
       return result;
     };
     responses.push(
-      commandResponse("find_elements", { target: { by: "role", value: "button", name: "Process", exact: true } }, "row-find"),
+      commandResponse("get_page_info", {}, "row-info"),
       request => {
-        const result = check(request, ["JOB-A Waiting", "JOB-B Next"]);
-        const selected = result.elements.find((element: any) => element.context.visibleLabels.some((label: any) => label.text.includes("JOB-B Next")));
-        return commandResponse("click", { target: { id: selected.id } }, "row-click");
+        const snapshot = lastTool(request).pageSnapshot;
+        const pairs = snapshot.actionContexts.targets;
+        expect(pairs).toHaveLength(2);
+        expect(JSON.stringify(pairs)).not.toMatch(/Hidden decoy|ARIA-only decoy/);
+        const selected = pairs.find((pair: any) => pair.context.visibleLabels.some((label: any) => label.text.includes("JOB-B Next")));
+        expect(selected.context).toMatchObject({ observationId: snapshot.observationId, status: "verified" });
+        expect(snapshot.items.some((item: any) => item.id === selected.targetId && item.actionable)).toBe(true);
+        expect(Buffer.byteLength(JSON.stringify(snapshot))).toBeLessThanOrEqual(16384);
+        return commandResponse("click", { target: { id: selected.targetId } }, "row-click");
       },
       commandResponse("find_elements", { target: { by: "role", value: "button", name: "Process", exact: true } }, "row-find-recycled"),
       request => { check(request, ["JOB-C Next", "JOB-D Waiting"]); return textResponse("ROW_CONTEXT_OK"); },
@@ -269,8 +275,7 @@ test("find candidates carry current semantic row labels into the next provider r
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ROW_CONTEXT_OK", { timeout: 60_000 });
     expect(await target.getAttribute("body", "data-clicked")).toBe("JOB-B Next");
     await expect.poll(() => ledger).toEqual(["JOB-B Next"]);
-    expect(found[1].pageSnapshot.observationId).not.toBe(found[0].pageSnapshot.observationId);
-    expect(found[1].pageSnapshot.mode).toBe("delta");
+    expect(found[0].pageSnapshot.mode).toBe("delta");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
@@ -296,6 +301,10 @@ for (const selector of ['iframe[src="/same-frame"]', 'iframe[src*="localhost"]']
           const selected = result.elements.find((element: any) => element.context.visibleLabels?.some((label: any) => label.text.includes("FRAME-B Next")));
           expect(selected, JSON.stringify(result)).toMatchObject({ actionable: true, context: { status: "verified", observationId: result.pageSnapshot.observationId } });
           expect(JSON.stringify(result.elements.map((element: any) => element.context))).not.toContain("Transparent decoy");
+          const automatic = result.pageSnapshot.actionContexts.targets.find((pair: any) => pair.targetId === selected.context.snapshotItemId);
+          expect(automatic, JSON.stringify(result.pageSnapshot)).toMatchObject({ context: { status: "verified", observationId: result.pageSnapshot.observationId } });
+          expect(JSON.stringify(automatic.context)).toContain("FRAME-B Next");
+          expect(JSON.stringify(automatic.context)).not.toContain("FRAME-A Waiting");
           return commandResponse("click", { target: { id: selected.id } }, "frame-click");
         },
         textResponse("FRAME_CONTEXT_OK"), textResponse("框架关联"),
