@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
 import { createMemoryEventStore } from "../memory-event-store";
 import { effectiveContext, summarizeContext } from "./compaction";
+import { IncrementalActiveContext } from "./context-choice";
 
 function fixture() {
   const events: LogEvent[] = [];
@@ -99,6 +100,20 @@ describe("context choices and summary", () => {
     expect(second.messages).toContainEqual(raw[0]);
     expect(second.messages).toContainEqual(raw[2]);
     expect(second.messages).toContainEqual(extended.at(-1));
+
+    await logger.appendMessage("one", { id: "user", role: "user", parts: [{ type: "text", text: "Retry this request" }] }, { parentId: null });
+    await logger.appendMessage("one", { id: "prior-reply", role: "assistant", parts: [{ type: "text", text: "Prior branch answer" }] }, { parentId: "user" });
+    const projection = new IncrementalActiveContext(logger, "one");
+    expect((await projection.read()).branchIds).toEqual(["user", "prior-reply"]);
+    // Changing the run's head must invalidate a cached projection even when no
+    // events arrive, without changing the durable idle branch selection.
+    const retry = await projection.read("user");
+    expect(retry.branchIds).toEqual(["user"]);
+    expect(JSON.stringify(retry.messages)).not.toContain("Prior branch answer");
+    expect(retry.checkpoint).toBeUndefined();
+    expect((await projection.read()).branchIds).toEqual(["user", "prior-reply"]);
+    expect((await logger.repository("one")).headId).toBe("prior-reply");
+    await expect(projection.read("uncommitted-head")).rejects.toThrow("上下文锚点尚未保存");
   });
 
   it("does not write a checkpoint when one fragment fails", async () => {

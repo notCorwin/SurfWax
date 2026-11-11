@@ -139,6 +139,8 @@ export const ContextIndicator = memo(function ContextIndicator({ config, logger,
     let pending = false;
     const initialThread = runtime.getState();
     let loading = initialThread.isLoading;
+    const contextHead = () => { const thread = runtime.getState(); return thread.isRunning ? thread.messages.at(-1)?.id : undefined; };
+    let headId = contextHead();
     const controller = new AbortController();
     const unregisterRequest = registerBackgroundRequest(controller, conversationId);
     controller.signal.addEventListener("abort", unregisterRequest, { once: true });
@@ -155,7 +157,7 @@ export const ContextIndicator = memo(function ContextIndicator({ config, logger,
           const current = version;
           try {
             const resolvedLimit = await limit;
-            const canonical = await projection.read();
+            const canonical = await projection.read(headId);
             const pressure = await contextPressure({
               raw: canonical.raw,
               branchIds: canonical.branchIds,
@@ -196,9 +198,9 @@ export const ContextIndicator = memo(function ContextIndicator({ config, logger,
       });
     };
     const unsubscribeRuntime = runtime.thread.subscribe(() => {
-      // Message input is invalidated by committed log events. Composer edits and
-      // display-only publications cannot change model context.
-      if (runtime.getState().isLoading !== loading) schedule();
+      // A retry's active branch can differ from the persisted idle selection.
+      const nextHead = contextHead();
+      if (runtime.getState().isLoading !== loading || nextHead !== headId) { headId = nextHead; schedule(); }
     });
     const unsubscribe = logger.subscribe((event) => {
       if (event.type !== "log.cleared" && (event.conversationId !== conversationId || !CONTEXT_USAGE_EVENTS.has(event.type))) return;

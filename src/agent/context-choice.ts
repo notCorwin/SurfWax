@@ -13,8 +13,8 @@ export async function modelMessages(messages: ConversationMessage[], events: rea
   return projectModelMessages(messages, events);
 }
 
-export async function activeContext(logger: EventLogger, conversationId: string) {
-  return new IncrementalActiveContext(logger, conversationId).read();
+export async function activeContext(logger: EventLogger, conversationId: string, headId?: string) {
+  return new IncrementalActiveContext(logger, conversationId).read(headId);
 }
 
 export type ActiveContextSnapshot = {
@@ -31,18 +31,19 @@ export class IncrementalActiveContext {
   private afterId = -1;
   private others: LogEvent[] = [];
   private snapshot?: ActiveContextSnapshot;
+  private snapshotHead?: string;
   private messages = new Map<string, { firstRaw: LogEvent; firstValid?: LogEvent; latestValid?: LogEvent }>();
 
   constructor(private logger: EventLogger, private conversationId: string) {}
 
-  async read(): Promise<ActiveContextSnapshot> {
+  async read(headId?: string): Promise<ActiveContextSnapshot> {
     let batch = await this.logger.contextProjectionEvents(this.conversationId, this.afterId);
     if (this.epoch !== undefined && this.epoch !== batch.epoch) {
       this.afterId = -1; this.others = []; this.messages.clear(); this.snapshot = undefined;
       batch = await this.logger.contextProjectionEvents(this.conversationId);
     }
     this.epoch = batch.epoch;
-    if (!batch.value.length && this.snapshot) return this.snapshot;
+    if (!batch.value.length && this.snapshot && this.snapshotHead === headId) return this.snapshot;
     for (const event of batch.value) {
       this.afterId = Math.max(this.afterId, event.id);
       if (event.type !== "conversation.message") { this.others.push(event); continue; }
@@ -62,8 +63,11 @@ export class IncrementalActiveContext {
     projected.sort((left, right) => left.id - right.id);
     const repository = await restoreConversationRepository(projected);
     const byId = new Map(repository.messages.map((item) => [item.message.id, item]));
+    if (headId !== undefined && !byId.has(headId)) throw new Error("模型上下文锚点尚未保存，请重试。");
     const ui: ConversationMessage[] = [];
-    let id = repository.headId;
+    // A running retry owns its requested branch before publishing a new reply.
+    // The idle selected head remains untouched if it fails without any output.
+    let id = headId ?? repository.headId;
     while (id) {
       const item = byId.get(id);
       if (!item) break;
@@ -73,6 +77,7 @@ export class IncrementalActiveContext {
     const raw = await modelMessages(ui, projected);
     const branchIds = ui.map((message) => message.id);
     const { checkpoint, messages } = await effectiveContext(projected, branchIds, raw);
+    this.snapshotHead = headId;
     return this.snapshot = { ui, raw, events: projected, branchIds, checkpoint, messages };
   }
 }
@@ -81,10 +86,10 @@ export class IncrementalActiveContext {
 export async function ensureAutomaticContextSummary(
   logger: EventLogger, conversationId: string, model: ModelConfig, signal: AbortSignal,
   options: { forced?: boolean; languageModel?: LanguageModel; limit?: ModelLimit;
-    instructions?: unknown; tools?: readonly Record<string, unknown>[]; goalMode?: boolean } = {},
+    instructions?: unknown; tools?: readonly Record<string, unknown>[]; goalMode?: boolean; headId?: string } = {},
 ): Promise<boolean> {
   signal.throwIfAborted();
-  const source = await activeContext(logger, conversationId);
+  const source = await activeContext(logger, conversationId, options.headId);
   const limit = options.limit ?? await resolveModelLimit(model, { signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
   const pressure = await contextPressure({ raw: source.raw, branchIds: source.branchIds, events: source.events,
     model, limit, instructions: options.instructions, tools: options.tools, goalMode: options.goalMode });

@@ -69,9 +69,9 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
       return createAgent({ model: config, modelLimit, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor: browserExecutor, logger, conversationId,
         instructions: systemPrompt, prompt, signal, onResponse, shouldYield, contextAnchor, goalMode,
         compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal, prompt }) });
-    }, logger, conversationId, () => executor.endRun(), async (signal) => {
+    }, logger, conversationId, () => executor.endRun(), async (signal, headId) => {
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt);
-      await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, instructions: prompt.instructions + (goalMode ? GOAL_INSTRUCTIONS : ""), tools: goalMode ? GOAL_TOOLS : PROMPT_TOOLS });
+      await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, headId, instructions: prompt.instructions + (goalMode ? GOAL_INSTRUCTIONS : ""), tools: goalMode ? GOAL_TOOLS : PROMPT_TOOLS });
     }, systemPrompt, async (signal, runId) => {
       const browserExecutor = await executor.get();
       signal.throwIfAborted();

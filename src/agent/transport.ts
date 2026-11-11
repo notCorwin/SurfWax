@@ -39,7 +39,7 @@ export function followupDispatch(message: SidePanelMessage | undefined): { id: s
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 /** Each publication contains complete model content or a completed tool result. */
-export function createChatTransport(agent: AgentFactory, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal) => Promise<void>, systemPrompt?: string, observeRefreshes?: (signal: AbortSignal, runId: string) => Promise<RefreshObserver>, goalMode = false): ConversationTransport {
+export function createChatTransport(agent: AgentFactory, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal, headId?: string) => Promise<void>, systemPrompt?: string, observeRefreshes?: (signal: AbortSignal, runId: string) => Promise<RefreshObserver>, goalMode = false): ConversationTransport {
   return {
     async sendMessages(options) {
       const lease = options.runLease ?? await claimConversationRun(conversationId, options.abortSignal);
@@ -285,7 +285,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
               const source = JSON.stringify(response.parts.length ? [...initial, response] : initial);
               if (summarizedSources.has(source)) throw error;
               summarizedSources.add(source);
-              await onContextOverflow!(lease.signal);
+              await onContextOverflow!(lease.signal, response.parts.length ? response.id : initial.at(-1)?.id);
               for (const entry of (await logger.repository(conversationId)).messages) saved.set(entry.message.id, entry.message);
             }
             const delayMs = overflow ? 0 : retryBackoffDelay(attempt + 1);

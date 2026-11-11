@@ -2,6 +2,7 @@ import { gunzipSync } from "node:zlib";
 import bundledCatalog from "../src/data/models-dev-api";
 import {
   assistantResponse,
+  commandResponse,
   configure,
   delayedResponse,
   dispose,
@@ -105,6 +106,8 @@ test(
     const replyMayFinish = new Promise<void>((resolve) => {
       releaseReply = resolve;
     });
+    let releaseRetry!: () => void;
+    const retryMayFinish = new Promise<void>((resolve) => { releaseRetry = resolve; });
     const provider = await startProvider([
       delayedResponse(
         textResponse("LONG_BRANCH " + "page observation ".repeat(2_000)),
@@ -112,7 +115,12 @@ test(
         replyMayFinish,
       ),
       textResponse("上下文分支测试"),
-      textResponse("SHORT_BRANCH"),
+      commandResponse("list_tabs", {}, "retry-branch-tabs"),
+      delayedResponse(textResponse("SHORT_BRANCH"), 0, retryMayFinish),
+      { status: 400, error: "Regeneration rejected before any response" },
+      commandResponse("list_tabs", {}, "edited-branch-tabs"),
+      textResponse("EDITED_BRANCH_REPLY"),
+      textResponse("RELOADED_BRANCH_REPLY"),
     ]);
     const opened = await openExtension();
     try {
@@ -160,9 +168,20 @@ test(
         .toBeGreaterThan(initial + 5);
 
       await opened.page.getByTestId("replay-message-button").click();
+      await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+      await expect(indicator).toHaveAttribute("data-state", "ready");
+      await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBeLessThan(longPercent);
+      releaseRetry();
       await expect(opened.page.locator(".markdown-body").last()).toContainText(
         "SHORT_BRANCH",
       );
+      const agentRequests = () => provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "list_tabs"));
+      for (const request of agentRequests().slice(1)) {
+        const retryInput = JSON.stringify(request.messages);
+        expect(retryInput).toContain("pending request");
+        expect(retryInput).not.toContain("LONG_BRANCH");
+      }
+      expect(agentRequests()[2].messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "retry-branch-tabs" }));
       await expect
         .poll(async () =>
           Number(await indicator.getAttribute("data-used-percent")),
@@ -180,8 +199,48 @@ test(
           Number(await indicator.getAttribute("data-used-percent")),
         )
         .toBe(longPercent);
+
+      // A rejected retry must use the requested input while preserving the idle
+      // selected reply, including after reopening its canonical history.
+      await opened.page.getByTestId("replay-message-button").click();
+      await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
+      await expect(opened.page.locator(".markdown-body").last()).toContainText("LONG_BRANCH");
+      expect(agentRequests()).toHaveLength(4);
+      expect(JSON.stringify(agentRequests()[3].messages)).not.toMatch(/LONG_BRANCH|SHORT_BRANCH/);
+      await opened.page.reload();
+      await opened.page.getByTestId("conversation-menu").click();
+      await opened.page.locator(".conversation-select").filter({ hasText: "上下文分支测试" }).click();
+      await expect(opened.page.locator(".markdown-body").last()).toContainText("LONG_BRANCH");
+
+      await opened.page.getByTestId("edit-message-button").click();
+      await opened.page.getByTestId("edit-message-input").fill("EDITED_BRANCH_REQUEST");
+      await opened.page.getByRole("button", { name: "保存并重新生成" }).click();
+      await expect(opened.page.locator(".markdown-body").last()).toContainText("EDITED_BRANCH_REPLY");
+      expect(agentRequests()).toHaveLength(6);
+      for (const request of agentRequests().slice(4)) {
+        const input = JSON.stringify(request.messages);
+        expect(input).toContain("EDITED_BRANCH_REQUEST");
+        expect(input).not.toMatch(/pending request|LONG_BRANCH|SHORT_BRANCH/);
+      }
+      expect(agentRequests()[5].messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "edited-branch-tabs" }));
+      await opened.page.reload();
+      await opened.page.getByTestId("conversation-menu").click();
+      await opened.page.locator(".conversation-select").filter({ hasText: "上下文分支测试" }).click();
+      await expect(opened.page.locator(".markdown-body").last()).toContainText("EDITED_BRANCH_REPLY");
+      await opened.page.getByTestId("composer-input").fill("FOLLOWUP_AFTER_RELOAD");
+      await opened.page.getByTestId("composer-input").press("Enter");
+      await expect(opened.page.locator(".markdown-body").last()).toContainText("RELOADED_BRANCH_REPLY");
+      const reloaded = JSON.stringify(agentRequests()[6].messages);
+      expect(agentRequests()[6].messages.slice(0, agentRequests()[5].messages.length)).toEqual(agentRequests()[5].messages);
+      expect(reloaded).toContain("EDITED_BRANCH_REQUEST");
+      expect(reloaded).toContain("EDITED_BRANCH_REPLY");
+      expect(reloaded).not.toMatch(/pending request|LONG_BRANCH|SHORT_BRANCH/);
+      const canonical = JSON.stringify((await readEvents(opened.page)).filter(event => event.type === "conversation.message"));
+      expect(canonical).toContain("LONG_BRANCH");
+      expect(canonical).toContain("SHORT_BRANCH");
     } finally {
       releaseReply();
+      releaseRetry();
       await dispose(opened.context, opened.userDataDirectory, provider.server);
     }
   },
