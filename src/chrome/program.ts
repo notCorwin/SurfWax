@@ -87,6 +87,10 @@ export class ProgramScope {
   private readonly pending = new Set<Promise<unknown>>();
   private readonly subjects = new WeakMap<object, object>();
   private currentDispatch?: () => Promise<void>;
+  // Monotonic call evidence survives successful receipts clearing `uncertain`.
+  // Keep this small record separate so interrupted tools need not retain the scope.
+  readonly dispatchState = { everDispatched: false };
+  get everDispatched(): boolean { return this.dispatchState.everDispatched; }
   private readonly uncertain = new Set<number>();
   constructor(
     readonly signal: AbortSignal,
@@ -156,6 +160,7 @@ export class ProgramScope {
           this.guard();
           if (source && tracked) this.observer?.dispatched(tracked, source);
           dispatched = true;
+          this.dispatchState.everDispatched = true;
           this.uncertain.add(sequence);
         })());
       try {
@@ -184,8 +189,8 @@ export class ProgramScope {
         this.uncertain.delete(sequence);
         return result;
       } catch (error) {
-        if (dispatched && error && typeof error === "object")
-          Object.assign(error, { effectUnknown: true });
+        if (error && typeof error === "object")
+          Object.assign(error, { effectUnknown: dispatched || (error as any).effectUnknown === true });
         await this.event(
           operation,
           sequence,

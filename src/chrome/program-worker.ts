@@ -12,7 +12,7 @@ export function programWorkerMain(codecFactory: typeof createProgramCodec) {
     name: error?.name,
     code: error?.code,
     ...(error?.artifact ? { artifact: error.artifact } : {}),
-    effectUnknown: Boolean(error?.effectUnknown),
+    ...(typeof error?.effectUnknown === "boolean" ? { effectUnknown: error.effectUnknown } : {}),
   });
   self.addEventListener("unhandledrejection", (event: any) => {
     event.preventDefault();

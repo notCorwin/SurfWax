@@ -112,7 +112,10 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             : error;
           const failure = toolFailure(cause);
           const chooserUpload = definition.name === "upload_file_chooser";
-          if (executing && !chooserUpload && definition.name !== "read_artifact" && abortSignal?.aborted && definition.program && !READ_ONLY_TOOLS.has(definition.name) && !failure.error.effectUnknown) failure.error.effectUnknown = true;
+          if (executing && !chooserUpload && definition.name !== "read_artifact" && abortSignal?.aborted && definition.program && !READ_ONLY_TOOLS.has(definition.name)) {
+            const dispatched = executor.programEffectUnknown?.(identity?.toolCallId ?? toolCallId);
+            failure.error.effectUnknown = failure.error.effectUnknown === true || (dispatched ?? failure.error.effectUnknown ?? true);
+          }
           failure.error = recoveryError(failure.error, definition.name);
           if (!failure.artifact && options.logger && identity?.runId) {
             const artifact = await (artifactLookup ??= logIO(options.logger.toolArtifact(options.conversationId!, identity), "读取工具产物", Math.min(1000, timeout)).catch(() => undefined));
@@ -753,6 +756,8 @@ function recoveryError<T extends Record<string, any>>(error: T, toolName: string
     code: error.code === "stale-ref" ? "stale-id" : "id-unavailable",
     ...(typeof error.message === "string" ? { message: error.message.replace(/stale-ref/g, "stale-id").replace(/ref-unavailable/g, "id-unavailable").replace(/"ref":/g, '"id":') } : {}) };
   if (error.effectUnknown === true) return { ...error, retryable: false, recovery: "Effect unknown. Inspect the current state and verify the outcome before deciding whether to act again." };
+  if (["not-found", "strict-mode", "frame-not-found"].includes(error.code))
+    return { ...error, retryable: false, recovery: "Use list_frames and specify the target frame, or inspect_page/find_elements and use a unique observed element ID." };
   if (typeof error.code === "string" && /stale|expired|detached|identity-unknown/.test(error.code))
     return { ...error, retryable: false, recovery: "Observe the current state and locate the target again before continuing." };
   if (error.code === "timeout" && READ_ONLY_TOOLS.has(toolName))
@@ -768,8 +773,8 @@ function toolFailure(error: unknown): { ok: false; error: { code: string; messag
     : error instanceof DOMException && error.name === "TimeoutError" ? "timeout"
     : error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code
     : /(?:Command|Automation)Error\[([^\]]+)\]/.exec(message)?.[1] ?? "tool-error";
-  const effectUnknown = Boolean(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown);
-  return { ok: false, error: { code, message, ...(effectUnknown ? { effectUnknown: true } : {}) }, ...(error && typeof error === "object" && "artifact" in error ? { artifact: error.artifact } : {}) };
+  const effectUnknown = error && typeof error === "object" && "effectUnknown" in error && typeof error.effectUnknown === "boolean" ? error.effectUnknown : undefined;
+  return { ok: false, error: { code, message, ...(effectUnknown === undefined ? {} : { effectUnknown }) }, ...(error && typeof error === "object" && "artifact" in error ? { artifact: error.artifact } : {}) };
 }
 
 export const repairProgramToolCall: ToolCallRepairFunction<Record<string, ReturnType<typeof dynamicTool>>> = async ({ toolCall, tools }) => {

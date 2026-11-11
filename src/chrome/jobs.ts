@@ -183,7 +183,7 @@ export class BrowserJobs {
                     )?.[1] ?? "execution-failed"),
               message: error instanceof Error ? error.message : String(error),
               retryable: false,
-              ...((error as any)?.effectUnknown ? { effectUnknown: true } : {}),
+              ...(typeof (error as any)?.effectUnknown === "boolean" ? { effectUnknown: (error as any).effectUnknown } : {}),
             },
           },
         );

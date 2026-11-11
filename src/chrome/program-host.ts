@@ -184,7 +184,7 @@ export async function executeProgramWithTransport(
                     name: error?.name,
                     code: error?.code,
                     ...(error?.artifact ? { artifact: error.artifact } : {}),
-                    effectUnknown: Boolean(error?.effectUnknown),
+                    ...(typeof error?.effectUnknown === "boolean" ? { effectUnknown: error.effectUnknown } : {}),
                   },
                 });
               throw error;

@@ -217,7 +217,8 @@ class AutomationError extends Error {
 }
 
 function automationError(code: string, detail: Record<string, unknown>): AutomationError {
-  return new AutomationError(code, detail);
+  return new AutomationError(code, ["not-found", "strict-mode", "frame-not-found"].includes(code)
+    ? { ...detail, recovery: "Use list_frames and specify the target frame, or inspect_page/find_elements and use a unique observed element ID." } : detail);
 }
 
 function validateLocator(spec: LocatorSpec): void {
@@ -1643,17 +1644,25 @@ export class AutomationRuntime {
         const property = operation === "inputValue" ? "value" : operation;
         return this.callOn(targetSession, objectId, `function(name){ return name === "getAttribute" ? this.getAttribute(arguments[1]) : this[name]; }`, [property, args[0]]);
       }
-      if (operation === "evaluate") {
-        const objectId = await this.resolveOne(session, spec);
+      if (operation === "evaluate" || operation === "evaluateImmediate") {
+        const objectId = operation === "evaluateImmediate" ? await this.resolveConditionTarget(session, spec) : await this.resolveOne(session, spec);
+        if (!objectId) throw automationError("not-found", { locator: spec });
         const targetSession = this.objectSession(session, objectId);
         const source = typeof args[0] === "function" ? String(args[0]) : String(args[0]);
         const input = encodeLogGraph(args[1]);
+        const immediate = operation === "evaluateImmediate";
         const declaration = `function(input) {
           const codec = ${EVALUATION_CODEC_FACTORY};
-          return (async () => codec.encodeLogGraph(await (\n${source}\n)(this, codec.decodeLogGraph(input))))();
+          ${immediate ? 'if (!this.isConnected) return { connected: false };' : ''}
+          return (async () => {
+            const value = codec.encodeLogGraph(await (\n${source}\n)(this, codec.decodeLogGraph(input)));
+            return ${immediate ? '{ connected: true, value }' : 'value'};
+          })();
         }`;
         await this.options.onDispatch?.();
-        return decodeLogGraph(await this.callOn(targetSession, objectId, declaration, [input]));
+        const result = await this.callOn(targetSession, objectId, declaration, [input]);
+        if (immediate && !result?.connected) throw automationError("detached", { reason: "bound-target-removed" });
+        return decodeLogGraph(immediate ? result.value : result);
       }
       if (operation === "scrollIntoViewIfNeeded") {
         const { objectId, targetSession } = await this.waitActionableLocator(session, spec, false, false, true, false);
@@ -1709,7 +1718,7 @@ export class AutomationRuntime {
         return this.afterAction(session);
       }
       if (operation === "press" || operation === "pressSequentially") {
-        const { objectId, targetSession } = await this.waitActionableLocator(session, spec, operation === "pressSequentially", false, false, operation === "pressSequentially", operation === "press");
+        const { objectId, targetSession } = await this.waitActionableLocator(session, spec, operation === "pressSequentially", false, false, operation === "pressSequentially", true);
         if (operation === "pressSequentially") {
           const kind = await this.callOn(targetSession, objectId, TEXT_INPUT_KIND_SOURCE);
           if (kind === "detached") throw automationError("detached", { reason: "editable-target-removed" });
@@ -1780,7 +1789,11 @@ export class AutomationRuntime {
           const node = await this.options.command(chooser!.debuggee, "DOM.resolveNode", { backendNodeId: chooser!.backendNodeId, objectGroup: "surf-wax-automation" });
           if (!node.object?.objectId) throw automationError("detached", { reason: "file-chooser-node-removed" });
           objectId = node.object.objectId; this.objectDebuggees.set(objectId, chooser!.debuggee);
-        } else objectId = await this.resolveOne(session, spec);
+        } else {
+          const resolved = await this.resolveConditionTarget(session, spec);
+          if (!resolved) throw automationError("not-found", { locator: spec });
+          objectId = resolved;
+        }
         const targetSession = this.objectSession(session, objectId);
         const requested = Array.isArray(args[0]) ? args[0] : [args[0]];
         for (const file of requested as any[]) {
@@ -3264,7 +3277,7 @@ export class AutomationRuntime {
     }
   }
 
-  private async waitActionableLocator(session: Session, spec: LocatorSpec, editable: boolean, pointer: boolean, stable = pointer, enabled = true, failFast = false): Promise<{ objectId: string; targetSession: Session; state: ElementState }> {
+  private async waitActionableLocator(session: Session, spec: LocatorSpec, editable: boolean, pointer: boolean, stable = pointer, enabled = true, failFast = true): Promise<{ objectId: string; targetSession: Session; state: ElementState }> {
     let attempt = 0;
     const singleResolution = failFast || spec.queries.some((query) => query.kind === "uniqueScope");
     // A semantic locator may survive a framework replacing its element before
@@ -3470,7 +3483,7 @@ export class AutomationRuntime {
   }
 
   private async pointer(session: Session, spec: LocatorSpec, operation: string, options: { button?: "left" | "right" | "middle"; modifiers?: string[] } = {}, bound?: { objectId: string; targetSession: Session; state: ElementState }): Promise<void> {
-    const target = bound ? await this.waitBoundActionable(session, bound, operation !== "hover") : await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover", operation === "click" || operation === "dblclick");
+    const target = bound ? await this.waitBoundActionable(session, bound, operation !== "hover") : await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover", true);
     const state = await this.toRootPoint(session, target.targetSession, target.state);
     if (operation === "hover") {
       await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: state.x, y: state.y });
@@ -6192,6 +6205,8 @@ export class LocatorFacade {
   isVisible() { return this.run("isVisible"); }
   isEnabled() { return this.run("isEnabled"); }
   isChecked() { return this.run("isChecked"); }
+  /** Internal one-shot resolution; the public evaluate method retains its waiting contract. */
+  evaluateImmediate(fn: string, arg?: unknown) { return this.run("evaluateImmediate", fn, arg); }
   evaluate(fn: ((element: Element, arg?: unknown) => unknown) | string, arg?: unknown) { return this.run("evaluate", fn, arg); }
   private run(operation: string, ...args: unknown[]) { return this.runtime.locatorValue(this.tabId, this.spec, operation, args); }
 }

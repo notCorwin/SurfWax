@@ -51,12 +51,12 @@ function abortError(): DOMException {
   return new DOMException("Operation aborted", "AbortError");
 }
 
-function interruptionError(signal: AbortSignal, effectUnknown = false): DOMException {
+function interruptionError(signal: AbortSignal, effectUnknown?: boolean): DOMException {
   const reason = signal.reason;
   const error = reason instanceof DOMException && reason.name === "TimeoutError"
     ? new DOMException(reason.message, "TimeoutError")
     : new DOMException(reason instanceof Error ? reason.message : reason === undefined ? "Operation aborted" : String(reason), "AbortError");
-  if (effectUnknown) Object.assign(error, { effectUnknown: true });
+  if (effectUnknown !== undefined) Object.assign(error, { effectUnknown });
   return error;
 }
 
@@ -376,9 +376,23 @@ export class ChromeExecutor {
     }, effectiveSignal, input.timeoutMs, false);
   }
 
+  // Tool deadlines can win the result race before the job reports its error.
+  // Retain bounded, call-specific dispatch evidence for that cancellation path.
+  private readonly programEffects = new Map<string, { everDispatched: boolean }>();
+
+  programEffectUnknown(toolCallId: string): boolean | undefined {
+    if (!this.programEffects.has(toolCallId)) return undefined;
+    return this.programEffects.get(toolCallId)?.everDispatched ?? false;
+  }
+
   async runProgram(input: { code: string; background?: boolean; timeoutMs?: number; defaultTimeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     if (!context.conversationId || !this.logger) throw new Error("Programs require a conversation and canonical event log");
     if (input.background) this.runOwnerFor(context);
+    const effectKey = context.logIdentity?.toolCallId ?? context.toolCallId;
+    if (effectKey) {
+      this.programEffects.set(effectKey, { everDispatched: false });
+      if (this.programEffects.size > 1000) this.programEffects.delete(this.programEffects.keys().next().value!);
+    }
     const epoch = this.backgroundEpoch;
     const jobContext = { conversationId: context.conversationId, logIdentity: context.logIdentity };
     const controller = new AbortController();
@@ -431,6 +445,7 @@ export class ChromeExecutor {
       } : undefined;
       const scope = new ProgramScope(programSignal, jobId, jobContext, this.logger!, observer);
       this.programScope = scope;
+      if (effectKey) this.programEffects.set(effectKey, scope.dispatchState);
       let pages: ProgramPages | undefined;
       let stoppedBrowser = false;
       const stopBrowser = async () => {
@@ -470,7 +485,7 @@ export class ChromeExecutor {
         await scope.finish();
         const failure = error && typeof error === "object" ? error
           : Object.assign(new DOMException(String(error ?? programSignal.reason ?? "Operation aborted"), programSignal.aborted ? "AbortError" : "Error"), { cause: error });
-        if (scope.effectUnknown) Object.assign(failure, { effectUnknown: true });
+        Object.assign(failure, { effectUnknown: scope.effectUnknown || (programSignal.aborted && scope.everDispatched) || (failure as any).effectUnknown === true });
         throw failure;
       } finally {
         programSignal.removeEventListener("abort", recordTimeoutPhase);
@@ -1037,7 +1052,8 @@ export class ChromeExecutor {
       read: (id: number, selection = {}) => call("artifacts.read", false, () => this.logger!.result(id, selection, this.activeContext.conversationId)),
       save: (id: number, filename?: string) => call("artifacts.save", true, () => this.saveArtifact(id, filename)),
       text: (filename: string, text: string, mimeType = "text/plain", save = false) => call("artifacts.text", save, () => this.storeText(filename, text, mimeType, save)),
-      importUrl: (url: string, filename: string) => call("artifacts.importUrl", false, async () => {
+      importUrl: (url: string, filename: string) => call("artifacts.importUrl", true, async () => {
+        await scope.dispatched();
         const response = await fetch(url, { signal: scope.signal });
         if (!response.ok) throw new Error(`Could not import file: HTTP ${response.status}`);
         const bytes = new Uint8Array(await response.arrayBuffer());
@@ -1046,10 +1062,10 @@ export class ChromeExecutor {
         for (const byte of bytes) binary += String.fromCharCode(byte);
         return this.storeArtifact(filename, btoa(binary), response.headers.get("content-type") || "application/octet-stream");
       }),
-      importLink: (tabId: number, target: unknown) => call("artifacts.importLink", false, async () => {
+      importLink: (tabId: number, target: unknown) => call("artifacts.importLink", true, async () => {
         const raw = await this.boundPage(tabId, state);
         const locator = await this.locatorFor(raw, target);
-        const file = await locator.evaluate(`async element => {
+        const file = await locator.evaluateImmediate(`async element => {
           if (!(element instanceof HTMLAnchorElement) || !element.hasAttribute('href')) throw new Error('Target must be a link with an href');
           const response = await fetch(element.href);
           if (!response.ok) throw new Error('Could not import linked file: HTTP ' + response.status);
@@ -1096,18 +1112,21 @@ export class ChromeExecutor {
     let work: Promise<T> | undefined;
     try {
       try { await deadline.wait(previous); }
-      catch (error) { if (deadline.signal.aborted) throw interruptionError(deadline.signal); throw error; }
+      catch (error) { if (deadline.signal.aborted) throw interruptionError(deadline.signal, false); throw error; }
       throwIfAborted(deadline.signal);
       if (this.quarantineError) throw this.quarantineError;
       work = Promise.resolve().then(() => run(deadline.signal));
       try { return await deadline.wait(work); }
       catch (error) {
         if (!deadline.signal.aborted) throw error;
-        const uncertain = mayHaveEffect || this.programScope?.effectUnknown === true;
+        const scope = this.programScope;
+        let uncertain = mayHaveEffect || scope?.everDispatched === true;
         this.programScope?.revoke();
         const cleanup = createDeadline(CLEANUP_TIMEOUT_MS, undefined, "Browser cancellation cleanup");
-        try { await cleanup.wait(work.catch(() => undefined)); }
-        catch (cleanupError) { this.isolate(cleanupError); }
+        try { await cleanup.wait(work.catch((failure) => {
+          if (typeof failure?.effectUnknown === "boolean") uncertain ||= failure.effectUnknown;
+        })); }
+        catch (cleanupError) { uncertain = true; this.isolate(cleanupError); }
         finally { cleanup.dispose(); }
         throw interruptionError(deadline.signal, uncertain);
       }
@@ -1714,7 +1733,7 @@ export class ChromeExecutor {
     return result;
   }
 
-  private async awaitAbort<T>(task: Promise<T>, signal?: AbortSignal, effectUnknown = false): Promise<T> {
+  private async awaitAbort<T>(task: Promise<T>, signal?: AbortSignal, effectUnknown?: boolean): Promise<T> {
     if (!signal) return task;
     if (signal.aborted) { void task.catch(() => undefined); throw interruptionError(signal, effectUnknown); }
     return new Promise<T>((resolve, reject) => {
