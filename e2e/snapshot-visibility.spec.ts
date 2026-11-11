@@ -211,3 +211,142 @@ test("omits hidden same-origin and cross-origin frames and includes them after t
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
+
+test("find candidates carry current semantic row labels into the next provider request", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const ledger: string[] = [];
+  provider.server.on("request", request => {
+    const clicked = new URL(request.url ?? "/", provider.origin).searchParams.get("clicked");
+    if (clicked) ledger.push(clicked);
+  });
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => {
+      document.body.innerHTML = `<ul><li><span>JOB-A Waiting</span><span hidden>Hidden decoy</span><span aria-label="ARIA-only decoy"></span><button>Process</button></li><li><span>JOB-B Next</span><button>Process</button></li></ul>`;
+      document.querySelectorAll("button").forEach(button => button.onclick = () => {
+        document.body.dataset.clicked = button.parentElement!.querySelector("span")!.textContent!;
+        void fetch(`/target?clicked=${encodeURIComponent(document.body.dataset.clicked)}`);
+        document.querySelectorAll("li").forEach((row, i) => row.querySelector("span")!.textContent = i ? "JOB-D Waiting" : "JOB-C Next");
+        document.querySelector("ul")!.prepend(document.querySelectorAll("li")[1]!);
+      });
+    });
+    const found: any[] = [];
+    const check = (request: any, expected: string[]) => {
+      const result = lastTool(request);
+      found.push(result);
+      expect(result.elements).toHaveLength(2);
+      const labels = result.elements.map((element: any) => {
+        expect(element).toMatchObject({ actionable: true, context: { status: "verified", observationId: result.pageSnapshot.observationId, container: { role: "listitem" } } });
+        expect(element.context.snapshotItemId).toBeTruthy();
+        const labels = element.context.visibleLabels.map((label: any) => label.text).join(" ");
+        expect(labels).not.toMatch(/Hidden decoy|ARIA-only decoy/);
+        return labels;
+      });
+      expected.forEach(label => expect(labels.some((text: string) => text.includes(label)), JSON.stringify(result)).toBe(true));
+      const { pageSnapshot, ...core } = result;
+      expect(Buffer.byteLength(JSON.stringify(core))).toBeLessThanOrEqual(8192);
+      expect(Buffer.byteLength(JSON.stringify(pageSnapshot))).toBeLessThanOrEqual(16384);
+      return result;
+    };
+    responses.push(
+      commandResponse("find_elements", { target: { by: "role", value: "button", name: "Process", exact: true } }, "row-find"),
+      request => {
+        const result = check(request, ["JOB-A Waiting", "JOB-B Next"]);
+        const selected = result.elements.find((element: any) => element.context.visibleLabels.some((label: any) => label.text.includes("JOB-B Next")));
+        return commandResponse("click", { target: { id: selected.id } }, "row-click");
+      },
+      commandResponse("find_elements", { target: { by: "role", value: "button", name: "Process", exact: true } }, "row-find-recycled"),
+      request => { check(request, ["JOB-C Next", "JOB-D Waiting"]); return textResponse("ROW_CONTEXT_OK"); },
+      textResponse("候选关联"),
+    );
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Find the Process button on JOB-B Next, click it, and inspect current rows");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ROW_CONTEXT_OK", { timeout: 60_000 });
+    expect(await target.getAttribute("body", "data-clicked")).toBe("JOB-B Next");
+    await expect.poll(() => ledger).toEqual(["JOB-B Next"]);
+    expect(found[1].pageSnapshot.observationId).not.toBe(found[0].pageSnapshot.observationId);
+    expect(found[1].pageSnapshot.mode).toBe("delta");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+for (const selector of ['iframe[src="/same-frame"]', 'iframe[src*="localhost"]']) {
+  test(`candidate context preserves actual document identity in ${selector}`, async () => {
+    const responses: MockResponse[] = [];
+    const provider = await startProvider(responses);
+    const opened = await openExtension();
+    try {
+      const target = await opened.context.newPage();
+      await target.goto(`${provider.origin}/complex`);
+      const frame = await (await target.locator(selector).elementHandle())!.contentFrame();
+      await frame!.waitForLoadState("load");
+      await frame!.evaluate(() => {
+        document.body.innerHTML = `<ul><li><span>FRAME-A Waiting</span><button>Process</button></li><li><span>FRAME-B Next</span><span style="opacity:0">Transparent decoy</span><button>Process</button></li></ul>`;
+        document.querySelectorAll("button").forEach(button => button.onclick = () => document.body.dataset.clicked = button.parentElement!.querySelector("span")!.textContent!);
+      });
+      responses.push(
+        commandResponse("find_elements", { target: { by: "role", value: "button", name: "Process", frame: { by: "css", value: selector } } }, "frame-find"),
+        request => {
+          const result = lastTool(request);
+          expect(result.elements).toHaveLength(2);
+          const selected = result.elements.find((element: any) => element.context.visibleLabels?.some((label: any) => label.text.includes("FRAME-B Next")));
+          expect(selected, JSON.stringify(result)).toMatchObject({ actionable: true, context: { status: "verified", observationId: result.pageSnapshot.observationId } });
+          expect(JSON.stringify(result.elements.map((element: any) => element.context))).not.toContain("Transparent decoy");
+          return commandResponse("click", { target: { id: selected.id } }, "frame-click");
+        },
+        textResponse("FRAME_CONTEXT_OK"), textResponse("框架关联"),
+      );
+      await (await configure(opened.context, opened.page, provider.baseURL)).close();
+      await target.bringToFront();
+      await opened.page.getByTestId("composer-input").fill("Process FRAME-B Next in the requested frame");
+      await opened.page.getByTestId("composer-input").press("Enter");
+      await expect(opened.page.locator(".markdown-body").last()).toContainText("FRAME_CONTEXT_OK", { timeout: 60_000 });
+      expect(await frame!.getAttribute("body", "data-clicked")).toBe("FRAME-B Next");
+    } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+  });
+}
+
+test("large candidate contexts keep complete inline pairs and original artifact access", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => {
+      document.body.innerHTML = `<ul><li><span>BUDGET-ROW Next</span>${"<button>Process</button>".repeat(25)}</li></ul>`;
+    });
+    responses.push(
+      commandResponse("find_elements", { target: { by: "role", value: "button", name: "Process" } }, "budget-find"),
+      request => {
+        const result = lastTool(request);
+        expect(result.$ref, JSON.stringify(result)).toBeTruthy();
+        expect(result.elementsTruncated).toBe(true);
+        expect(result.elements.length).toBeGreaterThan(0);
+        result.elements.forEach((element: any) => {
+          expect(element.context.status).toBe("verified");
+          expect(element.context.observationId).toBe(result.pageSnapshot.observationId);
+          expect(element.context.visibleLabels.some((label: any) => label.text.includes("BUDGET-ROW Next"))).toBe(true);
+        });
+        const { pageSnapshot, ...core } = result;
+        expect(Buffer.byteLength(JSON.stringify(core))).toBeLessThanOrEqual(8192);
+        expect(Buffer.byteLength(JSON.stringify(pageSnapshot))).toBeLessThanOrEqual(16384);
+        return commandResponse("read_artifact", { artifactId: result.$ref, path: ["elements", 24] }, "budget-original");
+      },
+      request => {
+        expect(lastTool(request).result).toMatchObject({ actionable: true, context: { status: "verified", container: { role: "listitem" } } });
+        return textResponse("BUDGET_CONTEXT_OK");
+      },
+      textResponse("预算关联"),
+    );
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Find all Process candidates and read the original last candidate");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("BUDGET_CONTEXT_OK", { timeout: 60_000 });
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});

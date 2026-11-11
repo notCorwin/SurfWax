@@ -1,3 +1,4 @@
+import { SNAPSHOT_CANDIDATE_CONTEXT, type CandidateAssociation } from "./candidate-context";
 import { logIO } from "../log-io";
 import { normalizationExceedsBudget, normalizeResultEnvelope, TOOL_RESULT_BYTES } from "../tool-result-values";
 import { isArrayBuffer } from "../log-graph";
@@ -45,7 +46,7 @@ type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: stri
 const NO_PAGE_CAPTURE = new Set(["list_file_choosers", "inspect_page", "read_artifact", "list_jobs", "subscribe_event", "wait_event", "unsubscribe_event", "list_downloads"]);
 export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read compact visible page content and measured layout", description: "Inspect currently visible structured page items. Every item has an id. Items marked actionable=true bind a single real element: use target:{id:item.id} in click, fill, hover or other element tools. IDs already identify their frame; do not combine an id with a locator or frame. IDs are scoped to the tab, document and run, and input revalidates node identity, visibility, enabled state and hit target; stale IDs must be reacquired rather than guessed. Non-actionable text, count groups and path ancestry are observation data, not action targets. Actionable elements are never combined into count/path groups. role/name are observed semantics, not proof of globally unique business identity. nameUnknown, valueUnknown and partial=true mark uncertain evidence; a proven label fragment may coexist with nameUnknown. Partial snapshots cannot establish complete coverage. Read-only recovery on continuously changing pages samples the root viewport in one synchronous DOM read, excludes embedded documents and may still return actionable IDs for its actual elements. fields defaults to text and state; IDs and actionability are always included. actions adds role-derived hints, not a guarantee an operation succeeds. box and textBox use per-document viewport CSS pixels; layout boxes can extend beyond clipped paint. DOM order and textParts order are structural, not visual reading order. Use list_frames frameRef as target.frame.ref for locator targets, or region:{by:\"css\",value:\"html\",frame:{ref:\"...\"}} to inspect a frame. Scroll to discover offscreen content. The default timeout is 15 seconds and inspection waits for complete page load. Default full/delta selection reuses only a completely delivered baseline; full=true starts a fresh full snapshot. Finish nextCursor before using a snapshot as a baseline. Continuations read a frozen observation; actionable continuations revalidate document and geometry. Pass nextCursor as cursor with only tabId, budget, limit or timeoutMs; continuation metadata may be omitted. Oversized name/value/textParts text can continue across pages; join each fragment.field in order. budget counts UTF-8 JSON bytes of items; the entire tool response is capped at 16 KiB. lookahead is sparse non-authoritative later context, not a delivered page or actionable target. Use find_elements for a specific element ID, read_value for current control value, or take_screenshot for visual evidence. Reused DOM nodes may still represent different business data despite unchanged identity; verify relevant page state before acting." },
-  { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return actionable IDs", description: "Find matching elements with id and actionable=true for actions. ID use checks the underlying role and identity, which may differ from visible text, but cannot prove business identity for reused nodes; verify relevant row and page state before acting. Older IDs may expire after later independent observations or searches. limit defaults to 25, max 100; repeat target and tab with nextCursor as cursor to page a fixed node list. Candidates may report detached, changed or identity-unknown without an actionable id. Details may change between pages; cursors expire on run or document changes or eviction." },
+  { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return actionable IDs", description: "Find matching elements with id and actionable=true for actions. Candidate context links that ID to its current automatic pageSnapshot observation and nearest represented row/listitem (or group). visibleLabels contain only capture-proven visible fragments with itemId and optional pathIndex/textPartIndex provenance, even when the snapshot is delta or paged. Container references are observation data; scope:{id} is unsupported. status=unknown gives an unproved association; partial=true or labelsOmitted marks incomplete labels. This describes the current capture, and does not guarantee a business row stays unchanged. ID use checks the underlying role and identity, which may differ from visible text, but cannot prove business identity for reused nodes; verify relevant row and page state before acting. Older IDs may expire after later independent observations or searches. limit defaults to 25, max 100; repeat target and tab with nextCursor as cursor to page a fixed node list. Candidates may report detached, changed or identity-unknown without an actionable id. Details may change between pages; cursors expire on run or document changes or eviction." },
   { name: "list_frames", inputSchema: listFramesInputSchema, summary: "List frames and their document-bound refs", description: "List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor as cursor to continue a fixed snapshot. References and cursors expire on document or frame changes." },
   ...ATOMIC_TOOL_REGISTRY,
   { name: "list_downloads", inputSchema: listDownloadsInputSchema, summary: "Read Chrome's current download records", description: "List download metadata across the Chrome profile. limit defaults to 100; 0 requests all records. hasMore reports truncation. The list is live and Chrome's exists field may be stale; metadata does not provide file bytes." },
@@ -170,6 +171,8 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
               && Object.hasOwn(envelope, "observationId") && Object.hasOwn(envelope, "items")) {
               inspectionDelivery = inspectionPageDelivery(result, identity?.toolCallId ?? toolCallId, value.cursor !== undefined);
               output = envelope;
+            } else if (definition.name === "find_elements") {
+              output = envelope;
             } else if (jobRef) {
               const { result: _result, ...rest } = envelope as Record<string, unknown>;
               const compact = normalizationExceedsBudget(rest)
@@ -222,6 +225,17 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
                 const pageSnapshot = await executor.inspect({ ...(recentRefs.length ? { recentRefs } : {}), ...(tabId === undefined ? {} : { tabId }),
                   wire: { maxBytes: INSPECTION_RESULT_BYTES, evidenceId: identity?.toolCallId ?? toolCallId } }, abortSignal, context);
                 inspectionDelivery = inspectionPageDelivery(pageSnapshot, identity?.toolCallId ?? toolCallId, false);
+                if (definition.name === "find_elements" && output && typeof output === "object" && Array.isArray((output as any).elements)) {
+                  const associations = (pageSnapshot as any)[SNAPSHOT_CANDIDATE_CONTEXT] as Map<string, CandidateAssociation> | undefined;
+                  output = { ...output, elements: (output as any).elements.map((element: any) => {
+                    const association = associations?.get(element.id);
+                    if (association?.invalid) {
+                      const { id: _id, actionable: _actionable, ...rest } = element;
+                      return { ...rest, status: "changed", context: association.context };
+                    }
+                    return { ...element, context: association?.context ?? { status: "unknown", observationId: (pageSnapshot as any).observationId, reason: "not-represented" } };
+                  }) };
+                }
                 pageEvidence = { pageSnapshot };
               } catch (error) {
                 pageEvidence = { pageSnapshotStatus: { state: "unavailable", error: toolFailure(error).error } };
@@ -240,12 +254,28 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
               if (definition.name === "inspect_page") output = await failureFor(error, true);
               else {
                 const { pageSnapshot: _pageSnapshot, ...rest } = output as Record<string, unknown>;
-                output = { ...rest, pageSnapshotStatus: { state: "unavailable", error: toolFailure(error).error } };
+                output = { ...rest, ...(definition.name === "find_elements" && Array.isArray(rest.elements) ? {
+                  elements: rest.elements.map((element: any) => {
+                    const { id: _id, actionable: _actionable, context: _context, ...candidate } = element;
+                    return { ...candidate, status: "identity-unknown" };
+                  }),
+                } : {}), pageSnapshotStatus: { state: "unavailable", error: toolFailure(error).error } };
               }
             }
           }
           let saved: unknown;
           try {
+            if (definition.name === "find_elements" && output && typeof output === "object") {
+              const { pageSnapshot, pageSnapshotStatus, ...core } = output as Record<string, unknown>;
+              if (!pageSnapshot && Array.isArray(core.elements)) core.elements = core.elements.map((element: any) => {
+                const { context: _context, ...rest } = element;
+                return { ...rest, context: { status: "unknown", reason: "snapshot-unavailable" } };
+              });
+              const compact = normalizationExceedsBudget(core)
+                ? await storeUnnormalizedResult(core, { ...options, toolCallId, ...identity, preserveSearchStatus: true })
+                : await compactToolResult(normalizeResultEnvelope(core), { ...options, toolCallId, ...identity, preserveSearchStatus: true });
+              output = { ...compact as object, ...(pageSnapshot ? { pageSnapshot } : {}), ...(pageSnapshotStatus ? { pageSnapshotStatus } : {}) };
+            }
             saved = await finish(output);
             if (!abortSignal?.aborted) inspectionDelivery?.finish();
             else inspectionDelivery?.cancel();
@@ -436,6 +466,19 @@ function jobMetadata(record: Record<string, unknown>): Record<string, unknown> {
   if (Number.isSafeInteger(record.nextCursor) && Number(record.nextCursor) >= 0) result.nextCursor = record.nextCursor;
   return result;
 }
+/** Keep complete candidate/context pairs; generic previews truncate nested provenance. */
+function candidateContextPreview(record: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!Array.isArray(record.elements) || !record.elements.some(element => element?.context)) return undefined;
+  const elements: unknown[] = [];
+  let bytes = 2;
+  for (const element of record.elements) {
+    const size = previewEncoder.encode(JSON.stringify(element)).byteLength + 1;
+    if (bytes + size > PREVIEW_BYTES) break;
+    elements.push(element); bytes += size;
+  }
+  return { elements, ...(elements.length < record.elements.length ? { elementsTruncated: true } : {}) };
+}
+
 function searchMetadata(record: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const field of ["tabId", "documentId", "total"]) if (Number.isSafeInteger(record[field]) && Number(record[field]) >= 0) result[field] = record[field];
@@ -593,7 +636,7 @@ async function storeUnnormalizedResult(value: unknown, options: { logger?: Event
     access: access(path, selected), sidecarsDeferred: true, readNote: ARTIFACT_READ_NOTE,
     pathsNote: "Read a bounded slice with read_artifact; its type sidecars are relative to that slice. For oversized items, select a nested path. Shared or cyclic object identity is not exposed.",
     ...(root && Object.hasOwn(root, "result") ? { resultAccess: access(["result"], root.result) } : {}),
-    ...(job ? jobMetadata(job) : {}), ...(search ? searchMetadata(search) : {}),
+    ...(job ? jobMetadata(job) : {}), ...(search ? { ...searchMetadata(search), ...candidateContextPreview(search) } : {}),
     ...(inspection ? inspectionMetadata(inspection, event.id) : {}), ...(browserEvents ? eventMetadata(browserEvents) : {}),
     ...(diagnostic ? { ...(diagnostic.integrity === "complete" || diagnostic.integrity === "incomplete" ? { integrity: diagnostic.integrity } : {}),
       ...(typeof diagnostic.hasMore === "boolean" || diagnostic.hasMore === null ? { hasMore: diagnostic.hasMore } : {}),
@@ -683,6 +726,7 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   const root = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
   const job = options.preserveJobStatus ? root : undefined;
   const search = options.preserveSearchStatus ? root : undefined;
+  const candidatePreview = search ? candidateContextPreview(search) : undefined;
   const inspection = options.preserveInspectionStatus ? root : undefined;
   const browserEvents = options.preserveEventStatus ? root : undefined;
   const original = root?.envelopeWrapped === true && root.result && typeof root.result === "object" && !Array.isArray(root.result) ? root.result as Record<string, unknown> : root;
@@ -713,10 +757,11 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
     ? verificationEnvelope.result as { verified?: unknown; timedOut?: unknown; present?: unknown } | undefined : undefined;
   const handoff = value && typeof value === "object" && (value as any).accepted === true && (value as any).complete === false && typeof (value as any).jobId === "string" ? value as Record<string, any> : undefined;
   const blocked = handoff?.blockedBy;
-  return { $ref: event.id, bytes, readNote: ARTIFACT_READ_NOTE, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff || visual && typeof selected !== "string" ? undefined : previewOf(value, path), access, ...(oversizedItem ? { oversizedItem } : {}), type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
+  return { $ref: event.id, bytes, readNote: ARTIFACT_READ_NOTE, preview: candidatePreview ? undefined : job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff || visual && typeof selected !== "string" ? undefined : previewOf(value, path), access, ...(oversizedItem ? { oversizedItem } : {}), type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
     ...(root?.envelopeWrapped === true ? { envelopeWrapped: true } : {}),
     ...(job ? jobMetadata(job) : {}),
     ...(search ? searchMetadata(search) : {}),
+    ...candidatePreview,
     ...(inspection ? inspectionMetadata(inspection, event.id) : {}),
     ...(browserEvents ? eventMetadata(browserEvents) : {}),
     ...(diagnostic ? { ...(diagnostic.integrity === "complete" || diagnostic.integrity === "incomplete" ? { integrity: diagnostic.integrity } : {}),

@@ -1,3 +1,4 @@
+import { SNAPSHOT_CANDIDATE_CONTEXT, semanticContexts, type CandidateAssociation } from "./candidate-context";
 import type { EventLogger } from "../logging";
 import { ElementIds } from "./element-ids";
 import { resolveSampledElement } from "./sampled-element";
@@ -1200,6 +1201,11 @@ export class AutomationRuntime {
           throw automationError("stale-observation", { observationId: requiredBaseline.id, reason: "snapshot-baseline-expired-during-inspection" });
       };
       guard();
+      const candidateRefs = new Map((options.recentRefs ?? []).map(id => {
+        const binding = this.elementIds.get(id);
+        return [id, binding && this.liveId(session, id) && binding.actionable ? session.refs.get(binding.sourceId) : undefined] as const;
+      }));
+      let candidateContexts: Map<string, CandidateAssociation> | undefined;
       let saved: InspectSnapshot;
       let position: SnapshotPosition;
       if (options.cursor !== undefined) {
@@ -1274,7 +1280,8 @@ export class AutomationRuntime {
         });
         const filtered = normalized.filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth);
         const independent = fields.includes("ref") || fields.includes("actions");
-        const internalItems: SnapshotItem[] = (independent ? filtered : packSnapshot(filtered)).map(row => {
+        const packed = independent ? filtered : packSnapshot(filtered);
+        const internalItems: SnapshotItem[] = packed.map(row => {
           const projected = projectSnapshotLine(row, { fields, actionNames: "program", inlineRef: false });
           const { ref: _ref, ...item } = projected;
           return { ...item, ...(row.node?.ref ? { actionable: true as const } : {}) };
@@ -1297,6 +1304,40 @@ export class AutomationRuntime {
         if (!Number.isSafeInteger(index) || index < 0 || index > source.length) throw automationError("invalid-offset", { offset: index, total: source.length });
         position = { index, charOffset: 0 };
         const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, lines: captured.lines, wireItems, viewport, scopeKey, incomplete: true };
+        const contextFor = candidateRefs.size ? semanticContexts(observationId, normalized, packed, wireItems, Boolean(captured.partial)) : undefined;
+        // Session/generation and the guarded frame revision pin debugger and
+        // document incarnations. Numeric backend IDs alone are never joined.
+        const identityKey = (ref: RefRecord) => JSON.stringify([ref.debuggee.tabId, ref.debuggee.sessionId, ref.generation, ref.frameId, ref.backendNodeId]);
+        const capturedRefs = new Map<string, SnapshotLine[]>();
+        if (candidateRefs.size) for (const row of normalized) {
+          const ref = row.node?.ref ? session.refs.get(row.node.ref) : undefined;
+          if (!ref?.frameId || row.node?.layoutScope !== ref.frameId) continue;
+          const key = identityKey(ref), matches = capturedRefs.get(key) ?? [];
+          matches.push(row); capturedRefs.set(key, matches);
+        }
+        candidateContexts = new Map(await Promise.all([...candidateRefs].map(async ([id, candidate]): Promise<[string, CandidateAssociation]> => {
+          const unknown = (reason: string, invalid = false): [string, CandidateAssociation] => [id, { context: { status: "unknown", observationId, reason }, ...(invalid ? { invalid: true } : {}) }];
+          if (this.liveId(session, id) && this.sampledId(id)) return unknown("sampled-context-unavailable");
+          if (!candidate || !this.liveId(session, id) || session.refs.get(this.elementIds.get(id)!.sourceId) !== candidate)
+            return unknown("identity-changed", true);
+          if (captured.readOnly) return unknown("sampled-context-unavailable");
+          if (!candidate.frameId) return unknown("frame-identity-unknown");
+          const matches = capturedRefs.get(identityKey(candidate)) ?? [];
+          if (!matches.length) {
+            // Offscreen and replaced nodes both lack a represented item. Use
+            // the existing identity validator to distinguish them, never a
+            // replacement locator or another capture.
+            try {
+              const resolved = await this.resolveRef(session, this.elementIds.get(id)!.sourceId);
+              await this.options.command(resolved.ref.debuggee, "Runtime.releaseObject", { objectId: resolved.objectId }).catch(() => undefined);
+            } catch { guard(); return unknown("identity-changed", true); }
+            guard();
+            return unknown("not-represented");
+          }
+          if (matches.length !== 1) return unknown("ambiguous-snapshot-match");
+          return [id, { context: contextFor!(matches[0]!.id) }];
+        })));
+        guard();
         this.rememberObservation(record);
         saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", ...(changes ? { baseObservationId: baseline!.observationId } : {}), geometry: captured.geometry, geometrySources: captured.geometrySources, geometryStyles: captured.geometryStyles, geometryDynamicParents: captured.geometryDynamicParents,
           ...(captured.partial && previous ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 && !captured.partial };
@@ -1337,12 +1378,14 @@ export class AutomationRuntime {
         throw automationError("stale-observation", { observationId: saved.id, reason: "reference-identity-changed" });
       for (const item of page.fragments) if (item.actionable) this.touchRef(session, item.id);
       const result = envelope(candidate);
+      if (candidateContexts) Object.defineProperty(result, SNAPSHOT_CANDIDATE_CONTEXT, { value: candidateContexts });
       const source = saved.source, record = saved.record;
       const valid = () => this.sessions.get(tabId) === session && session.generation === generation
         && session.frameRevision === saved.frameRevision && this.inspectionSnapshots.get(saved.id) === saved
         && this.observations.get(saved.id) === record && saved.source === source && saved.record === record
         && saved.conversationId === conversationId && saved.runId === runId
-        && !page.fragments.some((item) => item.actionable && !this.liveId(session, item.id, JSON.stringify([conversationId, runId])));
+        && !page.fragments.some((item) => item.actionable && !this.liveId(session, item.id, JSON.stringify([conversationId, runId])))
+        && [...candidateRefs].every(([id, ref]) => !ref || candidateContexts?.get(id)?.invalid || this.liveId(session, id, JSON.stringify([conversationId, runId])) && session.refs.get(this.elementIds.get(id)!.sourceId) === ref);
       const atPosition = () => Boolean(saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset);
       const advance = () => { saved.expected = page.next; if (!page.hasMore && saved.eligibleForBaseline) { record.incomplete = false; this.deliveredBaselines.add(record); } };
       if (options.wire || options.deferDelivery) {
@@ -2247,16 +2290,21 @@ export class AutomationRuntime {
             if (identityRole.length + identityName.length > remainingIdentityChars) return { status: "identity-unknown", reason: "identity-budget" };
             remainingIdentityChars -= identityRole.length + identityName.length;
           }
+          let frameId: string | undefined;
+          try { frameId = await this.actionFrameId(session, { ...session, debuggee: current.debuggee }, nodeObject); }
+          catch { pageGuard(); /* Unproved frame identity is reported by context as unknown. */ }
+          pageGuard();
           const roleText = String(candidate?.role ?? metadata.role ?? "");
           const nameText = String(candidate?.name ?? metadata.name ?? "");
           const role = roleText.slice(0, 80), name = nameText.slice(0, 160);
           const scope = current.debuggee.sessionId ?? session.rootFrameId ?? "root";
           const identity = `${scope}:${backendNodeId}`;
           const short = candidate?.ref ?? this.rememberRef(session, identity,
-            { backendNodeId: backendNodeId!, debuggee: current.debuggee, role: identityRole, name: identityName, generation, identitySource });
+            { backendNodeId: backendNodeId!, frameId, debuggee: current.debuggee, role: identityRole, name: identityName, generation, identitySource });
           const ref = candidate?.ref ?? `t${tabId}s${session.token}d${generation}${short}`;
           const record = session.refs.get(short);
           if (!record) throw automationError("stale-ref", { ref, reason: "expired-document" });
+          if (frameId) record.frameId = frameId;
           session.refs.set(ref, record);
           return { ref, role, name, ...(metadata.tag ? { tag: metadata.tag } : {}), ...(metadata.text ? { text: metadata.text } : {}),
             ...(roleText.length > 80 || candidate?.roleTruncated || !candidate && metadata.roleTruncated ? { roleTruncated: true } : {}),
