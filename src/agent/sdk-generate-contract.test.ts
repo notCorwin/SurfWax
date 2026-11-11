@@ -252,9 +252,10 @@ describe.each(contracts)(
 it("routes bundled catalog selections through saved configuration and real SDK tool loops", async () => {
   const { loadModelCatalog, modelProviderPresets, applyModelPreset } = await import("./model-limits");
   const { saveModelConfig, loadModelConfig, selectedModelConfig } = await import("../sidepanel/config");
-  vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
-  try {
-    const presets = modelProviderPresets(await loadModelCatalog());
+  const offlineFetch = vi.fn(async () => { throw new Error("offline"); });
+  const catalog = await loadModelCatalog({ fetch: offlineFetch, bundledFallback: true });
+  {
+    const presets = modelProviderPresets(catalog);
     for (const [id, protocol, path] of [
       ["openai", "openai-responses", "/v1/responses"],
       ["anthropic", "anthropic-messages", "/v1/messages"],
@@ -268,7 +269,7 @@ it("routes bundled catalog selections through saved configuration and real SDK t
       let saved: Record<string, unknown> = {};
       const storage = { get: async () => saved, set: async (value: Record<string, unknown>) => { saved = structuredClone(value); } } as any;
       await saveModelConfig({ selectedProviderId: id, profiles: { [id]: selected } }, storage);
-      const restored = selectedModelConfig(await loadModelConfig(undefined, storage))!;
+      const restored = selectedModelConfig(await loadModelConfig(undefined, storage, { loadCatalog: async () => { throw new Error("offline"); } }))!;
       expect(restored.endpointType).toBeUndefined();
       const wire = fixture(protocol, { toolLoop: true });
       const model = await createModel(restored, undefined, undefined, { fetch: wire.fetch });
@@ -277,12 +278,18 @@ it("routes bundled catalog selections through saved configuration and real SDK t
       expect(wire.modelRequests).toHaveLength(2);
       expect(new URL(wire.modelRequests[0]!.url).pathname).toBe(path);
       expect(JSON.stringify(await wire.modelRequests[1]!.clone().json())).toContain("executed:ok");
+      const savedRoute = { ...restored, modelProvider: { npm: "@ai-sdk/google", api: "https://saved.test/v1", shape: "interactions" as const } };
+      await saveModelConfig({ selectedProviderId: id, profiles: { [id]: savedRoute } }, storage);
+      const unavailableCatalog = vi.fn(async () => { throw new Error("offline"); });
+      const offlineRestored = selectedModelConfig(await loadModelConfig(undefined, storage, { loadCatalog: unavailableCatalog }))!;
+      expect(offlineRestored.modelProvider).toEqual(savedRoute.modelProvider);
+      expect(unavailableCatalog).not.toHaveBeenCalled();
       const free = applyModelPreset({ ...restored, model: "free-input-model", modelProvider: { npm: "@ai-sdk/anthropic", api: "https://old.test", shape: "completion" } }, preset);
       expect(free.modelProvider).toEqual(preset.defaultProvider);
       expect(free.sdk).toBe(preset.sdk);
       expect(free.baseURL).toBe(preset.baseURL);
       await saveModelConfig({ selectedProviderId: id, profiles: { [id]: free } }, storage);
-      const freeRestored = selectedModelConfig(await loadModelConfig(undefined, storage))!;
+      const freeRestored = selectedModelConfig(await loadModelConfig(undefined, storage, { loadCatalog: async () => { throw new Error("offline"); } }))!;
       const freeWire = fixture(protocol, { toolLoop: true });
       const freeModel = await createModel(freeRestored, undefined, undefined, { fetch: freeWire.fetch });
       const freeAgent = new ToolLoopAgent({ model: freeModel, maxRetries: 0, tools: { echo: tool({ description: "Echo", inputSchema: z.object({ value: z.string() }), execute: async ({ value }) => ({ value: `executed:${value}` }) }) } });
@@ -290,5 +297,13 @@ it("routes bundled catalog selections through saved configuration and real SDK t
       expect(new URL(freeWire.modelRequests[0]!.url).pathname).toBe(path);
       expect(JSON.stringify(await freeWire.modelRequests[1]!.clone().json())).toContain("executed:ok");
     }
-  } finally { vi.unstubAllGlobals(); }
+  }
 }, 20_000);
+
+
+it("honors explicit Google generateContent over a catalog interactions route", async () => {
+  const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ candidates: [{ content: { role: "model", parts: [{ text: "done" }] }, finishReason: "STOP" }] }));
+  const model = await createModel({ sdk: "@ai-sdk/google", providerId: "google", model: "test", baseURL: "https://provider.test/v1beta", endpointType: "google-generate-content", modelProvider: { shape: "interactions" }, providerSettings: { apiKey: "fake" } }, undefined, undefined, { fetch });
+  await expect(generateText({ model, prompt: "hello", maxRetries: 0 })).resolves.toMatchObject({ text: "done" });
+  expect(new URL((fetch.mock.calls[0]![0] as Request).url).pathname).toBe("/v1beta/models/test:generateContent");
+});
