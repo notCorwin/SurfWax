@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef } from "react";
 import { abortAllConversationWork } from "../agent/coordinator";
 import { ensureConversationPrompt, PROMPT_TOOLS } from "../agent/prompt";
-import { createAgent, GOAL_INSTRUCTIONS, GOAL_TOOLS } from "../agent/runner";
+import { GOAL_INSTRUCTIONS } from "../agent/goal-completion";
+import { GOAL_TOOLS } from "../agent/context-prompt";
 import { ContextCompactor } from "../agent/compaction";
 import { resolveModelLimit } from "../agent/model-limits";
 import { modelDiagnosticContext } from "../agent/diagnostics";
@@ -9,7 +10,7 @@ import { createModel } from "../agent/model";
 import { ensureAutomaticContextSummary } from "../agent/context-choice";
 import { reasoningSettingsFor } from "../agent/reasoning";
 import { createChatTransport } from "../agent/transport";
-import { ChromeExecutor } from "../chrome/executor";
+import type { ChromeExecutor } from "../chrome/executor";
 import { observePageRefreshes } from "../chrome/refresh-observer";
 import { ConversationStore } from "./conversation-store";
 import type { EventLogger } from "../logging";
@@ -30,7 +31,23 @@ export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventL
 }
 
 export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | undefined, logger: EventLogger, initialThreadId?: string, goalMode = true) {
-  const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
+  const executor = useMemo(() => {
+    let instance: ChromeExecutor | undefined;
+    let pending: Promise<ChromeExecutor> | undefined;
+    let disposed = false;
+    return {
+      async get() {
+        if (disposed) throw new Error("侧栏已关闭，请重新打开后重试。");
+        pending ??= import("../chrome/executor").catch(() => { throw new Error("无法加载浏览器操作模块，请重新打开侧栏后重试。"); }).then(({ ChromeExecutor }) => {
+          if (disposed) throw new Error("侧栏已关闭，请重新打开后重试。");
+          return instance = new ChromeExecutor({ logger });
+        }).catch((error) => { pending = undefined; throw error; });
+        return pending;
+      },
+      async endRun() { await instance?.endRun(); },
+      dispose() { disposed = true; instance?.dispose(); },
+    };
+  }, [logger]);
   // Configuration changes are deliberately hot-swapped for the next run.
   // An active run keeps the snapshot it started with; the conversation and
   // browser executor are not remounted underneath it.
@@ -40,6 +57,8 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
     const { config, systemPrompt, goalMode } = latest.current;
     return createChatTransport(async (signal, branchIds, _resumed, onResponse, shouldYield, contextAnchor) => {
       signal.throwIfAborted();
+      const [{ createAgent }, browserExecutor] = await Promise.all([import("../agent/runner").catch(() => { throw new Error("无法加载任务运行模块，请重新打开侧栏后重试。"); }), executor.get()]);
+      signal.throwIfAborted();
       const reasoning = reasoningSettingsFor(config);
       await reasoning.ready;
       const languageModel = await createModel(config, logger, conversationId, { signal });
@@ -47,16 +66,18 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
       const modelLimit = await resolveModelLimit(config, { signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
       signal.throwIfAborted();
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt, branchIds);
-      return createAgent({ model: config, modelLimit, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor, logger, conversationId,
+      return createAgent({ model: config, modelLimit, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor: browserExecutor, logger, conversationId,
         instructions: systemPrompt, prompt, signal, onResponse, shouldYield, contextAnchor, goalMode,
         compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal, prompt }) });
     }, logger, conversationId, () => executor.endRun(), async (signal) => {
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt);
       await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, instructions: prompt.instructions + (goalMode ? GOAL_INSTRUCTIONS : ""), tools: goalMode ? GOAL_TOOLS : PROMPT_TOOLS });
     }, systemPrompt, async (signal, runId) => {
-      const observer = observePageRefreshes(executor, conversationId, signal, runId, logger);
+      const browserExecutor = await executor.get();
+      signal.throwIfAborted();
+      const observer = observePageRefreshes(browserExecutor, conversationId, signal, runId, logger);
       try {
-        await executor.beginRun();
+        await browserExecutor.beginRun();
         signal.throwIfAborted();
         return observer;
       } catch (error) { observer.dispose(); throw error; }
