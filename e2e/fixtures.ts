@@ -324,9 +324,11 @@ export async function enableUserScripts(context: BrowserContext, extensionId: st
   const toggle = settings.locator("extensions-toggle-row#allow-user-scripts cr-toggle#crToggle");
   await expect(toggle).toBeVisible();
   if (await toggle.evaluate((element) => element.getAttribute("aria-checked") ?? element.getAttribute("aria-pressed")) !== "true") {
-    await Promise.all([extensionPage.waitForEvent("load"), toggle.click()]);
+    await toggle.click();
   }
-  await expect.poll(() => extensionPage.evaluate(() => typeof chrome.userScripts)).toBe("object");
+  // Permission changes may replace the document; Playwright carries this wait
+  // across navigation and also succeeds when Chrome updates the API in place.
+  await extensionPage.waitForFunction(() => typeof chrome.userScripts === "object");
   await settings.close();
 }
 

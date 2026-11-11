@@ -135,6 +135,8 @@ function fixture(
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(input, init);
     requests.push(request);
+    if (request.method === "GET" && new URL(request.url).pathname.endsWith("/models"))
+      return Response.json({ data: [{ id: "test", reasoning: false }] });
     modelRequests.push(request);
     notifyStarted();
     if (options.abort)
@@ -206,7 +208,15 @@ describe.each(contracts)(
       );
       expect(JSON.stringify(bodies[2])).toContain("executed:ok");
       expect(JSON.stringify(bodies)).not.toMatch(/"stream"\s*:\s*true/);
+      if (endpoint === "openai-chat-completions") {
+        expect(wire.requests.filter((request) => request.method === "GET")).toHaveLength(1);
+      }
       for (const request of wire.requests) {
+        if (request.method === "GET") {
+          expect(new URL(request.url).pathname).toBe("/v1/models");
+          expect(request.headers.get("authorization")).toBe("Bearer key");
+          continue;
+        }
         expect(new URL(request.url).pathname).toBe("/v1" + path);
         const authenticated =
           request.headers.get("authorization") ||
@@ -243,6 +253,8 @@ describe.each(contracts)(
       await pending.started;
       controller.abort();
       await rejected;
+      if (endpoint === "openai-chat-completions")
+        expect(pending.requests.some((request) => request.method === "GET")).toBe(true);
       expect(pending.modelRequests).toHaveLength(1);
       expect(pending.modelRequests[0]!.signal.aborted).toBe(true);
     }, 20_000);

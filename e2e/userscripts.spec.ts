@@ -36,6 +36,9 @@ test(
       await expect(manager.locator("body")).not.toContainText("stack-marker");
       await expect(manager.locator("body")).not.toContainText("raw-response-marker");
       await manager.locator("#script-matches").fill(`${provider.origin}/*`);
+      await manager.locator("#script-code .cm-content").fill("function broken( {");
+      await manager.getByRole("button", { name: "保存", exact: true }).click();
+      await expect(manager.getByRole("alert").filter({ hasText: "用户脚本操作失败" })).toContainText("JavaScript 语法有误");
       await manager
         .locator("#script-code .cm-content")
         .fill("document.documentElement.dataset.restoredScript = 'ran'");

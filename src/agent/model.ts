@@ -547,7 +547,7 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
       ? AbortSignal.any([options.signal, request.signal]) : request.signal }));
   };
   const baseRetryingFetch = createRetryingFetch({ logger, conversationId, fetch: runFetch, signal: options.signal });
-  const reasoningSettings = adapter.protocol === "openai-compatible" ? reasoningSettingsFor(config) : undefined;
+  const reasoningSettings = adapter.protocol === "openai-compatible" ? reasoningSettingsFor(config, { fetch: options.fetch }) : undefined;
   if (reasoningSettings) linkModelDiagnostic(modelDiagnosticContext(logger, conversationId), reasoningSettings.operationId, "reasoning-settings");
   const retryingFetch = createRetryingFetch({
     logger, conversationId, fetch: runFetch, signal: options.signal,

@@ -158,7 +158,7 @@ export class ReasoningSettings {
         return undefined;
       });
     const catalog = endpoint === undefined
-      ? await (this.options.modelLimit ?? resolveModelLimit)({ ...this.config, contextWindowOverride: undefined }, { signal: this.controller.signal })
+      ? await (this.options.modelLimit ?? resolveModelLimit)({ ...this.config, contextWindowOverride: undefined }, { signal: this.controller.signal, ...(this.options.fetch ? { fetch: this.options.fetch } : {}) })
         .then((limit) => efforts(limit?.reasoningEfforts)).catch((error) => { if (!this.controller.signal.aborted) this.report("catalog-lookup", error); return undefined; })
       : undefined;
     this.controller.signal.throwIfAborted();
@@ -172,14 +172,19 @@ export class ReasoningSettings {
   }
 }
 
-const settings = new Map<string, ReasoningSettings>();
+const settings = new WeakMap<typeof globalThis.fetch, Map<string, ReasoningSettings>>();
 
-export function reasoningSettingsFor(config: ModelConfig): ReasoningSettings {
-  const key = `${sdkFor(config)}\u0000${config.providerId ?? ""}\u0000${resolvedBaseURL(config)}\u0000${config.model.trim()}`;
-  let current = settings.get(key);
+export function reasoningSettingsFor(config: ModelConfig, options: { fetch?: typeof globalThis.fetch } = {}): ReasoningSettings {
+  const fetcher = options.fetch ?? globalThis.fetch;
+  let scoped = settings.get(fetcher);
+  if (!scoped) { scoped = new Map(); settings.set(fetcher, scoped); }
+  // Endpoint capabilities can vary with credentials and transport. Share state
+  // only while both dependencies still describe the same provider connection.
+  const key = JSON.stringify([sdkFor(config), config.providerId ?? "", resolvedBaseURL(config), config.model.trim(), settingsFor(config)]);
+  let current = scoped.get(key);
   if (!current || current.controller.signal.aborted) {
-    current = new ReasoningSettings(config);
-    settings.set(key, current);
+    current = new ReasoningSettings(config, options);
+    scoped.set(key, current);
   }
   return current;
 }
