@@ -1,5 +1,75 @@
 import { expect, test, configure, delayedResponse, dispose, openExtension, readEvents, startProvider, textResponse } from './fixtures';
 
+test('conversation rename and creation failures stay safe and preserve saved history', async ({}, info) => {
+  const provider = await startProvider([textResponse('SAVED_HISTORY'), textResponse('Safety session')]);
+  const opened = await openExtension();
+  try {
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await opened.page.getByTestId('composer-input').fill('Keep this conversation');
+    await opened.page.getByTestId('composer-input').press('Enter');
+    await expect(opened.page.locator('.markdown-body')).toContainText('SAVED_HISTORY');
+    await expect(opened.page.getByTestId('conversation-menu')).toContainText('Safety session');
+    await opened.page.getByTestId('conversation-menu').click();
+    await opened.page.locator('.conversation-item').hover();
+    await opened.page.getByRole('button', { name: '重命名 Safety session', exact: true }).click();
+    const name = opened.page.getByRole('textbox', { name: '会话名称' });
+    await name.fill('');
+    await opened.page.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(opened.page.getByRole('alert')).toContainText('请输入会话名称');
+    await name.fill('Renamed safely');
+    await expect(opened.page.getByRole('alert')).toHaveCount(0);
+    const before = await readEvents(opened.page);
+    await opened.page.evaluate(() => {
+      const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+      document.documentElement.dataset.rejectRunStatus = 'true';
+      chrome.runtime.sendMessage = ((...args: any[]) => {
+        if (args[0]?.type === 'surf-wax:run-status' && document.documentElement.dataset.rejectRunStatus === 'true') {
+          document.documentElement.dataset.rejectedRunStatus = String(Number(document.documentElement.dataset.rejectedRunStatus ?? 0) + 1);
+          return Promise.reject(new Error('synthetic-raw stack-marker credential-marker'));
+        }
+        return (send as any)(...args);
+      }) as typeof chrome.runtime.sendMessage;
+    });
+    await opened.page.getByRole('button', { name: '保存', exact: true }).click();
+    await expect.poll(() => opened.page.evaluate(() => Number(document.documentElement.dataset.rejectedRunStatus))).toBeGreaterThan(0);
+    await expect(opened.page.getByRole('alert')).toBeVisible();
+    const renameText = await opened.page.locator('.conversation-rename').innerText();
+    await info.attach('rename-failure-presentation', { body: JSON.stringify({ text: renameText }), contentType: 'application/json' });
+    expect.soft(renameText).not.toMatch(/synthetic-raw|stack-marker|credential-marker/);
+    expect.soft(renameText).toContain('重命名失败；请重试。');
+    expect((await readEvents(opened.page)).filter(e => e.type === 'conversation.title.updated')).toEqual(before.filter(e => e.type === 'conversation.title.updated'));
+    await opened.page.getByRole('button', { name: '取消', exact: true }).click();
+    await expect(name).toHaveCount(0);
+    await expect(opened.page.getByText('重命名失败；请重试。', { exact: true })).toHaveCount(0);
+    await opened.page.keyboard.press('Escape');
+    const rejectedBefore = await opened.page.evaluate(() => Number(document.documentElement.dataset.rejectedRunStatus));
+    await opened.page.getByTestId('new-conversation').click();
+    await expect.poll(() => opened.page.evaluate(() => Number(document.documentElement.dataset.rejectedRunStatus))).toBeGreaterThan(rejectedBefore);
+    const newText = await opened.page.locator('body').innerText();
+    await info.attach('new-conversation-failure-presentation', { body: JSON.stringify({ text: newText }), contentType: 'application/json' });
+    expect.soft(newText).not.toMatch(/synthetic-raw|stack-marker|credential-marker/);
+    expect.soft(newText).toContain('无法新建会话；请重试。');
+    await expect(opened.page.getByTestId('conversation-menu')).toContainText('Safety session');
+    await expect(opened.page.locator('.markdown-body')).toContainText('SAVED_HISTORY');
+    await expect(opened.page.getByTestId('fatal-log-error')).toHaveCount(0);
+    await opened.page.evaluate(() => { document.documentElement.dataset.rejectRunStatus = 'false'; });
+    await opened.page.getByTestId('conversation-menu').click();
+    await opened.page.locator('.conversation-item').hover();
+    await opened.page.getByRole('button', { name: '重命名 Safety session', exact: true }).click();
+    await name.fill('Renamed safely');
+    await opened.page.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(name).toHaveCount(0);
+    await expect(opened.page.getByTestId('conversation-menu')).toContainText('Renamed safely');
+    await opened.page.keyboard.press('Escape');
+    await opened.page.getByTestId('new-conversation').click();
+    await expect(opened.page.getByTestId('conversation-menu')).toContainText('新对话');
+    await expect(opened.page.locator('body')).not.toContainText('无法新建会话');
+    await opened.page.getByTestId('conversation-menu').click();
+    await opened.page.getByRole('button', { name: 'Renamed safely', exact: true }).click();
+    await expect(opened.page.locator('.markdown-body')).toContainText('SAVED_HISTORY');
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
 test('canonical session commits synchronize panels and the next request includes remote progress', async () => {
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });

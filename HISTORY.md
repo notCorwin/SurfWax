@@ -84,6 +84,10 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 来源：`fdf724f`，见 `src/model-error.ts`、`src/agent/model.ts`、`src/components/chat/waiting-status.tsx`、`src/components/chat/use-activity-clock.ts`。
 
+会话重命名与新建操作的异常保留原对象，统一经 `ErrorNotice` 的安全边界展示；编辑态和页头不能直接输出异常的 message 或字符串化结果。空名称属于独立的固定应用验证提示，不与未知操作失败混用；取消、输入修正和后续成功清除相应旧错误。错误展示不绕过运行互斥、不把未知失败一概判为忙碌或网络故障，也不因失败切换会话或丢弃既有历史。
+
+来源：`src/components/chat/thread-list.tsx`、`src/sidepanel/App.tsx`、`e2e/canonical-session.spec.ts`。
+
 ## 工作模式与完成判定
 
 ### 工作模式通过显式工具结束

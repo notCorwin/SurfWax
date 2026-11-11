@@ -159,24 +159,27 @@ const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; 
   const runStatus = item.custom?.runStatus ?? "idle";
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>();
+  const [invalidName, setInvalidName] = useState(false);
   const input = useRef<HTMLInputElement>(null);
-  const finishEditing = () => { setEditing(false); setError(""); };
+  const finishEditing = () => { setEditing(false); setError(undefined); setInvalidName(false); };
   const mutate = async (action: () => unknown) => {
+    setError(undefined);
     try { if (locked || await activeRunIdentity()) { warn(); return; } await action(); }
-    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    catch (failure) { setError(() => failure ?? new Error()); }
   };
   const save = () => {
-    if (!draft.trim()) { setError("请输入会话名称"); input.current?.focus(); return; }
+    if (!draft.trim()) { setInvalidName(true); setError(undefined); input.current?.focus(); return; }
     void mutate(async () => { await client.rename(draft.trim()); finishEditing(); });
   };
   return <div className="conversation-item group" data-active={isCurrent ? "" : undefined}>
     {editing ? <div className="conversation-rename">
-      <Input ref={input} autoFocus aria-label="会话名称" aria-invalid={Boolean(error)} disabled={locked} value={draft} onChange={(event) => { setDraft(event.target.value); setError(""); }} onKeyDown={(event) => {
+      <Input ref={input} autoFocus aria-label="会话名称" aria-invalid={invalidName || error !== undefined} disabled={locked} value={draft} onChange={(event) => { setDraft(event.target.value); setError(undefined); setInvalidName(false); }} onKeyDown={(event) => {
         event.stopPropagation(); if (event.key === "Enter") { event.preventDefault(); save(); } if (event.key === "Escape") { event.preventDefault(); finishEditing(); }
       }} />
       <Button type="button" size="sm" disabled={locked} onClick={save}>保存</Button><Button type="button" size="sm" variant="ghost" onClick={finishEditing}>取消</Button>
-      {error && <small role="alert">{error}</small>}
+      {invalidName && <small role="alert">请输入会话名称</small>}
+      {error !== undefined && <ErrorNotice className="basis-full" summary="重命名失败；请重试。" error={error} />}
     </div> : <>
       <Button type="button" variant="ghost" className="conversation-select" aria-current={isCurrent ? "true" : undefined} disabled={locked && !isCurrent} onClick={() => {
         if (isCurrent) { close(); return; }
@@ -191,6 +194,6 @@ const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; 
         <Button type="button" variant="ghost" size="icon-sm" disabled={locked} className="conversation-delete" aria-label={`删除 ${title}`} title="删除" onClick={() => void mutate(async () => { await client.delete(); onDeleted(item.id, title); })}><Trash2Icon aria-hidden="true" /></Button>
       </div>
     </>}
-    {!editing && error && <ErrorNotice summary="会话操作失败。" error={error} />}
+    {!editing && error !== undefined && <ErrorNotice summary="会话操作失败。" error={error} />}
   </div>;
 };

@@ -1,6 +1,6 @@
 import { usePanelRuntime, usePanelState } from "@/sidepanel/runtime-view";
 import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon, SlidersHorizontalIcon, LoaderCircleIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { ConversationMenu } from "../components/chat/thread-list";
 import { Thread } from "../components/chat/thread";
 import { Empty, EmptyHeader, EmptyTitle, EmptyMedia, EmptyContent } from "../components/ui/empty";
@@ -46,18 +46,18 @@ function UserScriptsButton() {
   </Button>;
 }
 
-function NewConversationButton({ setWarning }: { setWarning: (message: string) => void }) {
+function NewConversationButton({ setWarning }: { setWarning: Dispatch<SetStateAction<unknown>> }) {
   const runtime = usePanelRuntime();
   const { locked } = useRunState();
-  useEffect(() => { if (!locked) setWarning(""); }, [locked, setWarning]);
+  useEffect(() => { if (!locked) setWarning(undefined); }, [locked, setWarning]);
   return <Button type="button" variant="ghost" size="icon-sm" aria-label="新对话" title="新对话" data-testid="new-conversation" disabled={locked}
-    onClick={() => void runtime.threads.switchToNewThread().then(() => setWarning("")).catch((error) => setWarning(String(error.message)))}>
+    onClick={() => void runtime.threads.switchToNewThread().then(() => setWarning(undefined)).catch((error) => setWarning(() => error ?? new Error()))}>
     <MessageSquarePlusIcon aria-hidden="true" />
   </Button>;
 }
 
 function Header({ conversation = false, logger }: { conversation?: boolean; logger?: EventLogger }) {
-  const [warning, setWarning] = useState("");
+  const [warning, setWarning] = useState<unknown>();
   return <><a className="skip-link" href="#chat-content">跳转到内容</a>
     <header className="app-header">
       {conversation && logger && <h1 className="conversation-heading"><ConversationMenu logger={logger} /></h1>}
@@ -65,7 +65,7 @@ function Header({ conversation = false, logger }: { conversation?: boolean; logg
         {conversation && <NewConversationButton setWarning={setWarning} />}<UserScriptsButton /><SettingsButton />
       </nav>
     </header>
-    {warning && <p role="status" className="conversation-notice">{warning}</p>}
+    {warning !== undefined && <ErrorNotice className="conversation-notice" summary="无法新建会话；请重试。" error={warning} />}
   </>;
 }
 
