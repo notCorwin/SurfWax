@@ -39,15 +39,16 @@ export function errorDetails(error: unknown): string {
   return "操作未完成，请检查设置后重试。";
 }
 
-export function ErrorNotice({ summary, error, onDismiss, className, testId, role = "alert" }: {
+export function ErrorNotice({ summary, error, detail, onDismiss, className, testId, role = "alert" }: {
   summary: string;
   error?: unknown;
+  detail?: string;
   onDismiss?: () => void;
   className?: string;
   testId?: string;
   role?: "alert" | "status" | "none";
 }) {
-  const content = error === undefined ? undefined : errorDetails(error);
+  const content = detail ?? (error === undefined ? undefined : errorDetails(error));
   return <div role={role} data-testid={testId} className={`app-error-notice ${className ?? ""}`}>
     <div className="app-error-heading"><span>{summary}</span>{onDismiss && <button type="button" onClick={onDismiss} aria-label="关闭错误提示">关闭</button>}</div>
     {content !== undefined && content !== "" && <details><summary>错误详情</summary><div className="app-error-detail">{content}</div></details>}

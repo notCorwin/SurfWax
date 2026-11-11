@@ -1,3 +1,4 @@
+import { registerScript } from "./diagnostic";
 import type { EventLogger } from "../logging";
 import { safeDiagnosticError } from "../diagnostic-error";
 import { scriptChanges, scriptDefinition, scriptId } from "./schema";
@@ -58,13 +59,13 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
   for (const script of desired) {
     if (disabledIds.has(script.id)) continue;
     const current = byId.get(script.id);
-    if (!current) await api.register([script]);
+    if (!current) await registerScript(api, script);
     else if (JSON.stringify(current) !== JSON.stringify(script)) {
       // update() merges properties, so omitted optional fields would survive.
       // Re-register the declaration exactly, restoring the prior projection if
       // registration fails; storage remains authoritative for a later retry.
       await api.unregister({ ids: [script.id] });
-      try { await api.register([script]); }
+      try { await registerScript(api, script); }
       catch (error) {
         try { await api.register([current]); } catch (rollbackError) {
           options.logger?.telemetry({ type: "userscript.rollback.failed", content: { scriptId: script.id, operation: "restore", step: "register-previous" }, error: safeDiagnosticError(rollbackError) });
@@ -190,7 +191,7 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
     let registered = false;
     try {
       if (replaceNative) { await chromeApi.userScripts.unregister({ ids: [scriptIdValue] }); removed = true; }
-      if (registerNative) { await chromeApi.userScripts.register([next!]); registered = true; }
+      if (registerNative) { await registerScript(chromeApi.userScripts, next!); registered = true; }
       const update = (scripts: chrome.userScripts.RegisteredUserScript[], replacement?: chrome.userScripts.RegisteredUserScript) => {
         const index = scripts.findIndex((item) => item.id === scriptIdValue);
         if (index < 0) return replacement ? [...scripts, replacement] : scripts;

@@ -36,14 +36,13 @@ function parseImport(text: string): Script[] {
 
 async function call(method: string, ...args: unknown[]): Promise<any> {
   const response = await chrome.runtime.sendMessage({ type: "surf-wax:user-scripts", method, args });
-  if (!response?.ok) throw new Error(response?.error ?? "用户脚本操作失败");
+  if (!response?.ok) throw Object.assign(new Error(response?.error ?? "用户脚本操作失败"), { diagnostic: response?.diagnostic });
   return response.result;
 }
 
 function scriptError(error: unknown): string {
-  const message = error instanceof Error ? error.message : "";
-  if (/invalid.*match|match.*invalid|invalid.*pattern/i.test(message)) return "网站匹配规则无效，请检查 matches。";
-  if (error instanceof SyntaxError || /syntax|unexpected token/i.test(message)) return "JavaScript 语法有误，请检查代码。";
+  if (error && typeof error === "object" && "diagnostic" in error && error.diagnostic === "match") return "网站匹配规则无效，请检查 matches。";
+  if (error instanceof SyntaxError || (error && typeof error === "object" && "diagnostic" in error && error.diagnostic === "syntax")) return "JavaScript 语法有误，请检查代码。";
   return errorDetails(error);
 }
 
@@ -410,7 +409,7 @@ export function ScriptsApp() {
     {available === false && <Alert role="status"><AlertDescription>在 chrome://extensions 的 Surf Wax 详情页开启 Allow User Scripts，然后刷新状态。</AlertDescription></Alert>}
     {restoreError && <ErrorNotice summary="用户脚本恢复失败。" error={restoreError} />}
     {legacy !== undefined && <details><summary>无法迁移的旧数据（已保留）</summary><pre>{JSON.stringify(legacy, null, 2)}</pre></details>}
-    {error && <div role="alert" className="app-error-notice"><div className="app-error-heading">用户脚本操作失败。</div><details><summary>错误详情</summary><div className="app-error-detail">{error}</div></details></div>}
+    {error && <ErrorNotice summary="用户脚本操作失败。" detail={error} />}
     {failures.length > 0 && <div role="alert">操作失败：<ul>{failures.map(({ id, reason }) => <li key={id}>{id}：{reason}</li>)}</ul></div>}
     {message && <p role="status" className="scripts-message">{message}</p>}
     <div id="scripts-content">

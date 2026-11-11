@@ -26,6 +26,15 @@ test(
       await expect(manager.getByLabel("已保存脚本")).toBeVisible();
       await manager.getByRole("button", { name: "新建脚本" }).click();
       await manager.locator("#script-id").fill("restored");
+      await manager.locator("#script-matches").fill("invalid-pattern");
+      await manager.locator("#script-code .cm-content").fill("console.log('test')");
+      await manager.getByRole("button", { name: "保存", exact: true }).click();
+      await expect(manager.getByRole("alert")).toContainText("matches");
+      await manager.evaluate(() => window.dispatchEvent(new ErrorEvent("error", { error: new Error("secret-marker stack-marker raw-response-marker") })));
+      await expect(manager.getByText("发生未处理的错误，请重试操作。")).toBeVisible();
+      await expect(manager.locator("body")).not.toContainText("secret-marker");
+      await expect(manager.locator("body")).not.toContainText("stack-marker");
+      await expect(manager.locator("body")).not.toContainText("raw-response-marker");
       await manager.locator("#script-matches").fill(`${provider.origin}/*`);
       await manager
         .locator("#script-code .cm-content")

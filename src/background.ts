@@ -1,3 +1,4 @@
+import { ScriptRegistrationError } from "./userscripts/diagnostic";
 import { createDeadline } from "./deadline";
 import { EventLogger, fromLogValue } from "./logging";
 import { safeDiagnosticError } from "./diagnostic-error";
@@ -465,7 +466,7 @@ chrome.runtime.onMessage.addListener((message: { type?: string; method?: string;
       logger: eventLogger, beforeExecute: () => { if (identity) runs.validate(identity); else if (runs.maintenance) throw new Error("日志正在维护。"); },
     }));
   })()
-    .then((result) => sendResponse({ ok: true, result }), (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    .then((result) => sendResponse({ ok: true, result }), (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error), diagnostic: error instanceof ScriptRegistrationError ? error.diagnostic : undefined }));
   return true;
 });
 
