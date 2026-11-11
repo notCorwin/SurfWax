@@ -12,6 +12,8 @@ export async function validateBuild(directory = 'dist') {
   if (lock.version !== packageInfo.version || lock.packages[''].version !== packageInfo.version) throw new Error('package-lock version differs from package.json');
   if (!/^\d+(?:\.\d+){0,3}$/.test(packageInfo.version) || packageInfo.version.split('.').some(value => Number(value) > 65535)) throw new Error('Version is not a Chrome-compatible numeric version');
   const output = resolve(root, directory);
+  if (!(await readFile(join(output, 'LICENSE'))).equals(await readFile(join(root, 'LICENSE'))))
+    throw new Error('Distributed project LICENSE differs from the original GPL text');
   const manifest = JSON.parse(await readFile(join(output, 'manifest.json'), 'utf8'));
   const equal = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
   if (manifest.version !== packageInfo.version) throw new Error('Built manifest version differs from package.json');

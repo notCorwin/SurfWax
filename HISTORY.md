@@ -128,6 +128,10 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 来源：[`a58e77b`](https://github.com/notCorwin/SurfWax/commit/a58e77b)、[`e514df4`](https://github.com/notCorwin/SurfWax/commit/e514df4)。
 
+控制台的 retained 模式只读当前会话与运行拥有的 Canonical 捕获，不依赖页面仍存活，也不重新连接或订阅来补造历史。游标固定读取高水位，读完后才显式 follow 新捕获；日志清除、运行租约或控制器改变使旧游标失效。结果保留原 scope、capture 与 source，并明确完整性未知或不完整，不能把未捕获的消息判为空。
+
+来源：`7d97108`，见 `src/chrome/executor.ts`、`src/logging.ts`、`src/chrome/tool.ts`。
+
 ### 同批动作保持顺序，失败后保留诊断和清理通道
 
 工具调度在模型完整响应后预留调用位置，协调同批执行顺序。对某资源的动作失败后，阻止后续依赖该资源的写操作继续盲目执行，但允许读取诊断和释放按键、指针。任务查询、取消及处理阻塞事件的路径需保持可用，避免等待中的操作挡住自己的恢复操作。
@@ -223,6 +227,10 @@ ID 的可操作性来自唯一真实元素绑定，不来自名字匹配或包�
 2026-11-07 的实现默认以文字和状态呈现快照，不暴露元素操作引用；需要句柄时可显式请求 `ref` 字段，或通过 `find_elements` 获取。内部仍维护引用及其角色、身份和文档校验；快照行 `id` 用于分页和增量更新，不是操作目标别名。可见名称以绘制证据为准，未绘制的 alt 或无障碍名称不作为可见文字输出；`name=unknown` 只说明完整可见名称未被确认，仍可能提供已确认的前缀；不能推断底层元数据不存在。
 
 来源：当前实现见 `src/chrome/automation.ts`、`src/chrome/snapshot-render.ts`、`src/chrome/tool.ts`。
+
+网页文字定位、读取与文字条件验证复用快照的同步绘制证明，再由 Chrome 的 `innerText` 序列化已获证明的范围，保留换行、空白与文字变换语义。源码或 AX 名称不能代替可见文字证据；无法证明的内容保持不可用，不能凭空串宣告验证成功。此边界不宣称任意绘制、组合树或多目标查询都已完整覆盖。
+
+来源：`8ec092f`、`0058ad6`，见 `src/chrome/rendered-text.ts`、`src/chrome/snapshot-readable-source.js`、`src/chrome/automation.ts`。
 
 ### 快照复用布局证据并保留语义边界
 
@@ -410,11 +418,19 @@ HTML 祖先的 overflow 裁剪须按实际定位包含块判断，不能因 DOM 
 
 来源：[`2e96a95`](https://github.com/notCorwin/SurfWax/commit/2e96a95)、[`f1e1eac`](https://github.com/notCorwin/SurfWax/commit/f1e1eac)，见 `scripts/package-release.mjs`。
 
+第三方材料按真实输出模块、资源及明确归属的 public 输入生成，保留原文、哈希和来源；包的 license 字段不能代替完整条款。补充的官方标准条款与发布者对具体版本的许可声明分别记录，不能冒充原包内文件或据此猜造版权及 NOTICE。清单绑定锁文件与实际分发输入，无法核实的材料明确阻止发布。Chrome 138+ 只分发 KaTeX 的 WOFF2 格式，保留全部字型；TTF 仅作为提取原始字体声明的构建输入，不再重复分发兼容格式。
+
+来源：`f3addcc`、`ffea672`、`f51ec24`，见 `scripts/third-party-licenses.mjs`、`scripts/validate-third-party.mjs`、`scripts/licenses/sources.json`、`vite.config.ts`。
+
 ### 使用 GPL v3 许可证
 
 2026-11-02 为项目加入 GNU GPL v3 许可证，具体条款以 `LICENSE` 为准。
 
 来源：[`ced9391`](https://github.com/notCorwin/SurfWax/commit/ced9391)。
+
+真实构建随项目保留根 `LICENSE` 的 GPL 原文，校验器逐字节核对；项目许可与第三方材料分别表达。发布包的 `SOURCE.txt` 与发布说明从冻结的干净提交生成完整公开源码与源码归档入口、版本和 Node 24 构建命令，不能写死候选提交或把本地构建当成源码已经公开。归档核验包含该文件；实际分发前仍须使对应提交在公开仓库可取得。
+
+来源：`vite.config.ts`、`scripts/validate-build.mjs`、`scripts/package-release.mjs`；条款依据根 `LICENSE` 第 4、6 节及 GNU 官方 GPL v3 文本。
 
 ### 验收区分测试运行、工具终态与用户目标
 

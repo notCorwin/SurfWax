@@ -3,7 +3,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { resolve, relative, join, isAbsolute, sep, dirname, basename } from 'node:path';
-import { zipSync } from 'fflate';
+import { zipSync, unzipSync } from 'fflate';
 import { validateBuild } from './validate-build.mjs';
 
 process.env.TZ = 'UTC';
@@ -60,6 +60,8 @@ const assertCleanWorktree = () => {
 };
 assertCleanWorktree();
 const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim();
+const sourceURL = `https://github.com/notCorwin/SurfWax/tree/${commit}`;
+const sourceArchiveURL = `https://github.com/notCorwin/SurfWax/archive/${commit}.tar.gz`;
 
 const packageVersion = JSON.parse(await readFile(join(repository, 'package.json'), 'utf8')).version;
 const expectedTag = `v${packageVersion}`;
@@ -101,12 +103,18 @@ let reused = false;
 try {
   const paths = files
     .map(file => ({ file, archivePath: relative(directory, file).split(sep).join('/') }))
+    .concat([{ archivePath: 'SOURCE.txt', bytes: Buffer.from(`Surf Wax ${version}\nCommit: ${commit}\n\nCorresponding source: ${sourceURL}\nSource archive: ${sourceArchiveURL}\n\nThis project's GPL v3 text is included in LICENSE. Third-party materials are separately listed in third-party/manifest.json.\n\nBuild this source using Node 24 and npm:\n  npm ci --include=dev\n  npm run build\nThe lockfile and build scripts are in the source archive. Load the resulting dist directory in Chrome 138+ using Load unpacked.\n\nPublish this exact commit in the public source repository before distributing this archive; these URLs do not establish remote availability during a local build.\n`) }])
     .sort((left, right) => left.archivePath < right.archivePath ? -1 : left.archivePath > right.archivePath ? 1 : 0);
   const archiveEntries = Object.create(null);
-  for (const { file, archivePath } of paths) {
-    archiveEntries[archivePath] = [new Uint8Array(await readFile(file)), { mtime: epoch }];
+  for (const { file, archivePath, bytes } of paths) {
+    if (Object.hasOwn(archiveEntries, archivePath)) throw new Error(`Duplicate release archive entry: ${archivePath}`);
+    archiveEntries[archivePath] = [new Uint8Array(bytes ?? await readFile(file)), { mtime: epoch }];
   }
-  await writeFile(candidate, zipSync(archiveEntries, { level: 9 }));
+  const archiveBytes = zipSync(archiveEntries, { level: 9 });
+  const unpacked = unzipSync(archiveBytes);
+  if (Object.keys(unpacked).length !== paths.length || paths.some(({ archivePath }) =>
+    !unpacked[archivePath] || sha256(unpacked[archivePath]) !== sha256(archiveEntries[archivePath][0]))) throw new Error('Release archive entries differ from the complete input byte inventory');
+  await writeFile(candidate, archiveBytes);
   checksum = sha256(await readFile(candidate));
   const checksumText = `${checksum}  surf-wax-${version}.zip\n`;
   try {
@@ -129,7 +137,7 @@ try {
     if (await readFile(`${archive}.sha256`, 'utf8') !== checksumText) throw new Error(`Existing checksum differs for version ${version}; refusing to overwrite ${archive}.sha256`);
   }
   const notes = join(staging, 'release-notes.md');
-  await writeFile(notes, `# Surf Wax ${version}\n\nSource checkout: ${commit}\n\nChrome 138+; Manifest V3.\n\nThe script installed dependencies from the lockfile, built from a clean Git worktree, checked the built manifest, entrypoints and asset size limits, and generated this ZIP and its SHA-256 checksum. This description assumes trusted local tools and no concurrent source modifications. These checks do not constitute browser or performance testing.\n\nDownload the ZIP and checksum, verify SHA-256, extract it, and use Chrome's Load unpacked on the directory containing manifest.json. Chrome Web Store installations update through the store; unpacked installations must be updated manually.\n\nRequired permissions: debugger, downloads, scripting, sidePanel, storage, tabs, unlimitedStorage, userScripts; website access: all URLs. Downloads are created when you explicitly choose to save a file.\n\nConversation data and full browser/tool results stay in the local canonical event log and are sent to your configured model endpoint when used as model context. See PRIVACY.md in the repository for details.\n`);
+  await writeFile(notes, `# Surf Wax ${version}\n\nSource checkout: ${commit}\n\nCorresponding source: ${sourceURL}\nSource archive: ${sourceArchiveURL}\nThe project GPL v3 text is included in LICENSE; third-party materials have their own inventory. Publish this exact source commit before distributing the archive.\n\nChrome 138+; Manifest V3.\n\nThe script installed dependencies from the lockfile, built from a clean Git worktree, checked the built manifest, entrypoints and asset size limits, and generated this ZIP and its SHA-256 checksum. This description assumes trusted local tools and no concurrent source modifications. These checks do not constitute browser or performance testing.\n\nDownload the ZIP and checksum, verify SHA-256, extract it, and use Chrome's Load unpacked on the directory containing manifest.json. Chrome Web Store installations update through the store; unpacked installations must be updated manually.\n\nRequired permissions: debugger, downloads, scripting, sidePanel, storage, tabs, unlimitedStorage, userScripts; website access: all URLs. Downloads are created when you explicitly choose to save a file.\n\nConversation data and full browser/tool results stay in the local canonical event log and are sent to your configured model endpoint when used as model context. See PRIVACY.md in the repository for details.\n`);
   // The unversioned notes describe this invocation; immutable versioned assets above never replace files.
   await rename(notes, join(output, 'release-notes.md'));
 } finally { await rm(staging, { recursive: true, force: true }); }

@@ -61,6 +61,13 @@ export default defineConfig({
     react(),
     tailwindcss(),
     crx({ manifest: devManifest as any }),
+    {
+      name: "surf-wax-project-license",
+      apply: "build",
+      generateBundle() {
+        this.emitFile({ type: "asset", fileName: "LICENSE", source: readFileSync(resolve(projectRoot, "LICENSE")) });
+      },
+    },
     thirdPartyLicenses(),
   ],
   resolve: {
