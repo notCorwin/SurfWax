@@ -1,0 +1,184 @@
+{
+  "baseline": "9dd4bdaa648830b4f5936f9a12acc2a5ec68386f",
+  "orderedIntegration": [
+    {
+      "source": "fd8bc38f05473ba901073e567fc86ff03e68ba44",
+      "integrated": "522909829d89878329395919a7618a46610cf065"
+    },
+    {
+      "source": "e2ec864cb21dda4ba49b37b5d6605f36fb7c01a0",
+      "integrated": "78a7abf21ec9c10e7886693f0f9806f89a9703a4"
+    },
+    {
+      "source": "c4b8a868d533a6a79f102b3a3e41849d07f4a28d",
+      "integrated": "2e3b12ade3419360ae37f8b8ac0823af2de53901"
+    },
+    {
+      "source": "d95f01f6e9e6e09ed24ae6db784e1fc02e0f4d75",
+      "integrated": "a1824ecec91f1dad233ccacd15d60d49340c1467"
+    }
+  ],
+  "conflicts": [],
+  "reviewInput": "/Users/nowaywastaken/Repositories/surfwax/.dev/verification/harness-fixes-review.json",
+  "fix": "Separate completion evidence types (tool.finished/tool.failed/automation.action.attempt) from model context. Both use one projection reader with existing canonical snapshot, materialization, floor, indexed/fallback reads and cursor rules. Incremental evidence epoch rebuild remains unchanged.",
+  "preserved": "Immediate target resolution and monotonic import dispatch certainty from c4; artifact scheduler classification and catalog v46 from d95; pinned canonical head from fd8; action identity and review chronology from e2.",
+  "sourceHashesBeforeCommit": {
+    "src/agent/goal-completion.ts": "7fc49ad4d2006d5252598a357f37fc220aae29b7cdf462e9b574bf0bc2974720",
+    "src/logging.test.ts": "80c9cec6915723e68dbf80cbe3106a7e13c2007e7c068187c5c075481a166792",
+    "src/logging.ts": "45634ab76837e40aac154623202537ff58f92ed64b4172689f74e96eff8ec556"
+  },
+  "runtime": {
+    "node": "24.22.2",
+    "pathPrefix": "export PATH=/Users/nowaywastaken/.npm/_npx/387698761821791d/node_modules/node/bin:$PATH",
+    "chromePath": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "chromeVersion": [
+      "157.0.8103.39"
+    ],
+    "headless": true,
+    "devFlow": true,
+    "sourceEditsDuringBrowserRun": false
+  },
+  "commands": [
+    {
+      "command": "npm ci --ignore-scripts --no-audit --no-fund",
+      "exitCode": 0,
+      "lockfileChanged": false
+    },
+    {
+      "command": "node node_modules/vitest/vitest.mjs run > .dev/verification/integration-unit.log 2>&1",
+      "exitCode": 0,
+      "filesPassed": 8,
+      "testsPassed": 26
+    },
+    {
+      "command": "node node_modules/typescript/bin/tsc --noEmit > .dev/verification/integration-tsc.log 2>&1",
+      "exitCode": 0
+    },
+    {
+      "command": "node scripts/run-browser-tests.mjs e2e e2e/context.spec.ts e2e/complex-task-evaluation.spec.ts e2e/click-timeout.spec.ts e2e/canonical-session.spec.ts > .dev/verification/integration-e2e.log 2>&1",
+      "exitCode": 0,
+      "testsPassed": 8
+    },
+    {
+      "command": "git diff --check",
+      "exitCode": 0
+    }
+  ],
+  "coverage": [
+    "Model context snapshot is reused for attempt-only appends; evidence cursor retains observed identity when terminal arrives later; fresh logger reconstruction and cross-writer clear invalidate cached evidence.",
+    "Actual production completion-review HTTP request contains observed role/name/ref/order; production runEvidence reconstructs same identity from saved canonical events; excerpts preserve chronology.",
+    "Context retry/edit branch before reply, failure without output, reload, summary and counter; immediate missing/ambiguous targets and import cancellation before/after dispatch; stored HTTP JSON extraction and byte-exact joins without refetch."
+  ],
+  "browserEvidence": [
+    {
+      "title": [
+        "complex-task-evaluation.spec.ts",
+        "scripted complex task: cross-frame order recovery (seed 17)"
+      ],
+      "status": "passed",
+      "browser": "157.0.8103.39",
+      "project": "current",
+      "profile": "/var/folders/6w/xd0vzpj97rgbskfk5kd7vxrh0000gn/T/side-agent-e2e-s4Mxg1"
+    },
+    {
+      "title": [
+        "click-timeout.spec.ts",
+        "a covered click returns promptly with the page and can be retried after dismissing the overlay"
+      ],
+      "status": "passed",
+      "browser": "157.0.8103.39",
+      "project": "current",
+      "profile": "/var/folders/6w/xd0vzpj97rgbskfk5kd7vxrh0000gn/T/side-agent-e2e-VkV92L"
+    },
+    {
+      "title": [
+        "canonical-session.spec.ts",
+        "stored HTTP JSON extracts and joins exact text without refetch or model text copying"
+      ],
+      "status": "passed",
+      "browser": "157.0.8103.39",
+      "project": "current",
+      "profile": "/var/folders/6w/xd0vzpj97rgbskfk5kd7vxrh0000gn/T/side-agent-e2e-QxKfdo"
+    },
+    {
+      "title": [
+        "context.spec.ts",
+        "automatically summarizes after a completed turn and preserves the full canonical history"
+      ],
+      "status": "passed",
+      "browser": "157.0.8103.39",
+      "project": "current",
+      "profile": "/var/folders/6w/xd0vzpj97rgbskfk5kd7vxrh0000gn/T/side-agent-e2e-IYOHeF"
+    },
+    {
+      "title": [
+        "context.spec.ts",
+        "updates context while a reply is pending and when switching branches"
+      ],
+      "status": "passed",
+      "browser": "157.0.8103.39",
+      "project": "current",
+      "profile": "/var/folders/6w/xd0vzpj97rgbskfk5kd7vxrh0000gn/T/side-agent-e2e-Fs6mt4"
+    },
+    {
+      "title": [
+        "context.spec.ts",
+        "anchors context usage to provider-reported input tokens"
+      ],
+      "status": "passed",
+      "browser": "157.0.8103.39",
+      "project": "current",
+      "profile": "/var/folders/6w/xd0vzpj97rgbskfk5kd7vxrh0000gn/T/side-agent-e2e-w1ltDw"
+    },
+    {
+      "title": [
+        "canonical-session.spec.ts",
+        "canonical session commits synchronize panels and the next request includes remote progress"
+      ],
+      "status": "passed",
+      "browser": "157.0.8103.39",
+      "project": "current",
+      "profile": "/var/folders/6w/xd0vzpj97rgbskfk5kd7vxrh0000gn/T/side-agent-e2e-C7tYez"
+    }
+  ],
+  "runReceipt": {
+    "path": ".dev/artifacts/1794423405906-e2e-308858c5-eb78-4510-9ba9-f457c22455a9/run.json",
+    "value": {
+      "kind": "e2e",
+      "pid": 77010,
+      "startedAt": 1794423405909,
+      "status": "passed",
+      "finishedAt": 1794423475068
+    }
+  },
+  "logs": {
+    "integration-e2e.log": {
+      "path": ".dev/verification/integration-e2e.log",
+      "sha256": "8246fe3a0e176a2914cf67005e81008e571ea413617f850d1bf48c4ca673d6b3"
+    },
+    "integration-tsc.log": {
+      "path": ".dev/verification/integration-tsc.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "integration-unit.log": {
+      "path": ".dev/verification/integration-unit.log",
+      "sha256": "457fc153065ef74dd8f423a9a67ec0b92a0a659c48aaa5fa6783efc6424f37f6"
+    }
+  },
+  "e2eOutput": "`server.hmr.protocol/host/port/path/clientPort/timeout/server` is deprecated. Use `server.ws.*` instead. Note that this option may be set by a plugin. Set VITE_DEPRECATION_TRACE=1 to see where it is called.\n\nRunning 8 tests using 1 worker\n\n(node:77041) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.\n(Use `node --trace-warnings ...` to show where the warning was created)\n  ✓  1 [current] › e2e/canonical-session.spec.ts:3:1 › canonical session commits synchronize panels and the next request includes remote progress (13.1s)\n  ✓  2 [current] › e2e/canonical-session.spec.ts:58:1 › stored HTTP JSON extracts and joins exact text without refetch or model text copying (7.1s)\n  ✓  3 [current] › e2e/click-timeout.spec.ts:24:1 › a covered click returns promptly with the page and can be retried after dismissing the overlay (5.2s)\n  ✓  4 [current] › e2e/click-timeout.spec.ts:107:1 › atomic targets fail promptly and imports preserve dispatch certainty (4.8s)\n  ✓  5 [current] › e2e/complex-task-evaluation.spec.ts:57:3 › scripted complex task: cross-frame order recovery (seed 17) (7.3s)\n  ✓  6 [current] › e2e/context.spec.ts:23:1 › automatically summarizes after a completed turn and preserves the full canonical history (8.1s)\n  ✓  7 [current] › e2e/context.spec.ts:101:1 › updates context while a reply is pending and when switching branches @user-journey (15.6s)\n  ✓  8 [current] › e2e/context.spec.ts:249:1 › anchors context usage to provider-reported input tokens (6.8s)\n\n  8 passed (1.1m)\n",
+  "limitations": [
+    "No real provider API/model calls or actual Luna task reruns; deterministic provider only.",
+    "No full E2E suite, separate fault mutation campaign, visible-window fit or new scrolling/snapshot-visibility acceptance.",
+    "Post-reload action reconstruction uses the real production evidence projector over saved canonical events, not an independent second completion review after Chrome restart.",
+    "Raw HTML/canonical logs remain local under .dev; this JSON preserves commands, summaries and hashes."
+  ],
+  "workflow": {
+    "isolatedCheckoutOnly": true,
+    "push": false,
+    "pullRequest": false,
+    "markdownChanged": false,
+    "productionReleaseBuild": false,
+    "delegated": false,
+    "historyMaintenance": "Parent owns final decision record."
+  }
+}

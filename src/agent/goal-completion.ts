@@ -154,10 +154,10 @@ export async function runEvidence(logger: EventLogger, conversationId: string, r
   if (!runs) { runs = new Map(); caches.set(logger, runs); }
   let cache = runs.get(conversationId);
   if (!cache || cache.runId !== runId) { cache = { runId, cursor: -1, entries: new Map(), targets: new Map() }; runs.set(conversationId, cache); }
-  let batch = await logger.contextProjectionEvents(conversationId, cache.cursor);
+  let batch = await logger.evidenceProjectionEvents(conversationId, cache.cursor);
   if (cache.epoch && cache.epoch !== batch.epoch) {
     cache = { runId, cursor: -1, entries: new Map(), targets: new Map() }; runs.set(conversationId, cache);
-    batch = await logger.contextProjectionEvents(conversationId);
+    batch = await logger.evidenceProjectionEvents(conversationId);
   }
   cache.epoch = batch.epoch;
   for (const event of batch.value) {

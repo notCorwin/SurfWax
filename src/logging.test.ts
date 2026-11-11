@@ -1,8 +1,30 @@
 import { describe, expect, it } from "vitest";
 import { EventLogger, fromLogValue } from "./logging";
+import { IncrementalActiveContext } from "./agent/context-choice";
+import { runEvidence } from "./agent/goal-completion";
 import { createMemoryEventStore } from "./memory-event-store";
 
 describe("canonical event log", () => {
+  it("keeps action attempts out of model context while replaying evidence across cursors and clears", async () => {
+    const store = createMemoryEventStore();
+    const logger = new EventLogger({ store });
+    const context = new IncrementalActiveContext(logger, "c");
+    const initial = await context.read();
+    await logger.append({ type: "automation.action.attempt", conversationId: "c", runId: "run", toolCallId: "click",
+      content: { reason: "actionable", candidateCount: 1, candidates: [{ role: "button", name: "Submit", ref: "b" }] } });
+    expect(await context.read()).toBe(initial);
+    expect(await runEvidence(logger, "c", "run")).toEqual([]);
+    await logger.append({ type: "tool.finished", conversationId: "c", runId: "run", toolCallId: "click",
+      content: { toolName: "click" }, input: { target: { id: "b" } }, output: { ok: true } });
+    const evidence = await runEvidence(logger, "c", "run");
+    expect(evidence[0]?.receipt?.observedTargets).toMatchObject([{ role: "button", name: "Submit", ref: "b" }]);
+    expect(await runEvidence(new EventLogger({ store }), "c", "run")).toEqual(evidence);
+    expect((await context.read()).events.map(event => event.type)).toEqual(["tool.finished"]);
+    await new EventLogger({ store }).clear();
+    expect(await runEvidence(logger, "c", "run")).toEqual([]);
+    expect((await context.read()).events).toEqual([]);
+    await expect(logger.evidenceProjectionEvents("c", -2)).rejects.toThrow("cursor");
+  });
   it("atomically links a durable job result and respects state and clear epochs", async () => {
     const store = createMemoryEventStore();
     const logger = new EventLogger({ store });
