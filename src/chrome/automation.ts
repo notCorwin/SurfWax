@@ -544,8 +544,12 @@ export class AutomationRuntime {
         try {
           const resolved = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: hit.backendNodeId, objectGroup: group });
           if (resolved.object?.objectId) {
+            // Resolver targets may belong to the extension world. Compare the
+            // same native node in the default world used for the hit node.
+            const comparable = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: expectedNodeId, objectGroup: group });
+            if (!comparable.object?.objectId) throw automationError("state-unavailable", { reason: "missing-target-node" });
             const result = await this.options.command(debuggee, "Runtime.callFunctionOn", {
-              objectId, arguments: [{ objectId: resolved.object.objectId }], returnByValue: true,
+              objectId: comparable.object.objectId, arguments: [{ objectId: resolved.object.objectId }], returnByValue: true,
               functionDeclaration: "function(hit){for(let node=hit;node;node=node.parentNode || node.host) if(node===this)return true;return false}",
             });
             matches = result.result?.value === true;
@@ -3505,10 +3509,14 @@ export class AutomationRuntime {
         if (targetDocument === hitDocument) {
           // A same-document hit can still be an unrelated overlay. Traverse
           // the composed ancestry so descendants inside shadow roots count.
+          // Rebind the exact target backend node to the hit's default world;
+          // an extension-world resolver handle cannot be passed across worlds.
+          const comparable = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: targetNode.backendNodeId, objectGroup });
+          if (!comparable.object?.objectId) throw automationError("state-unavailable", { reason: "missing-target-node" });
           const relation = await this.options.command(debuggee, "Runtime.callFunctionOn", {
             objectId: found.object.objectId,
             functionDeclaration: "function(target){ for (let node = this; node; node = node.parentNode || node.host) if (node === target) return true; return false; }",
-            arguments: [{ objectId }], returnByValue: true,
+            arguments: [{ objectId: comparable.object.objectId }], returnByValue: true,
           });
           if (relation.result?.value !== true) return false;
         } else {

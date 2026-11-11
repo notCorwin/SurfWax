@@ -56,7 +56,7 @@ test("a covered click returns promptly with the page and can be retried after di
       (request) => {
         elapsed = Date.now() - elapsed;
         expect(elapsed).toBeLessThan(4_000);
-        expect(lastTool(request)).toMatchObject({
+        expect(lastTool(request), JSON.stringify(lastTool(request).error)).toMatchObject({
           ok: false,
           error: { code: "intercepted" },
           timeoutMs: 5_000,
