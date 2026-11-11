@@ -26,6 +26,7 @@ const isInside = (parent, candidate) => {
 if (process.argv.length !== 3 || process.argv[2] !== '--build') throw new Error('Release packaging requires --build to build from the checked-out source.');
 const repository = realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
 const gitDirectory = realpathSync(execFileSync('git', ['rev-parse', '--absolute-git-dir'], { encoding: 'utf8' }).trim());
+const commonGitDirectory = realpathSync(resolve(repository, execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: repository, encoding: 'utf8' }).trim()));
 const gitEntry = resolve(repository, '.git');
 const outputRequested = resolve(repository, process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
 const buildDirectoryRequested = resolve(repository, process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
@@ -33,8 +34,10 @@ if (isInside(gitEntry, outputRequested)) throw new Error('SURFWAX_RELEASE_DIR mu
 if (isInside(gitEntry, buildDirectoryRequested)) throw new Error('SURFWAX_DEV_OUT_DIR must not be inside the Git metadata directory because Vite clears the build directory.');
 const output = canonicalPath(outputRequested);
 const buildDirectory = canonicalPath(buildDirectoryRequested);
-if (isInside(gitDirectory, output)) throw new Error('SURFWAX_RELEASE_DIR must not be inside the Git metadata directory.');
-if (isInside(gitDirectory, buildDirectory)) throw new Error('SURFWAX_DEV_OUT_DIR must not be inside the Git metadata directory because Vite clears the build directory.');
+const protectedGitPaths = [gitEntry, gitDirectory, commonGitDirectory];
+if (protectedGitPaths.some(path => isInside(path, output))) throw new Error('SURFWAX_RELEASE_DIR must not be inside a Git metadata directory.');
+if (protectedGitPaths.some(path => isInside(path, buildDirectory) || isInside(buildDirectory, path)))
+  throw new Error('SURFWAX_DEV_OUT_DIR must not contain or be inside a Git metadata directory because Vite clears the build directory.');
 const outputIsInsideRepository = isInside(repository, output);
 if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${output}${sep}`], { cwd: repository }).status !== 0) {
   throw new Error('SURFWAX_RELEASE_DIR must be outside the Git worktree or ignored by Git so generated artifacts cannot make the worktree dirty.');

@@ -232,6 +232,10 @@ ID 的可操作性来自唯一真实元素绑定，不来自名字匹配或包�
 
 来源：`8ec092f`、`0058ad6`，见 `src/chrome/rendered-text.ts`、`src/chrome/snapshot-readable-source.js`、`src/chrome/automation.ts`。
 
+同一次同步文字查询的所有候选共享一次整页绘制证明，候选 metadata 在同一次 `Runtime.callFunctionOn` 中批量读取；不为每个匹配项重新采集页面。复用只限该同步调用，不跨异步等待、DOM 变化、框架或文档代次。空自定义元素依据真实 closed-root 与未知绘制证据判断，不能仅因标签含连字符就拒绝其可见父文字；这些取舍不构成任意页面的延迟上界。
+
+来源：`128a59b`，见 `src/chrome/rendered-text.ts`、`src/chrome/automation.ts`。
+
 ### 快照复用布局证据并保留语义边界
 
 2026-11-07 的实现复用语义观察中同一次 DOMSnapshot 的几何，按各文档视口 CSS 像素表达包围盒。布局以实测几何而非 DOM 顺序表达，不自动根据已知名称推断“恰好两个”或全局唯一性，避免未知、部分名称及缺失几何造成误判；包围盒不代表保证可操作的坐标，不同框架的坐标不互相比较。布局写入快照行，参与增量比较；续页是否重新校验当前几何取决于观察是否暴露操作引用，具体规则见下文。该呈现过程不新增截图或模型调用。
@@ -421,6 +425,10 @@ HTML 祖先的 overflow 裁剪须按实际定位包含块判断，不能因 DOM 
 第三方材料按真实输出模块、资源及明确归属的 public 输入生成，保留原文、哈希和来源；包的 license 字段不能代替完整条款。补充的官方标准条款与发布者对具体版本的许可声明分别记录，不能冒充原包内文件或据此猜造版权及 NOTICE。清单绑定锁文件与实际分发输入，无法核实的材料明确阻止发布。Chrome 138+ 只分发 KaTeX 的 WOFF2 格式，保留全部字型；TTF 仅作为提取原始字体声明的构建输入，不再重复分发兼容格式。
 
 来源：`f3addcc`、`ffea672`、`f51ec24`，见 `scripts/third-party-licenses.mjs`、`scripts/validate-third-party.mjs`、`scripts/licenses/sources.json`、`vite.config.ts`。
+
+发布路径保护同时覆盖 checkout 的 `.git` 入口、实际 Git 目录和 worktree 共用的 Git 目录，并解析真实路径。构建目录不能位于这些目录内，也不能成为其祖先；发布输出不能落入元数据目录，防止 `emptyOutDir` 擦除共享仓库。
+
+来源：`scripts/package-release.mjs`。
 
 ### 使用 GPL v3 许可证
 
