@@ -121,6 +121,10 @@ describe("context choices and summary", () => {
     expect(JSON.stringify((await projection.read("user", "original")).raw)).toContain("Original observation");
     expect((await projection.read("user", "retry")).raw).toEqual(retry.raw);
     expect(retry.checkpoint).toBeUndefined();
+    await logger.appendMessage("one", { id: "retry-reply", role: "assistant", parts: [{ type: "text", text: "Retry answer" }] }, { parentId: "user" });
+    await logger.append({ type: "conversation.finished", conversationId: "one", content: { messageId: "retry-reply" } });
+    logger.endRun("one", "retry");
+    await logger.append({ type: "conversation.branch.selected", conversationId: "one", content: { headId: "prior-reply" } });
     logger.beginRun("one", "failed-without-output");
     await logger.append({ type: "conversation.submitted", conversationId: "one", content: { messageId: "user" } });
     await logger.append({ type: "model.context.appended", conversationId: "one", content: { anchorMessageId: "user", partCount: 1, message: { role: "user", content: "Failed attempt observation" } } });
