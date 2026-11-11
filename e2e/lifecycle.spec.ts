@@ -158,8 +158,14 @@ test(
       await expect(recovery.getByTestId("composer-input")).toBeVisible();
       expect(await assertRecovered()).toEqual(recovered);
       await test.info().attach("native-lifecycle-recovery", { contentType: "application/json", body: Buffer.from(JSON.stringify({
-        stoppedWorker: versionId, sameRun: starts[0].runId, starts: starts.map(event => ({ id: event.id, toolCallId: event.toolCallId, callId: event.content?.callId })),
-        terminals: recovered, completedEffects: 1, queuedEffects: 0, browserProcessRestart: false,
+        stoppedWorker: versionId, workerStoppedObserved: stopped, sameRun: starts[0].runId,
+        starts: starts.map(event => ({ id: event.id, toolCallId: event.toolCallId, callId: event.content?.callId })),
+        beforeCloseTerminals: beforeClose.filter(event => ["tool.finished", "tool.failed"].includes(event.type)
+          && event.runId === starts[0].runId).map(event => ({ id: event.id, type: event.type, toolCallId: event.toolCallId })),
+        inflightProgress: beforeClose.filter(event => event.type === "browser.job.progress" && event.toolCallId === "native-queue-1")
+          .map(event => ({ id: event.id, content: event.content })),
+        terminals: recovered.map(({ id, type, runId, toolCallId, content, error, abort }) => ({ id, type, runId, toolCallId, content, error, abort })),
+        completedEffects: 1, queuedEffects: 0, browserProcessRestart: false,
       }, null, 2)) });
       expect(provider.requests).toHaveLength(1);
     } finally {

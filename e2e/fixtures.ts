@@ -198,14 +198,14 @@ export async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
 }
 
-const testProfiles = new Map<string, { context: BrowserContext; browserVersion: string; diagnostics: Array<{ type: string; message: string; page: string }> }>();
+const testProfiles = new Map<string, { context: BrowserContext; browserVersion: string; diagnostics: { messages: Array<{ type: string; message: string; page: string }>; omitted: number } }>();
 
 export const test = base.extend<{ _profileCleanup: void }>({
   _profileCleanup: [async ({}, use, info) => {
     await use();
     for (const [directory, profile] of testProfiles) {
       const { context, browserVersion, diagnostics } = profile;
-      await info.attach("browser-diagnostics", { body: JSON.stringify({ diagnostics }), contentType: "application/json" });
+      await info.attach("browser-diagnostics", { body: JSON.stringify(diagnostics), contentType: "application/json" });
       await context.close().catch(() => undefined);
       const source = resolve(directory, "Default/IndexedDB");
       const destination = resolve(process.env.SURFWAX_EVIDENCE_PATH ?? info.outputPath("canonical-logs"), basename(directory));
@@ -246,11 +246,15 @@ export async function openExtension(existingDirectory?: string, settings: { exte
     ignoreDefaultArgs: ["--disable-extensions"],
     args: ["--enable-unsafe-extension-debugging", "--hide-crash-restore-bubble", ...(settings.args ?? [])],
   });
-  const diagnostics: Array<{ type: string; message: string; page: string }> = [];
+  let extensionId: string;
+  const diagnostics: { messages: Array<{ type: string; message: string; page: string }>; omitted: number } = { messages: [], omitted: 0 };
+  const developmentOrigin = process.env.SURFWAX_DEV_SERVER_URL ? new URL(process.env.SURFWAX_DEV_SERVER_URL).origin : undefined;
   const watch = (page: Page) => {
     const record = (type: string, message: string) => {
       const url = new URL(page.url());
-      diagnostics.push({ type, message: message.slice(0, 512), page: `${url.origin}${url.pathname}` });
+      if (!(url.protocol === "chrome-extension:" && url.hostname === extensionId) && url.origin !== developmentOrigin) return;
+      if (diagnostics.messages.length >= 200) { diagnostics.omitted++; return; }
+      diagnostics.messages.push({ type, message: message.slice(0, 512), page: `${url.origin}${url.pathname}` });
     };
     page.on("pageerror", error => record("pageerror", error.message));
     page.on("console", message => {
@@ -260,7 +264,6 @@ export async function openExtension(existingDirectory?: string, settings: { exte
   context.pages().forEach(watch);
   context.on("page", watch);
   const browserSession = await context.browser()!.newBrowserCDPSession();
-  let extensionId: string;
   try {
     ({ id: extensionId } = await browserSession.send("Extensions.loadUnpacked", { path: extensionPath }));
   } catch (error) {
