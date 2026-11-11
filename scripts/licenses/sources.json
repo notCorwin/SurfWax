@@ -75,10 +75,9 @@
     "versions": [
       "2.2.1"
     ],
-    "unresolved": "@aihubmix/ai-sdk-provider@2.2.1: official npm release declares Apache-2.0 but neither tarball, matching v2.2.1/gitHead nor current official repository supplies original license/copyright text; obtain upstream materials before release. Provider routing remains unchanged.",
     "evidence": [
       {
-        "url": "https://registry.npmjs.org/@aihubmix%2fai-sdk-provider/latest",
+        "url": "https://registry.npmjs.org/@aihubmix/ai-sdk-provider/2.2.1",
         "sha256": "bc10fd102d631681b707a0b779064920bf64e7a232110fc966e37e93dc044e70",
         "observedVersion": "2.2.1",
         "license": "Apache-2.0",
@@ -93,7 +92,20 @@
         "result": "Current official upstream tree also has no legal document; GitHub releases list empty."
       }
     ],
-    "limitations": "npm license identifier alone does not establish missing original attribution. No copyright holder or permission text has been invented.",
-    "remediation": "Preferred minimum change: obtain the original upstream license/copyright materials for 2.2.1. Removal is not route-neutral: src/agent/provider-adapters.ts and src/agent/model.ts:610 expose the Models.dev SDK route. A replacement using existing licensed SDKs must independently preserve documented Claude /v1/messages + x-api-key, Gemini /gemini/v1beta + x-goog-api-key (including -nothink/-search exceptions), OpenAI-compatible /v1, APP-Code and empty-tools request behavior. A blanket OpenAI-compatible substitution or deleting the SDK mapping would change that public contract; neither is made here."
+    "limitations": "Relies on the official publisher SPDX declaration for this exact locked release. No upstream copyright holder or NOTICE is invented; no independent legal compliance guarantee.",
+    "file": "scripts/licenses/Apache-2.0-LICENSE.txt",
+    "upstream": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "basis": "Publisher package declares Apache-2.0; standard terms supplied from Apache official source; upstream tarball/repo has no separate LICENSE/NOTICE found. This is the complete unmodified Apache standard text, not a license file supplied by AIhubmix. The appendix template placeholders are retained verbatim and are not an attribution claim. Existing package legal documents, if present, are retained separately.",
+    "publisherDeclaration": {
+      "file": "scripts/licenses/aihubmix-2.2.1-package.json",
+      "sha256": "bc10fd102d631681b707a0b779064920bf64e7a232110fc966e37e93dc044e70",
+      "url": "https://registry.npmjs.org/@aihubmix/ai-sdk-provider/2.2.1",
+      "version": "2.2.1",
+      "license": "Apache-2.0",
+      "gitHead": "ec4b737bf9f945f4c17ae0e230121cf81d0154f1",
+      "tarball": "https://registry.npmjs.org/@aihubmix/ai-sdk-provider/-/ai-sdk-provider-2.2.1.tgz",
+      "integrity": "sha512-VUkSYFbrigs5ZF44LRSHEI/q1fZyLkExWvrgBG4w0ysGEE/XXt7fi9NgMG9UH1PQVBgnc/PP03CUhTM1nhmGxQ=="
+    }
   }
 ]

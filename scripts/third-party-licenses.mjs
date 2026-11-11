@@ -11,6 +11,26 @@ const legalName = /^(?:licen[sc]e|copying|copyright|notice|ofl)(?:[-_][a-z0-9_-]
 const metadataName = /^(?:\.DS_Store|\._.*)$/;
 const json = value => `${JSON.stringify(value)}\n`;
 
+// Opt-in binding for a publisher-declared license supplemented with official standard
+// terms. Other missing licenses remain unresolved; SPDX is never expanded by guessing.
+export function verifyPublisherDeclarations(root, pkg, locked, supplements) {
+  for (const supplement of supplements.filter(item => item.package === pkg.name && item.publisherDeclaration)) {
+    const declaration = supplement.publisherDeclaration;
+    const read = path => readFileSync(resolve(root, path));
+    const bytes = read(declaration.file);
+    if (hash(bytes) !== declaration.sha256 || hash(read(supplement.file)) !== supplement.sha256) throw new Error(`Publisher license evidence hash mismatch: ${pkg.name}`);
+    const published = JSON.parse(bytes);
+    const installed = JSON.parse(read(`${pkg.packagePath}/package.json`));
+    if (!supplement.versions.includes(pkg.version)
+      || [pkg, installed, published].some(item => item.name !== supplement.package || item.version !== declaration.version || item.license !== declaration.license)
+      || locked?.version !== declaration.version || locked?.license !== declaration.license
+      || locked?.integrity !== declaration.integrity || locked?.resolved !== declaration.tarball
+      || published.gitHead !== declaration.gitHead || published.dist?.integrity !== declaration.integrity || published.dist?.tarball !== declaration.tarball) {
+      throw new Error(`Publisher license declaration differs from locked/installed release: ${pkg.name}; review license materials for the new package`);
+    }
+  }
+}
+
 export function thirdPartyLicenses() {
   let root;
   return {
@@ -90,6 +110,7 @@ export function thirdPartyLicenses() {
             }
           };
           visit(pkg.packagePath);
+          verifyPublisherDeclarations(root, pkg, lock.packages[pkg.packagePath], supplements);
           pkg.licenseEvidence = supplements.filter(item => item.package === pkg.name && item.versions.includes(pkg.version));
           for (const supplement of pkg.licenseEvidence) {
             if (supplement.unresolved) issues.push(supplement.unresolved);
@@ -143,7 +164,7 @@ export function thirdPartyLicenses() {
           lockfileSha256: hash(file('package-lock.json')), packages: [...packages.values()].sort((a, b) => a.packagePath < b.packagePath ? -1 : 1),
           publicAssets, outputs: Object.values(bundle).filter(item => item.type === 'chunk').map(item => ({ output: item.fileName, sha256: hash(item.code) })).sort((a, b) => a.output < b.output ? -1 : 1), issues: sorted(issues) };
         emit('third-party/manifest.json', json(report));
-        emit('third-party/README.txt', 'Third-party materials\n\nSee manifest.json for package versions, lockfile integrity, actual module/resource output mappings and original legal text SHA-256.\nPublic Playwright LICENSE and NOTICE are retained unchanged; keyboard mappings are adapted in src/chrome/automation-utils.ts.\nKaTeX font name-table notices and SIL OFL 1.1 are separate from the KaTeX code MIT license. Lucide LICENSE includes Feather-derived MIT text.\nThis inventory is build evidence, not legal advice or a legal compliance guarantee.\n' + (report.issues.length ? `\nUNRESOLVED (release validation fails):\n${report.issues.join('\n')}\n` : ''));
+        emit('third-party/README.txt', 'Third-party materials\n\nSee manifest.json for package versions, lockfile integrity, actual module/resource output mappings and legal text SHA-256 and provenance. Publisher-declared standard terms are explicitly identified in licenseEvidence; they are not claimed as upstream package files.\nPublic Playwright LICENSE and NOTICE are retained unchanged; keyboard mappings are adapted in src/chrome/automation-utils.ts.\nKaTeX font name-table notices and SIL OFL 1.1 are separate from the KaTeX code MIT license. Lucide LICENSE includes Feather-derived MIT text.\nThis inventory is build evidence, not legal advice or a legal compliance guarantee.\n' + (report.issues.length ? `\nUNRESOLVED (release validation fails):\n${report.issues.join('\n')}\n` : ''));
         if (report.issues.length) this.warn(`Third-party materials have unresolved issues; validate-build will reject release:\n${report.issues.join('\n')}`);
       },
     },

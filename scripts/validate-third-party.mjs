@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve, relative, isAbsolute, sep } from 'node:path';
 
+import { verifyPublisherDeclarations } from './third-party-licenses.mjs';
+
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 export async function validateThirdParty(root, output, files) {
   const read = async path => {
@@ -18,7 +20,14 @@ export async function validateThirdParty(root, output, files) {
   };
   for (const item of [...report.outputs, ...report.publicAssets]) await checkHash(item);
   const mappedOutputs = new Set(report.outputs.map(item => item.output));
+  const supplements = JSON.parse(await readFile(resolve(root, 'scripts/licenses/sources.json')));
   for (const pkg of report.packages) {
+    verifyPublisherDeclarations(root, pkg, lock.packages[pkg.packagePath], supplements);
+    const expectedEvidence = supplements.filter(item => item.package === pkg.name && item.versions.includes(pkg.version));
+    if (JSON.stringify(pkg.licenseEvidence) !== JSON.stringify(expectedEvidence)) throw new Error(`Stale third-party license provenance: ${pkg.name}; rebuild`);
+    for (const supplement of expectedEvidence.filter(item => item.file)) {
+      if (!pkg.documents.some(doc => doc.source === supplement.file && doc.sha256 === supplement.sha256 && doc.provenance === supplement.upstream)) throw new Error(`Missing supplemental license text: ${pkg.name}`);
+    }
     if (lock.packages[pkg.packagePath]?.version !== pkg.version || lock.packages[pkg.packagePath]?.integrity !== pkg.integrity) throw new Error(`Third-party package differs from lockfile: ${pkg.packagePath}`);
     if (!pkg.modules.length && !pkg.resources.length) throw new Error(`Third-party package lacks distributed source mapping: ${pkg.name}`);
     if (!pkg.documents.length && !report.issues.length) throw new Error(`Missing legal text: ${pkg.name}`);

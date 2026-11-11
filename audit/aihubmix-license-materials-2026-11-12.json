@@ -1,0 +1,119 @@
+{
+  "scope": "Distribution materials only; relies on publisher SPDX for exact locked release; no legal compliance guarantee. No model/API/browser tests, ZIP, push or publication.",
+  "base": "180ad80",
+  "sourceCommits": [
+    "96b4df43836230f78811f995b7c1f17451af1a40",
+    "edad257d9fd5e45948ff9b9d7ea6d5825279f0ae"
+  ],
+  "node": "v24.22.2",
+  "commands": [
+    "npm ci --ignore-scripts --no-audit --no-fund",
+    "node node_modules/typescript/bin/tsc --noEmit",
+    "npm run build",
+    "node --check scripts/third-party-licenses.mjs",
+    "node --check scripts/validate-third-party.mjs",
+    "git diff --check",
+    "node .dev/license-evidence/verify.mjs"
+  ],
+  "build": {
+    "files": 179,
+    "entrypointBytes": 480649,
+    "totalBytes": 8176529,
+    "unresolved": []
+  },
+  "apache": {
+    "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "bytes": 11358,
+    "unchangedAppendixTemplate": true
+  },
+  "publisher": {
+    "file": "scripts/licenses/aihubmix-2.2.1-package.json",
+    "sha256": "bc10fd102d631681b707a0b779064920bf64e7a232110fc966e37e93dc044e70",
+    "url": "https://registry.npmjs.org/@aihubmix/ai-sdk-provider/2.2.1",
+    "version": "2.2.1",
+    "license": "Apache-2.0",
+    "gitHead": "ec4b737bf9f945f4c17ae0e230121cf81d0154f1",
+    "tarball": "https://registry.npmjs.org/@aihubmix/ai-sdk-provider/-/ai-sdk-provider-2.2.1.tgz",
+    "integrity": "sha512-VUkSYFbrigs5ZF44LRSHEI/q1fZyLkExWvrgBG4w0ysGEE/XXt7fi9NgMG9UH1PQVBgnc/PP03CUhTM1nhmGxQ=="
+  },
+  "tarball": {
+    "sha256": "5e7dd17df94ca29d8caa0299fc00a382fd36e6c9b057975700ffc9b7a97d78d0",
+    "integrity": "sha512-VUkSYFbrigs5ZF44LRSHEI/q1fZyLkExWvrgBG4w0ysGEE/XXt7fi9NgMG9UH1PQVBgnc/PP03CUhTM1nhmGxQ==",
+    "installedMetadataMatches": true,
+    "inventory": [
+      "package/dist/index.js",
+      "package/package.json",
+      "package/dist/index.js.map",
+      "package/dist/index.mjs.map",
+      "package/CHANGELOG.md",
+      "package/README.ja.md",
+      "package/README.md",
+      "package/README.zh.md",
+      "package/dist/index.mjs",
+      "package/dist/index.d.mts",
+      "package/dist/index.d.ts"
+    ]
+  },
+  "fontCheck": {
+    "faces": 20,
+    "originalWoff2BytesMatch": true,
+    "noTtfOrWoffDistributed": true,
+    "noticeSources": 20,
+    "oflAndCopyrightValidation": "validateThirdParty passed"
+  },
+  "unchanged": [
+    "src/ (including AIhubmix routing)",
+    "package.json",
+    "package-lock.json",
+    "build thresholds",
+    "WOFF2 pruning and font copyright/OFL mechanisms"
+  ],
+  "negativeControls": [
+    {
+      "name": "missing vendored standard text",
+      "error": "ENOENT: no such file or directory, open '<temporary-fixture>/scripts/licenses/Apache-2.0-LICENSE.txt'"
+    },
+    {
+      "name": "tampered vendored standard text",
+      "error": "Publisher license evidence hash mismatch: @aihubmix/ai-sdk-provider"
+    },
+    {
+      "name": "installed SPDX changed",
+      "error": "Publisher license declaration differs from locked/installed release: @aihubmix/ai-sdk-provider; review license materials for the new package"
+    },
+    {
+      "name": "installed package version changed",
+      "error": "Publisher license declaration differs from locked/installed release: @aihubmix/ai-sdk-provider; review license materials for the new package"
+    },
+    {
+      "name": "locked tarball integrity changed",
+      "error": "Publisher license declaration differs from locked/installed release: @aihubmix/ai-sdk-provider; review license materials for the new package"
+    },
+    {
+      "name": "locked package version changed",
+      "error": "Publisher license declaration differs from locked/installed release: @aihubmix/ai-sdk-provider; review license materials for the new package"
+    },
+    {
+      "name": "publisher declaration evidence tampered",
+      "error": "Publisher license evidence hash mismatch: @aihubmix/ai-sdk-provider"
+    },
+    {
+      "name": "missing distributed standard text",
+      "error": "ENOENT: no such file or directory, open '<temporary-fixture>/dist/third-party/licenses/cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30.txt'"
+    },
+    {
+      "name": "tampered distributed standard text",
+      "error": "Third-party content hash mismatch: third-party/licenses/cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30.txt"
+    },
+    {
+      "name": "supplement omitted from inventory",
+      "error": "Missing supplemental license text: @aihubmix/ai-sdk-provider"
+    }
+  ],
+  "limitations": [
+    "No separate upstream LICENSE/NOTICE found; retained prior pinned repository observations in sources.json. No upstream attribution invented.",
+    "No repeated screenshot/font-rendering or real-model testing; these changes only supply and validate distribution materials."
+  ],
+  "temporaryVerificationScriptRemoved": true
+}
