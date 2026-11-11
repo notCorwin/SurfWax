@@ -366,17 +366,24 @@ test("text tools require rendered evidence rather than hidden source", async () 
         <div style="display:none"><p id="hidden">Ready</p></div>
         <div style="opacity:0"><p id="transparent">Ready</p></div>
         <div style="visibility:hidden"><p id="invisible">Ready</p></div>
-        <p id="mixed">Visible<span style="display:none">Ready</span><span style="opacity:0">Ready</span></p>
+        <p id="mixed">Visible<span style="display:none">Ready</span></p>
+        <p id="uncertain">Visible<span style="opacity:0">Ready</span></p>
+        <div id="inline">Hello <span style="display:none">secret</span> world</div>
+        <pre id="pre"> A <span style="display:none">secret</span> B </pre>
+        <div id="translated" style="transform:translateX(1px)">Translated</div>
+        <div id="covered" style="position:absolute;top:600px">Covered</div>
+        <div style="position:absolute;top:600px;width:300px;height:50px;background:white;z-index:2"></div>
         <p id="empty"></p><p id="offscreen" style="position:absolute;top:2500px">Offscreen text</p>
         <button id="start">Start real stamp</button>
-        <iframe id="child" srcdoc="<p id='frame-status'>Frame ready</p>"></iframe>`;
+        <iframe id="child" srcdoc="<p id='frame-status'>Frame ready</p>"></iframe>
+        <iframe id="hidden-child" style="opacity:0" srcdoc="<p id='frame-status'>Hidden frame text</p>"></iframe>`;
       document.querySelector('#start')!.addEventListener('click', () => {
         setTimeout(() => { document.querySelector('#status')!.textContent = 'Ready'; }, 500);
       });
     });
     const css = (value: string) => ({ by: "css", value });
     const steps: { name: string; input: object; expected: Record<string, any> }[] = [
-      { name: "verify_state", input: { target: { by: "text", value: "Ready", exact: true }, textIncludes: "Ready", timeoutMs: 200 }, expected: { ok: true, result: { verified: false, present: false, actual: null } } },
+      { name: "verify_state", input: { target: { by: "text", value: "Ready" }, textIncludes: "Ready", timeoutMs: 200 }, expected: { ok: true, result: { verified: false, present: false, actual: null } } },
       { name: "verify_state", input: { target: css("#status"), textIncludes: "Ready" }, expected: { ok: true, result: { verified: false, actual: "Waiting for stamp" } } },
       ...["#source", "#hidden", "#transparent", "#invisible"].flatMap(value => [
         { name: "verify_state", input: { target: css(value), textEquals: "" }, expected: { ok: true, result: { verified: false, present: true, actual: null } } },
@@ -386,10 +393,20 @@ test("text tools require rendered evidence rather than hidden source", async () 
       { name: "read_text", input: { target: css("#mixed") }, expected: { ok: true, result: "Visible" } },
       { name: "read_elements", input: { target: css("#mixed") }, expected: { ok: true, result: { items: [{ text: "Visible" }] } } },
       { name: "verify_state", input: { target: css("#mixed"), textIncludes: "Ready" }, expected: { ok: true, result: { verified: false, actual: "Visible" } } },
+      { name: "read_text", input: { target: css("#uncertain") }, expected: { ok: false, error: { code: "text-unavailable" } } },
+      { name: "verify_state", input: { target: css("#uncertain"), textIncludes: "Ready" }, expected: { ok: true, result: { verified: false, actual: null } } },
+      ...[["#inline", "Hello world"], ["#pre", " A  B "], ["#translated", "Translated"]].flatMap(([value, text]) => [
+        { name: "read_text", input: { target: css(value!) }, expected: { ok: true, result: text } },
+        { name: "verify_state", input: { target: css(value!), textEquals: text }, expected: { ok: true, result: { verified: true, actual: text } } },
+      ]),
+      { name: "read_text", input: { target: css("#covered") }, expected: { ok: false, error: { code: "text-unavailable" } } },
+      { name: "verify_state", input: { target: css("#covered"), textEquals: "Covered" }, expected: { ok: true, result: { verified: false, actual: null } } },
       { name: "read_text", input: { target: css("#offscreen") }, expected: { ok: true, result: "Offscreen text" } },
       { name: "read_text", input: { target: { ...css("#frame-status"), frame: { by: "css", value: "#child" } } }, expected: { ok: true, result: "Frame ready" } },
+      { name: "read_text", input: { target: { ...css("#frame-status"), frame: css("#hidden-child") } }, expected: { ok: false, error: { code: "text-unavailable" } } },
+      { name: "verify_state", input: { target: { ...css("#frame-status"), frame: css("#hidden-child") }, textEquals: "Hidden frame text" }, expected: { ok: true, result: { verified: false, actual: null } } },
       { name: "click", input: { target: css("#start") }, expected: { ok: true } },
-      { name: "verify_state", input: { target: { by: "text", value: "Ready", exact: true }, textEquals: "Ready", timeoutMs: 5000 }, expected: { ok: true, result: { verified: true, actual: "Ready", present: true } } },
+      { name: "verify_state", input: { target: { by: "text", value: "Ready" }, textEquals: "Ready", timeoutMs: 5000 }, expected: { ok: true, result: { verified: true, actual: "Ready", present: true } } },
     ];
     responses.push(commandResponse(steps[0]!.name, steps[0]!.input, "rendered-0"));
     steps.forEach((step, index) => responses.push(request => {

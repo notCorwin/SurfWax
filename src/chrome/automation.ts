@@ -1,5 +1,5 @@
 import { SNAPSHOT_CANDIDATE_CONTEXT, semanticContexts, type CandidateAssociation } from "./candidate-context";
-import { RENDERED_TEXT_SOURCE } from "./rendered-text";
+import { RENDERED_TEXT_READER_SOURCE, RENDERED_TEXT_SOURCE } from "./rendered-text";
 import type { EventLogger } from "../logging";
 import { ElementIds } from "./element-ids";
 import { resolveSampledElement } from "./sampled-element";
@@ -405,9 +405,10 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
     return out;
   };
   const all = root => roots(root).flatMap(item => [...(item.querySelectorAll?.("*") || [])]);
+  const readText = ${RENDERED_TEXT_READER_SOURCE};
   const textCache = new WeakMap();
   const visibleText = el => {
-    if (!textCache.has(el)) { const text = (${RENDERED_TEXT_SOURCE}).call(el); textCache.set(el, text === null ? null : normalize(text)); }
+    if (!textCache.has(el)) { const text = readText.call(el); textCache.set(el, text === null ? null : normalize(text)); }
     return textCache.get(el);
   };
   const labelText = root => {
@@ -424,7 +425,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
   const matches = (el, query) => {
     const equal = (actual, expected) => actual === null ? false : query.exact ? normalize(actual) === normalize(expected) : normalize(actual).toLowerCase().includes(normalize(expected).toLowerCase());
     if (query.kind === "role") return roleOf(el) === query.value && (!query.name || equal(nameOf(el), query.name));
-    if (query.kind === "text") return equal(visibleText(el), query.value) && ![...el.children].some(child => equal(visibleText(child), query.value));
+    if (query.kind === "text") return equal(el.innerText ?? null, query.value) && ![...el.children].some(child => child.checkVisibility({opacityProperty:true,visibilityProperty:true}) && equal(child.innerText ?? null, query.value)) && equal(visibleText(el), query.value);
     if (query.kind === "label") {
       const labelledBy = el.getAttribute("aria-labelledby")?.trim();
       const referenced = labelledBy ? labelledBy.split(/\s+/).map(id => el.getRootNode().getElementById?.(id)).filter(Boolean) : [];

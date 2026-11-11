@@ -1,69 +1,69 @@
-/** Scoped synchronous rendering evidence. No viewport intersection is required:
- * scrollable text remains addressable. null means no complete text evidence.
- * innerText is used only for browser whitespace/layout serialization after every
- * contributing text node has independent rendering evidence.
- */
-export function readRenderedText(this: Element): string | null {
-  const root = this, view = root.ownerDocument?.defaultView;
-  if (!root.isConnected || !view) return null;
-  const parent = (node: Node): Element | null => node.parentElement ?? (node.getRootNode() as ShadowRoot).host ?? null;
-  const styles = new Map<Element, CSSStyleDeclaration>();
-  const style = (el: Element) => { let s = styles.get(el); if (!s) { s = view.getComputedStyle(el); styles.set(el, s); } return s; };
-  const rendered = (el: Element) => {
-    for (let p: Element | null = el; p; p = parent(p)) {
-      const s = style(p);
-      if (s.display === 'none' || s.contentVisibility === 'hidden' || Number(s.opacity) === 0) return false;
-    }
-    return style(el).visibility === 'visible';
+import { sampleReadableSnapshot } from "./snapshot-readable-source.js";
+import { snapshotObservationPrimitives } from "./snapshot-observation-primitives.js";
+
+/** All evidence lives only for this synchronous call: no DOM, CSS, frame or
+ * animation evidence survives a task boundary. Chrome owns serialization. */
+export function createRenderedTextReader(
+  sample: typeof sampleReadableSnapshot,
+  install: typeof snapshotObservationPrimitives,
+) {
+  const results = new WeakMap<Element, string | null>();
+  const styles = new WeakMap<Element, CSSStyleDeclaration>();
+  const excluded = new WeakMap<Element, boolean>();
+  const proven = new WeakMap<Element, boolean>();
+  const textProofs = new WeakMap<Text, boolean>();
+  const style = (el: Element) => {
+    let value = styles.get(el);
+    if (!value) { value = el.ownerDocument.defaultView!.getComputedStyle(el); styles.set(el, value); }
+    return value;
   };
-  if (!rendered(root)) return null;
-  let unknown = false, excluded = false, complexSerialization = false, hasBox = root.getClientRects().length > 0;
-  const walk = (el: Element): string => {
-    if (!rendered(el)) return '';
-    // A shadow host's light tree is not its rendered tree. Do not guess at
-    // slot distribution (or substitute accessible names for displayed text).
-    if (el.shadowRoot || el.localName === 'slot') { unknown = true; return ''; }
-    const s = style(el);
-    if (!['normal', 'nowrap'].includes(s.whiteSpace)) complexSerialization = true;
-    for (const pseudo of ['::before', '::after']) {
-      const content = view.getComputedStyle(el, pseudo).content;
-      if (!['none', 'normal', '""'].includes(content)) unknown = true;
-    }
-    let out = '';
-    for (const child of el.childNodes) {
-      if (child.nodeType === 1) {
-        const element = child as Element;
-        if (!rendered(element)) { excluded = true; continue; }
-        if (element.localName === 'br') { out += '\n'; continue; }
-        const text = walk(element), display = style(element).display;
-        const block = !['inline', 'contents', 'inline-block', 'inline-flex', 'inline-grid', 'none'].includes(display);
-        if (block && text) complexSerialization = true;
-        out += block && text ? '\n' + text + '\n' : text;
-      } else if (child.nodeType === 3 && child.nodeValue) {
-        const range = root.ownerDocument.createRange(); range.selectNodeContents(child);
-        const rects = [...range.getClientRects()].filter(r => r.width > 0 && r.height > 0);
-        if (!rects.length) { if (child.nodeValue.trim()) unknown = true; continue; }
-        hasBox = true;
-        for (let p: Element | null = el; p; p = parent(p)) {
-          const ps = style(p), box = p.getBoundingClientRect();
-          // Unsupported clipping/paint must not certify the original string.
-          if (ps.clipPath !== 'none' || ps.clip !== 'auto' || ps.maskImage !== 'none' || ps.filter !== 'none'
-            || ps.transform !== 'none' || ps.getPropertyValue('-webkit-text-fill-color') === 'rgba(0, 0, 0, 0)'
-            || ps.getPropertyValue('-webkit-text-security') !== 'none'
-            || ps.getPropertyValue('-webkit-line-clamp') !== 'none'
-            || /(?:^|\s)transparent(?:$|\s)/.test(ps.color) || ps.color === 'rgba(0, 0, 0, 0)') unknown = true;
-          if (['hidden', 'clip'].includes(ps.overflowX) && rects.some(r => r.left < box.left || r.right > box.right)
-            || ['hidden', 'clip'].includes(ps.overflowY) && rects.some(r => r.top < box.top || r.bottom > box.bottom)) unknown = true;
-        }
-        out += s.whiteSpace.startsWith('pre') || s.whiteSpace === 'break-spaces'
-          ? child.nodeValue : child.nodeValue.replace(/[\t\n\r ]+/g, ' ');
-        if (s.textTransform !== 'none') unknown = true;
+  // Only exclusions already honored by innerText can be skipped. Opacity,
+  // masks and foreground coverage need the shared paint proof instead.
+  const omitted = (el: Element): boolean => {
+    if (excluded.has(el)) return excluded.get(el)!;
+    const value = style(el).display === "none" || !!el.parentElement && omitted(el.parentElement);
+    excluded.set(el, value); return value;
+  };
+  return function read(this: Element): string | null {
+    const root = this, view = root.ownerDocument.defaultView;
+    if (results.has(root)) return results.get(root)!;
+    if (!view || !root.isConnected || !(root instanceof view.HTMLElement) || omitted(root)
+      || !root.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return null;
+    let valid = true;
+    const nodes: Text[] = [];
+    const visit = (el: Element) => {
+      if (omitted(el)) return;
+      if (proven.has(el)) { valid = valid && proven.get(el)!; return; }
+      // This local reader does not claim composed-tree serialization.
+      if (el.shadowRoot || el.localName.includes("-") || el.localName === "slot") valid = false;
+      for (const node of el.childNodes) {
+        if (node.nodeType === 1) visit(node as Element);
+        else if (node.nodeType === 3 && node.nodeValue?.trim() && style(el).visibility === "visible") nodes.push(node as Text);
       }
+    };
+    visit(root);
+    let accepted = new Set<Text>();
+    if (valid && nodes.some(node => !textProofs.has(node))) {
+      install(true);
+      sample(NaN, [], { shadowRoots: [], placeholder: () => null, controls: () => null },
+        { scope: root, accept: value => { accepted = value; } });
+      for (const node of nodes) textProofs.set(node, accepted.has(node));
     }
-    return out;
+    const summarize = (el: Element): boolean => {
+      if (omitted(el)) return true;
+      if (proven.has(el)) return proven.get(el)!;
+      let complete = !el.shadowRoot && !el.localName.includes("-") && el.localName !== "slot";
+      for (const node of el.childNodes) {
+        if (node.nodeType === 1) complete = summarize(node as Element) && complete;
+        else if (node.nodeType === 3 && node.nodeValue?.trim() && style(el).visibility === "visible")
+          complete = textProofs.get(node as Text) === true && complete;
+      }
+      proven.set(el, complete); return complete;
+    };
+    valid = summarize(root) && valid;
+    const value = valid && root.isConnected ? root.innerText : null;
+    results.set(root, value); return value;
   };
-  const text = walk(root).replace(/ *\n */g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-  if (!root.isConnected || !hasBox || unknown || excluded && complexSerialization) return null;
-  return !excluded && root instanceof view.HTMLElement ? root.innerText : text;
 }
-export const RENDERED_TEXT_SOURCE = readRenderedText.toString();
+export const RENDERED_TEXT_READER_SOURCE = `(${createRenderedTextReader.toString()})(${sampleReadableSnapshot.toString()}, ${snapshotObservationPrimitives.toString()})`;
+export const RENDERED_TEXT_SOURCE = `function(){return (${RENDERED_TEXT_READER_SOURCE}).call(this)}`;

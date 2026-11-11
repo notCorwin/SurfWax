@@ -1,5 +1,5 @@
 /** One synchronous, read-only sample in an extension content world. */
-export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeProofs) {
+export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeProofs, textEvidence) {
   /* surf-wax:read-only-snapshot */
   const extensionShadowRoot = globalThis.chrome?.dom?.openOrClosedShadowRoot;
   if (document.readyState !== "complete" || document.fonts.status !== "loaded"
@@ -247,7 +247,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
   const clear = (value) => rgba(value)?.[3] === 0;
   const overlaps = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
   const inViewport = (r) =>
-    r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= viewport.width && r.bottom <= viewport.height;
+    r.width > 0 && r.height > 0 && (textEvidence || r.left >= 0 && r.top >= 0 && r.right <= viewport.width && r.bottom <= viewport.height);
   const pseudoProperties = [
     "color",
     "-webkit-text-fill-color",
@@ -379,7 +379,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     safe.set(element, value);
     return value;
   };
-  const viewportRect = {
+  const viewportRect = textEvidence ? { left: -1e12, top: -1e12, right: 1e12, bottom: 1e12 } : {
     left: 0,
     top: 0,
     right: viewport.width,
@@ -1611,6 +1611,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
       width: own.rect.right - own.rect.left, height: own.rect.bottom - own.rect.top } };
   };
   for (const node of textNodes) {
+    if (textEvidence && !textEvidence.scope.contains(node)) continue;
     const parent = composedParent(node), rawText = node.nodeValue;
     if (!parent || !rawText || hiddenTree(parent)) continue;
     const s = style(parent);
@@ -1681,6 +1682,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     if (overlap) gap("text-overlap", item.node, item.region);
     return !overlap;
   });
+  if (textEvidence) { textEvidence.accept(new Set(accepted.map(item => item.node))); return null; }
   const interactiveRoles = new Set([
     "button",
     "checkbox",
