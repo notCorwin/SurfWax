@@ -119,6 +119,9 @@ test(
 
 test("a recoverable complete-response failure retries without repeating a completed browser effect", async () => {
   const effectId = "retry-effect-once";
+  const remaining = "Inspect the final page state before accepting completion.";
+  const rawReview = JSON.stringify({ accept: true, reason: "Current state still needs verification.", remaining: [remaining] }, null, 2);
+  const completedGoal = (evidenceId: string) => ({ taskType: "browser", status: "completed", evidence: [{ evidenceId, observation: "The page shows the completed browser effect." }] });
   const provider = await startProvider([
     commandResponse(
       "click",
@@ -128,14 +131,24 @@ test("a recoverable complete-response failure retries without repeating a comple
       effectId,
     ),
     { status: 503, error: "temporary full-response failure" },
-    textResponse("RETRY_RESPONSE_COMPLETE"),
+    commandResponse("complete_goal", completedGoal(effectId), "inconsistent-completion", "RETRY_RESPONSE_COMPLETE"),
+    (request) => {
+      const output = JSON.parse(request.messages.findLast((message: any) => message.role === "tool").content);
+      expect(output).toMatchObject({ ok: false, error: { code: "goal-incomplete" } });
+      expect(output.error.message).toContain(remaining);
+      return commandResponse("inspect_page", { full: true }, "final-state");
+    },
+    (request) => {
+      const output = JSON.parse(request.messages.findLast((message: any) => message.role === "tool").content);
+      return commandResponse("complete_goal", completedGoal(output.evidenceId), "verified-completion");
+    },
     textResponse("恢复请求"),
-  ]);
+  ], 0, undefined, undefined, 0, 0, [rawReview, JSON.stringify({ accept: true, reason: "The final state is verified.", remaining: [] })]);
   const opened = await openExtension();
   let native: Awaited<ReturnType<typeof nativePanel>> | undefined;
   try {
     await (
-      await configure(opened.context, opened.page, provider.baseURL)
+      await configure(opened.context, opened.page, provider.baseURL, undefined, { goalMode: true })
     ).close();
     native = await nativePanel(opened, `${provider.origin}/target`);
     await native.target.evaluate(() => {
@@ -156,6 +169,14 @@ test("a recoverable complete-response failure retries without repeating a comple
     await expect
       .poll(() => nativeAssistantText(native!.panel))
       .toContain("RETRY_RESPONSE_COMPLETE");
+    await expect
+      .poll(
+        async () =>
+          (await readNativeEvents(native!.panel)).filter(
+            (event) => event.type === "conversation.finished",
+          ).length,
+      )
+      .toBe(1);
     await expect(native.target.locator("html")).toHaveAttribute(
       "data-retry-effects",
       "1",
@@ -163,7 +184,7 @@ test("a recoverable complete-response failure retries without repeating a comple
     const agentRequests = provider.requests.filter((request) =>
       request.tools?.some((tool: any) => tool.function.name === "click"),
     );
-    expect(agentRequests).toHaveLength(3);
+    expect(agentRequests).toHaveLength(5);
     expect(agentRequests[2].messages).toEqual(agentRequests[1].messages);
     const resumedContext = JSON.stringify(agentRequests[2].messages);
     expect(resumedContext).toContain("RETRY_EFFECT_ACCEPTED");
@@ -173,15 +194,14 @@ test("a recoverable complete-response failure retries without repeating a comple
           message.role === "tool" && message.tool_call_id === effectId,
       ),
     ).toHaveLength(1);
-    await expect
-      .poll(
-        async () =>
-          (await readNativeEvents(native!.panel)).filter(
-            (event) => event.type === "conversation.finished",
-          ).length,
-      )
-      .toBe(1);
     const events = await readNativeEvents(native.panel);
+    const reviews = events.filter(event => event.type === "agent.goal.review.finished");
+    expect(reviews).toHaveLength(2);
+    expect(reviews[0].content).toMatchObject({ accept: false, remaining: [remaining], responseText: rawReview, normalization: "accept-with-remaining" });
+    expect(reviews[1].content).toMatchObject({ accept: true, remaining: [] });
+    expect(events.filter(event => event.type === "agent.goal.review.failed")).toHaveLength(0);
+    expect(events.find(event => event.type === "tool.failed" && event.toolCallId === "inconsistent-completion")?.output).toMatchObject({ ok: false, error: { code: "goal-incomplete" } });
+    expect(provider.requests.filter(request => request.messages?.some((message: any) => message.role === "system" && String(message.content).startsWith("SURFWAX_GOAL_REVIEW")))).toHaveLength(2);
     const started = events.filter(
       (event) => event.type === "tool.started" && event.toolCallId === effectId,
     );

@@ -2,6 +2,9 @@ import { generateText, ToolLoopAgent, tool } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createModel } from "./model";
+import { reviewGoal } from "./goal-review";
+import { EventLogger, type LogEvent } from "../logging";
+import { createMemoryEventStore } from "../memory-event-store";
 
 const contracts = [
   { sdk: "@ai-sdk/openai", endpoint: "openai-responses", path: "/responses" },
@@ -227,6 +230,56 @@ describe.each(contracts)(
           new URL(request.url).searchParams.get("key") ||
           new URL(request.url).searchParams.get("api_key");
         expect(authenticated, request.url).toBeTruthy();
+      }
+      if (endpoint === "openai-chat-completions") {
+        const reason = "A current observation is still required.";
+        const remaining = ["Inspect the current page before accepting this status."];
+        const raw = JSON.stringify({ accept: true, reason, remaining }, null, 2);
+        const accepted = JSON.stringify({ accept: true, reason: "The proposed status is established.", remaining: [] });
+        const answers = [
+          { text: raw }, { text: raw }, { text: accepted }, { text: accepted },
+          { text: "{" }, { text: accepted, finishReason: "length" }, { status: 401 },
+        ];
+        const requests: any[] = [];
+        const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = input instanceof Request ? input : new Request(input, init);
+          if (request.method === "GET") return Response.json({ data: [{ id: "test", reasoning: false }] });
+          requests.push(await request.clone().json());
+          const answer = answers.shift();
+          if (!answer) throw new Error("Unexpected extra review request");
+          if (answer.status) return Response.json({ error: { message: "Authentication failed" } }, { status: answer.status });
+          const body = completion(endpoint, false) as any;
+          body.choices[0].message.content = answer.text;
+          body.choices[0].finish_reason = answer.finishReason ?? "stop";
+          return Response.json(body);
+        };
+        const reviewModel = await createModel({ sdk, providerId: "custom", endpointType: endpoint,
+          model: "test", baseURL: "https://provider.test/v1", providerSettings: { apiKey: "key" } }, undefined, undefined, { fetch });
+        const events: LogEvent[] = [];
+        const logger = new EventLogger({ store: createMemoryEventStore(events) });
+        const context = JSON.stringify({ excerpts: [], requirementsTruncated: false });
+        const completed = { taskType: "answer", status: "completed" } as const;
+        const blocked = { taskType: "browser", status: "blocked", evidence: [{ evidenceId: "observation", observation: "Sign-in is required." }],
+          dependency: "authentication", userAction: "Sign in to continue.", attemptedRecovery: [{ evidenceId: "observation", action: "Inspected the sign-in page." }] } as const;
+        const review = (goal: Parameters<typeof reviewGoal>[0]["goal"]) => reviewGoal({ goal, context, model: reviewModel, logger, conversationId: "review-contract" });
+        for (const goal of [completed, { ...blocked, evidence: [...blocked.evidence], attemptedRecovery: [...blocked.attemptedRecovery] }])
+          await expect(review(goal)).resolves.toEqual({ accept: false, reason, remaining });
+        await expect(review(completed)).resolves.toMatchObject({ accept: true, remaining: [] });
+        await expect(review({ ...blocked, evidence: [...blocked.evidence], attemptedRecovery: [...blocked.attemptedRecovery] })).resolves.toMatchObject({ accept: true, remaining: [] });
+        await expect(review(completed)).rejects.toBeInstanceOf(SyntaxError);
+        await expect(review(completed)).rejects.toThrow("did not finish normally");
+        await expect(review(completed)).rejects.toMatchObject({ statusCode: 401 });
+        expect(requests).toHaveLength(7);
+        expect(answers).toHaveLength(0);
+        expect(requests[0].messages[0].content).toContain("remaining must be empty");
+        expect(requests[0].messages[0].content).toContain("proposedGoal.userAction");
+        const finished = events.filter(event => event.type === "agent.goal.review.finished");
+        expect(finished).toHaveLength(4);
+        expect(finished.slice(0, 2).map(event => event.content)).toEqual([
+          expect.objectContaining({ accept: false, reason, remaining, responseText: raw, normalization: "accept-with-remaining" }),
+          expect.objectContaining({ accept: false, reason, remaining, responseText: raw, normalization: "accept-with-remaining" }),
+        ]);
+        expect(events.filter(event => event.type === "agent.goal.review.failed")).toHaveLength(3);
       }
       const controller = new AbortController();
       const pending = fixture(endpoint, { abort: true });
