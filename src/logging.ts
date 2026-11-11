@@ -73,7 +73,7 @@ type EventStore = {
   byTypes?(types: readonly string[], conversationId?: string, afterId?: number, limit?: number): Promise<LogEvent[]>;
   diagnosticsByCapture?(conversationId: string, tabId: number, epoch: string, afterId: number): Promise<LogEvent[]>;
   terminalEvents?(events: readonly Omit<LogEvent, "id">[], afterId: number): Promise<LogEvent[]>;
-  byRunTypes?(runIds: readonly string[], types: readonly string[], afterId?: number): Promise<LogEvent[]>;
+  byRunTypes?(runIds: readonly string[], types: readonly string[], afterId?: number, limit?: number): Promise<LogEvent[]>;
   byRunToolTypes?(runId: string, toolCallId: string, types: readonly string[], afterId?: number): Promise<LogEvent[]>;
   conversation?(conversationId: string, afterId?: number): Promise<LogEvent[]>;
   /** Legacy test capability; canonical runtime never invokes destructive clearing. */
@@ -413,13 +413,13 @@ export class IndexedDbEventStore implements EventStore {
     return batches.flat().sort((left, right) => left.id - right.id).slice(0, limit);
   }
 
-  async byRunTypes(runIds: readonly string[], types: readonly string[], afterId = -1): Promise<LogEvent[]> {
+  async byRunTypes(runIds: readonly string[], types: readonly string[], afterId = -1, limit = Infinity): Promise<LogEvent[]> {
     const db = await this.open();
     const transaction = db.transaction(EVENT_STORE, "readonly");
     const done = transactionDone(transaction);
     const index = transaction.objectStore(EVENT_STORE).index(RUN_TYPE_INDEX);
     const batches = await Promise.all(runIds.flatMap((runId) => types.map((type) =>
-      indexEventsAfter(index, [runId, type], afterId))));
+      indexEventsAfter(index, [runId, type], afterId, limit))));
     await done;
     return batches.flat().sort((left, right) => left.id - right.id);
   }
@@ -1431,12 +1431,34 @@ export class EventLogger {
   }
 
   /** Diagnostic replay and its log epoch must be observed together. */
-  diagnosticEventsSnapshot(conversationId: string, capture?: { tabId: number; epoch: string; afterId?: number }): Promise<{ value: LogEvent[]; epoch: string }> {
-    return this.readCanonicalSnapshot(async (store, floor) => {
+  async diagnosticEventsSnapshot(conversationId: string, capture?: { tabId?: number; epoch?: string; afterId?: number; runId?: string; limit?: number; highWater?: number }): Promise<{ value: LogEvent[]; epoch: string; floor: number; scanned: number; throughEventId: number; hasMore: boolean }> {
+    const snapshot = await this.readCanonicalSnapshot(async (store, floor) => {
       const afterId = Math.max(floor, capture?.afterId ?? -1);
-      if (capture && store.diagnosticsByCapture) return store.diagnosticsByCapture(conversationId, capture.tabId, capture.epoch, afterId);
-      if (store.byTypes) return (await store.byTypes(["browser.diagnostic"], conversationId, afterId)).filter((event) => event.id > afterId);
-      return (await store.all()).filter((event) => event.id > afterId && event.type === "browser.diagnostic" && event.conversationId === conversationId);
+      const limit = capture?.limit ?? Infinity;
+      const types = capture?.runId ? ["browser.diagnostic", "browser.diagnostic.capture-failed"] : ["browser.diagnostic"];
+      let events: LogEvent[];
+      if (capture?.epoch !== undefined && capture.tabId !== undefined && store.diagnosticsByCapture)
+        events = await store.diagnosticsByCapture(conversationId, capture.tabId, capture.epoch, afterId);
+      else if (capture?.runId && store.byRunTypes)
+        events = await store.byRunTypes([capture.runId], types, afterId, limit + 1);
+      else if (store.byTypes) events = await store.byTypes(types, conversationId, afterId, limit + 1);
+      else events = (await store.all()).filter(event => types.includes(event.type) && event.conversationId === conversationId && event.id > afterId);
+      events = events.filter(event => event.id > afterId && event.id <= (capture?.highWater ?? Infinity)).sort((a, b) => a.id - b.id);
+      const hasMore = events.length > limit;
+      const scanned = events.slice(0, limit);
+      return { value: scanned.filter(event => event.conversationId === conversationId && (!capture?.runId || event.runId === capture.runId)),
+        floor, scanned: scanned.length, throughEventId: scanned.at(-1)?.id ?? afterId, hasMore };
+    });
+    return { ...snapshot.value, epoch: snapshot.epoch };
+  }
+
+  /** Global diagnostic high-water only bounds a read; it grants no ownership. */
+  diagnosticHighWater(): Promise<{ value: number; epoch: string }> {
+    return this.readCanonicalSnapshot(async (store, floor) => {
+      const types = ["browser.diagnostic", "browser.diagnostic.capture-failed"];
+      const latest = store.latestByType ? await Promise.all(types.map(type => store.latestByType!(type)))
+        : (await store.all()).filter(event => types.includes(event.type));
+      return latest.reduce((id, event) => Math.max(id, event?.id ?? -1), floor);
     });
   }
 

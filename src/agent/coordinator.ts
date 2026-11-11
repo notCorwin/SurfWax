@@ -10,6 +10,7 @@ export const RUN_LOCK = "surf-wax:active-run";
 export function getRunIdentity(): RunIdentity | undefined {
   return activeRun ? { runId: activeRun.runId, generation: activeRun.generation, ownerId: activeRun.ownerId } : undefined;
 }
+export function getRunConversationId(): string | undefined { return activeRun?.conversationId; }
 export async function activeRunIdentity(): Promise<RunIdentity | undefined> {
   if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) return getRunIdentity();
   const response = await chrome.runtime.sendMessage({ type: "surf-wax:run-status" });

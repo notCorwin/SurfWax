@@ -1,5 +1,5 @@
 import { readArtifactPage } from "./artifact-read";
-import type { EventLogger } from "../logging";
+import { fromLogValue, type EventLogger } from "../logging";
 import type { BrowserTarget } from "../types";
 import { AutomationRuntime, FILE_UPLOAD_FUNCTION, LocatorFacade } from "./automation";
 import { requireDebuggee } from "./debuggee";
@@ -8,7 +8,7 @@ import { createDeadline, scheduleDeadline } from "../deadline";
 import { downloadArtifact } from "./downloads";
 import { listDownloads as queryDownloads, type DownloadListInput } from "./download-query";
 import { BrowserDiagnostics } from "./diagnostics";
-import { getRunIdentity, type RunIdentity } from "../agent/coordinator";
+import { getRunConversationId, getRunIdentity, type RunIdentity } from "../agent/coordinator";
 import { BrowserJobs, type JobQuery } from "./jobs";
 import { ProgramScope, type OperationObserver } from "./program";
 import { ForegroundBlockers, type BlockerJob, type BlockerOperation } from "./foreground-blockers";
@@ -580,6 +580,46 @@ export class ChromeExecutor {
     return queryDownloads(this.chromeApi, input, signal);
   }
 
+  private readonly consoleCursors = new Map<string, { conversationId: string; runId: string; lease: RunIdentity; tabId: number; epoch: string; after: number; highWater: number; exhausted: boolean }>();
+
+  async readRetainedConsole(input: { tabId: number; cursor?: string; follow?: boolean; limit?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    signal?.throwIfAborted();
+    const owner = this.runOwnerFor(context);
+    const conversationId = getRunConversationId();
+    if (conversationId !== undefined && conversationId !== owner.conversationId) throw new Error("CommandError[event-owner-expired]: Conversation does not own the active run");
+    if (!this.logger) throw new Error("CommandError[console-history-unavailable]: Canonical console history is unavailable");
+    const stale = () => new Error("CommandError[stale-console-cursor]: Console cursor expired; start a new retained read");
+    const saved = input.cursor ? this.consoleCursors.get(input.cursor) : undefined;
+    if (input.cursor && (!saved || saved.tabId !== input.tabId || saved.conversationId !== owner.conversationId || saved.runId !== owner.runId
+      || saved.lease.ownerId !== this.eventLease?.ownerId || saved.lease.generation !== this.eventLease?.generation)) throw stale();
+    const boundary = await this.logger.diagnosticHighWater();
+    if (saved && saved.epoch !== boundary.epoch) throw stale();
+    if (input.follow && !saved?.exhausted) throw new Error("CommandError[console-range-unfinished]: Finish the fixed range before following newer captures");
+    const after = saved?.after ?? -1;
+    const highWater = !saved || input.follow ? boundary.value : saved.highWater;
+    const snapshot = await this.logger.diagnosticEventsSnapshot(owner.conversationId, { runId: owner.runId, afterId: after, highWater, limit: input.limit ?? 100 });
+    if (snapshot.epoch !== boundary.epoch) throw stale();
+    this.runOwnerFor(context);
+    signal?.throwIfAborted();
+    const hasMore = snapshot.hasMore;
+    const scanned = snapshot.value;
+    const messages: unknown[] = [], boundaries: unknown[] = [], captureFailures: unknown[] = [];
+    for (const event of scanned) {
+      const capture = fromLogValue(event.content, event.valueEncoding) as any;
+      if ((capture?.tabId ?? capture?.source?.tabId) !== input.tabId) continue;
+      const data = fromLogValue(event.output, event.valueEncoding);
+      const provenance = { eventId: event.id, captureEpoch: capture.epoch ?? null, consoleGeneration: capture.consoleGeneration ?? null, source: capture.source, method: capture.method };
+      if (event.type === "browser.diagnostic.capture-failed" && capture.method === "Log.enable") captureFailures.push({ ...provenance, reason: "console-subscription-failed" });
+      else if (["Runtime.consoleAPICalled", "Log.entryAdded"].includes(capture.method)) messages.push({ ...provenance, data });
+      else if (capture.method === "console.clear" || capture.method?.startsWith("Page.") || capture.method === "Target.detachedFromTarget") boundaries.push({ ...provenance, data });
+    }
+    const nextAfter = hasMore ? snapshot.throughEventId : highWater;
+    const nextCursor = crypto.randomUUID();
+    this.consoleCursors.set(nextCursor, { ...owner, lease: { ...this.eventLease! }, tabId: input.tabId, epoch: boundary.epoch, after: nextAfter, highWater, exhausted: !hasMore });
+    while (this.consoleCursors.size > 64) this.consoleCursors.delete(this.consoleCursors.keys().next().value!);
+    return { mode: "retained", tabId: input.tabId, messages, boundaries, captureFailures, overflow: "unknown", captureStatus: messages.length ? "captured-records" : "no-console-evidence-in-page", integrity: captureFailures.length ? "incomplete" : "unknown", reason: captureFailures.length ? "console-subscription-failed-in-page" : "best-effort-canonical-capture; absence does not prove empty or complete capture", scope: { ...owner, logEpoch: boundary.epoch, retentionFloor: snapshot.floor, afterEventId: Math.max(after, snapshot.floor), highWater, throughEventId: nextAfter }, scanned: snapshot.scanned, hasMore, rangeComplete: !hasMore, nextCursor };
+  }
+
   private runOwnerFor(context: ExecutionContext): EventOwner {
     const runId = context.logIdentity?.runId;
     if (!context.conversationId || !runId) throw new Error("CommandError[event-owner-unavailable]: Event subscriptions require a conversation and active run");
@@ -887,6 +927,7 @@ export class ChromeExecutor {
 
   private closeEventRun(): void {
     this.eventEpoch += 1;
+    this.consoleCursors.clear();
     this.eventLease = undefined;
     if (this.eventOwner) { this.eventSubscriptions.closeOwner(this.eventOwner); this.blockers.closeOwner(this.eventOwner); }
     this.eventOwner = undefined;

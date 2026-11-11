@@ -146,6 +146,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
               : definition.name === "list_tabs" ? await executor.listTabs(abortSignal, value.timeoutMs)
               : definition.name === "switch_tab" ? await executor.switchTab(value.tabId, abortSignal, value.timeoutMs)
               : definition.name === "list_downloads" ? await executor.listDownloads(value, abortSignal)
+              : definition.name === "read_console" && value.mode === "retained" ? await executor.readRetainedConsole(value as any, abortSignal, context)
               : definition.name === "read_artifact" ? await executor.readArtifact(value, abortSignal, context)
               : definition.name === "list_file_choosers" ? await executor.listFileChoosers(value, abortSignal, context)
               : definition.name === "subscribe_event" ? await executor.subscribeEvent(value, abortSignal, context)
@@ -210,7 +211,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           // Capture before releasing the scheduler slot, so a later action in the
           // same model response cannot change the page first. Management calls
           // must never wait behind a still-running job occupying the browser queue.
-          if (executing && !NO_PAGE_CAPTURE.has(definition.name) && typeof executor.inspect === "function" && !abortSignal?.aborted) {
+          if (executing && !(definition.name === "read_console" && value.mode === "retained") && !NO_PAGE_CAPTURE.has(definition.name) && typeof executor.inspect === "function" && !abortSignal?.aborted) {
             const pending = executor.pendingBackgroundJobs?.() ?? [];
             const otherPending = pending.some((id) => id !== observedTerminalJob);
             let pageEvidence: Record<string, unknown>;
@@ -486,6 +487,15 @@ function searchMetadata(record: Record<string, unknown>): Record<string, unknown
   const cursor = exactText(record.nextCursor, 512); if (cursor !== undefined) result.nextCursor = cursor;
   return result;
 }
+function retainedConsoleMetadata(record: Record<string, unknown> | undefined, artifactId: number, prefix: (string | number)[] = []): Record<string, unknown> {
+  if (record?.mode !== "retained") return {};
+  const { mode, tabId, captureStatus, integrity, overflow, reason, scope, scanned, hasMore, rangeComplete, nextCursor } = record;
+  return { mode, tabId, captureStatus, integrity, overflow, reason, scope, scanned, hasMore, rangeComplete, nextCursor,
+    messagesAccess: { artifactId, path: [...prefix, "messages"], offset: 0, limit: 100 },
+    boundariesAccess: { artifactId, path: [...prefix, "boundaries"], offset: 0, limit: 100 },
+    captureFailuresAccess: { artifactId, path: [...prefix, "captureFailures"], offset: 0, limit: 100 } };
+}
+
 function eventMetadata(record: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const field of ["subscriptionId", "closed"]) { const value = exactText(record[field], 512); if (value !== undefined) result[field] = value; }
@@ -638,6 +648,7 @@ async function storeUnnormalizedResult(value: unknown, options: { logger?: Event
     ...(root && Object.hasOwn(root, "result") ? { resultAccess: access(["result"], root.result) } : {}),
     ...(job ? jobMetadata(job) : {}), ...(search ? { ...searchMetadata(search), ...candidateContextPreview(search) } : {}),
     ...(inspection ? inspectionMetadata(inspection, event.id) : {}), ...(browserEvents ? eventMetadata(browserEvents) : {}),
+    ...retainedConsoleMetadata(root, event.id),
     ...(diagnostic ? { ...(diagnostic.integrity === "complete" || diagnostic.integrity === "incomplete" ? { integrity: diagnostic.integrity } : {}),
       ...(typeof diagnostic.hasMore === "boolean" || diagnostic.hasMore === null ? { hasMore: diagnostic.hasMore } : {}),
       ...(Number.isSafeInteger(diagnostic.nextOffset) && Number(diagnostic.nextOffset) >= 0 ? { nextOffset: diagnostic.nextOffset } : {}),
@@ -764,6 +775,7 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
     ...candidatePreview,
     ...(inspection ? inspectionMetadata(inspection, event.id) : {}),
     ...(browserEvents ? eventMetadata(browserEvents) : {}),
+    ...retainedConsoleMetadata(original, event.id, prefix),
     ...(diagnostic ? { ...(diagnostic.integrity === "complete" || diagnostic.integrity === "incomplete" ? { integrity: diagnostic.integrity } : {}),
       ...(typeof diagnostic.hasMore === "boolean" || diagnostic.hasMore === null ? { hasMore: diagnostic.hasMore } : {}),
       ...(Number.isSafeInteger(diagnostic.nextOffset) && Number(diagnostic.nextOffset) >= 0 ? { nextOffset: diagnostic.nextOffset } : {}),
