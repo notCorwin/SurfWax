@@ -447,7 +447,8 @@ function nativeModel(provider: Record<string, any>, config: ModelConfig): Exclud
   const shape = config.endpointType === "openai-completions" ? "completion"
     : config.endpointType === "openai-responses" ? "responses"
       : config.endpointType === "google-interactions" ? "interactions"
-        : config.endpointType === "openai-chat-completions" ? undefined : config.modelProvider?.shape;
+        : config.endpointType === "openai-chat-completions" ? undefined : config.modelProvider?.shape
+          ?? (!config.endpointType && config.providerId === "google" && sdkFor(config) === "@ai-sdk/google" ? "interactions" : undefined);
   const method = shape === "responses" ? provider.responses
     : shape === "completion" ? provider.completion
       : shape === "interactions" ? provider.interactions

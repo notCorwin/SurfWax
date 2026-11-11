@@ -246,7 +246,7 @@ export function applyModelPreset<T extends ModelConfig>(config: T, preset: Model
   sdk: ModelSdk; baseURL: string; modelProvider?: ModelProviderOverride; catalogRouteVersion: number;
 } {
   const route = preset.modelProviders && Object.hasOwn(preset.modelProviders, config.model.trim())
-    ? preset.modelProviders[config.model.trim()] : config.modelProvider;
+    ? preset.modelProviders[config.model.trim()] : preset.defaultProvider;
   const modelProvider = route && Object.keys(route).length ? route : undefined;
   const selected = preset.models.find((model) => model.id === config.model.trim());
   return {

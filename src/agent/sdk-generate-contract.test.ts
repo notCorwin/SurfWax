@@ -248,3 +248,47 @@ describe.each(contracts)(
     }, 20_000);
   },
 );
+
+it("routes bundled catalog selections through saved configuration and real SDK tool loops", async () => {
+  const { loadModelCatalog, modelProviderPresets, applyModelPreset } = await import("./model-limits");
+  const { saveModelConfig, loadModelConfig, selectedModelConfig } = await import("../sidepanel/config");
+  vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
+  try {
+    const presets = modelProviderPresets(await loadModelCatalog());
+    for (const [id, protocol, path] of [
+      ["openai", "openai-responses", "/v1/responses"],
+      ["anthropic", "anthropic-messages", "/v1/messages"],
+      ["google", "google-interactions", "/v1beta/interactions"],
+    ] as const) {
+      const preset = presets.find((item) => item.id === id)!;
+      expect(preset?.models.length).toBeGreaterThan(0);
+      if (id === "google") expect(preset.modelProviders?.[preset.models[0]!.id]?.shape).toBeUndefined();
+      const initial = { providerId: id, sdk: preset.sdk, baseURL: preset.baseURL, model: preset.models[0]!.id, providerSettings: { apiKey: "fake" } };
+      const selected = applyModelPreset(initial, preset);
+      let saved: Record<string, unknown> = {};
+      const storage = { get: async () => saved, set: async (value: Record<string, unknown>) => { saved = structuredClone(value); } } as any;
+      await saveModelConfig({ selectedProviderId: id, profiles: { [id]: selected } }, storage);
+      const restored = selectedModelConfig(await loadModelConfig(undefined, storage))!;
+      expect(restored.endpointType).toBeUndefined();
+      const wire = fixture(protocol, { toolLoop: true });
+      const model = await createModel(restored, undefined, undefined, { fetch: wire.fetch });
+      const agent = new ToolLoopAgent({ model, maxRetries: 0, tools: { echo: tool({ description: "Echo", inputSchema: z.object({ value: z.string() }), execute: async ({ value }) => ({ value: `executed:${value}` }) }) } });
+      await expect(agent.generate({ prompt: "echo ok" })).resolves.toMatchObject({ text: "done" });
+      expect(wire.modelRequests).toHaveLength(2);
+      expect(new URL(wire.modelRequests[0]!.url).pathname).toBe(path);
+      expect(JSON.stringify(await wire.modelRequests[1]!.clone().json())).toContain("executed:ok");
+      const free = applyModelPreset({ ...restored, model: "free-input-model", modelProvider: { npm: "@ai-sdk/anthropic", api: "https://old.test", shape: "completion" } }, preset);
+      expect(free.modelProvider).toEqual(preset.defaultProvider);
+      expect(free.sdk).toBe(preset.sdk);
+      expect(free.baseURL).toBe(preset.baseURL);
+      await saveModelConfig({ selectedProviderId: id, profiles: { [id]: free } }, storage);
+      const freeRestored = selectedModelConfig(await loadModelConfig(undefined, storage))!;
+      const freeWire = fixture(protocol, { toolLoop: true });
+      const freeModel = await createModel(freeRestored, undefined, undefined, { fetch: freeWire.fetch });
+      const freeAgent = new ToolLoopAgent({ model: freeModel, maxRetries: 0, tools: { echo: tool({ description: "Echo", inputSchema: z.object({ value: z.string() }), execute: async ({ value }) => ({ value: `executed:${value}` }) }) } });
+      await expect(freeAgent.generate({ prompt: "echo ok" })).resolves.toMatchObject({ text: "done" });
+      expect(new URL(freeWire.modelRequests[0]!.url).pathname).toBe(path);
+      expect(JSON.stringify(await freeWire.modelRequests[1]!.clone().json())).toContain("executed:ok");
+    }
+  } finally { vi.unstubAllGlobals(); }
+}, 20_000);
