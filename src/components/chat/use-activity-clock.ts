@@ -37,3 +37,32 @@ export function useActivityClock<T extends HTMLElement>(running: boolean, starte
   }, [running, startedAt]);
   return { now, ref };
 }
+
+const countdownListeners = new Set<(now: number) => void>();
+let countdownTimer: ReturnType<typeof setInterval> | undefined;
+function subscribeCountdown(listener: (now: number) => void) {
+  countdownListeners.add(listener);
+  countdownTimer ??= setInterval(() => {
+    const now = Date.now();
+    for (const update of countdownListeners) update(now);
+  }, 1000);
+  return () => {
+    countdownListeners.delete(listener);
+    if (!countdownListeners.size) { clearInterval(countdownTimer); countdownTimer = undefined; }
+  };
+}
+
+/** One low-frequency clock for active backoff rows; stop at expiry or unmount. */
+export function useRetryCountdown(until?: number) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (until === undefined || until <= Date.now()) return;
+    setNow(Date.now());
+    const unsubscribe = subscribeCountdown(time => {
+      setNow(time);
+      if (time >= until) unsubscribe();
+    });
+    return unsubscribe;
+  }, [until]);
+  return until === undefined ? 0 : Math.max(0, Math.ceil((until - now) / 1000));
+}

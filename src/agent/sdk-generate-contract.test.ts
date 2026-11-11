@@ -372,3 +372,30 @@ it("honors explicit Google generateContent over a catalog interactions route", a
   await expect(generateText({ model, prompt: "hello", maxRetries: 0 })).resolves.toMatchObject({ text: "done" });
   expect(new URL((fetch.mock.calls[0]![0] as Request).url).pathname).toBe("/v1beta/models/test:generateContent");
 });
+
+it.each([429, 503, "timeout"] as const)("publishes authoritative backoff for %s and preserves SDK request count", async (failure) => {
+  const logger = new EventLogger({ store: createMemoryEventStore() });
+  logger.beginRun("retry", "run");
+  let calls = 0;
+  const events: LogEvent[] = [];
+  logger.subscribe(event => events.push(event));
+  const model = await createModel({ sdk: "@ai-sdk/openai-compatible", providerId: "custom", endpointType: "openai-chat-completions", model: "test", baseURL: "https://provider.test/v1", providerSettings: { apiKey: "fake" } }, logger, "retry", {
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      if (request.method === "GET") return Response.json({ data: [] });
+      if (++calls === 1) {
+        if (failure === "timeout") throw new DOMException("https://secret.test/?api_key=never-render", "TimeoutError");
+        return Response.json({ error: { message: "secret response" } }, { status: failure, headers: { "Retry-After": "0.01" } });
+      }
+      return Response.json(completion("openai-chat-completions", false));
+    },
+  });
+  await expect(generateText({ model, prompt: "hello", maxRetries: 0 })).resolves.toMatchObject({ text: "done" });
+  expect(calls).toBe(2);
+  const retries = events.filter(event => event.type === "request.retry");
+  expect(retries).toHaveLength(1);
+  expect(retries[0].runId).toBe("run");
+  expect(events.filter(event => event.type === "model.request.retrying")).toHaveLength(0);
+  const starts = events.filter(event => event.type === "request.started");
+  expect(starts.at(-1)!.id).toBeGreaterThan(retries[0].id);
+});

@@ -1,3 +1,4 @@
+import { classifyModelFailure, modelFailureMessages } from "@/model-error";
 import { Component, useEffect, useState, type ReactNode } from "react";
 
 // Only fixed application-authored messages may cross the presentation boundary.
@@ -30,13 +31,7 @@ const safeMessages = new Set([
 export function errorDetails(error: unknown): string {
   const message = typeof error === "string" ? error : error instanceof Error ? error.message : undefined;
   if (message && safeMessages.has(message)) return message;
-  if (error && typeof error === "object" && "statusCode" in error) {
-    const status = error.statusCode;
-    if (status === 401 || status === 403) return "认证失败，请检查 API 密钥和访问权限。";
-    if (status === 429) return "请求受到限制，请稍后重试并检查服务额度。";
-    if (typeof status === "number" && status >= 500 && status <= 599) return "服务暂时不可用，请稍后重试。";
-  }
-  return "操作未完成，请检查设置后重试。";
+  return modelFailureMessages[classifyModelFailure(error)];
 }
 
 export function ErrorNotice({ summary, error, detail, onDismiss, className, testId, role = "alert" }: {

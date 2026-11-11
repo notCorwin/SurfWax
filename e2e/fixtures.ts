@@ -58,7 +58,7 @@ export function commandResponse(name: string, input: object, id: string, content
   return completion({ ...(content ? { content } : {}), tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(input) } }] });
 }
 
-export type MockResponse = CompletionResponse | { status: number; error: string } | {
+export type MockResponse = CompletionResponse | { status: number; error: string; headers?: Record<string, string> } | {
   response: CompletionResponse; delayMs?: number; startAfter?: Promise<void>;
 } | ((request: any) => CompletionResponse);
 
@@ -163,7 +163,7 @@ export async function startProvider(responses: MockResponse[], delayMs = 0, summ
       }
       const output = typeof queued === "function" ? queued(requestBody) : queued;
       if ("status" in output) {
-        response.writeHead(output.status, JSON_HEADERS);
+        response.writeHead(output.status, { ...JSON_HEADERS, ...output.headers });
         response.end(JSON.stringify({ error: { message: output.error } }));
         return;
       }

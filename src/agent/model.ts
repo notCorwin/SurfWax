@@ -1,3 +1,4 @@
+import { classifyModelFailure } from "../model-error";
 import { APICallError, type LanguageModel } from "ai";
 import type { EventLogger } from "../logging";
 import type { ModelConfig, ModelSdk } from "../types";
@@ -75,14 +76,15 @@ export async function retryModelOperation<T>(operation: () => Promise<T>, option
   signal: AbortSignal; logger?: EventLogger; conversationId?: string; purpose: string;
   sleep?: (ms: number) => Promise<void>;
 }): Promise<T> {
+  const runId = options.logger && options.conversationId ? options.logger.toolIdentity(options.conversationId, "").runId : undefined;
   let attempt = 0;
   while (true) {
     options.signal.throwIfAborted();
     try { return await operation(); } catch (error) {
       if (!isRecoverableModelError(error, options.signal)) throw error;
       const delayMs = retryBackoffDelay(++attempt);
-      await options.logger?.append({ type: "model.request.retrying", conversationId: options.conversationId,
-        content: { purpose: options.purpose }, error, retry: { attempt, delayMs } });
+      await options.logger?.append({ type: "model.request.retrying", conversationId: options.conversationId, runId,
+        content: { purpose: options.purpose }, error, retry: { attempt, delayMs, reason: classifyModelFailure(error) } });
       await waitForModelRetry(delayMs, options.signal, options.sleep);
     }
   }
@@ -182,6 +184,7 @@ export function createRetryingFetch(options: {
   let supportedReasoningEffort: ReasoningEffort | null | undefined;
 
   return async (input, init) => {
+    const runId = options.logger && options.conversationId ? options.logger.toolIdentity(options.conversationId, "").runId : undefined;
     await options.reasoningSettings?.ready;
     const original = new Request(input instanceof Request ? input.clone() : input, init);
     const originalRequest = new Request(original, { signal: options.signal ? AbortSignal.any([options.signal, original.signal]) : original.signal });
@@ -202,6 +205,8 @@ export function createRetryingFetch(options: {
     while (true) {
       try {
         signal.throwIfAborted();
+        await options.logger?.append({ type: "request.started", conversationId: options.conversationId, runId });
+        signal.throwIfAborted();
         const response = await baseFetch(activeRequest.clone());
         const rejection = reasoningEffort == null ? undefined : await reasoningRejection(response);
         if (rejection) {
@@ -212,9 +217,9 @@ export function createRetryingFetch(options: {
             : rejection.fieldUnsupported ? null : rejection.supported?.find((candidate) => candidate !== previousEffort)
               ?? REASONING_EFFORTS[REASONING_EFFORTS.indexOf(previousEffort) + 1] ?? null;
           reasoningEffort = fallback;
-          options.logger?.telemetry({
+          await options.logger?.append({
             type: "request.retry",
-            conversationId: options.conversationId,
+            conversationId: options.conversationId, runId,
             content: { url, method, status: response.status, rejectedReasoningEffort: previousEffort, reasoningEffort: fallback ?? "provider-default" },
             retry: { attempt: retries, status: response.status, delayMs: 0 },
             latencyMs: Math.max(0, now() - startedAt),
@@ -228,7 +233,7 @@ export function createRetryingFetch(options: {
           const details = response.ok ? {} : await responseDetails(response);
           options.logger?.telemetry({
             type: "request.completed",
-            conversationId: options.conversationId,
+            conversationId: options.conversationId, runId,
             content: { url, method, status: response.status, retries, reasoningEffort: reasoningEffort ?? "provider-default", ...details },
             latencyMs: Math.max(0, now() - startedAt),
           });
@@ -238,9 +243,9 @@ export function createRetryingFetch(options: {
         retries += 1;
         const delayMs = retryAfter(response, now) ?? retryBackoffDelay(retries, random);
         const details = await responseDetails(response);
-        options.logger?.telemetry({
+        await options.logger?.append({
           type: "request.retry",
-          conversationId: options.conversationId,
+          conversationId: options.conversationId, runId,
           content: { url, method, status: response.status, ...details },
           retry: { attempt: retries, status: response.status, delayMs },
           latencyMs: Math.max(0, now() - startedAt),
@@ -251,7 +256,7 @@ export function createRetryingFetch(options: {
         if (isAbortError(error, signal)) {
           options.logger?.telemetry({
             type: "request.aborted",
-            conversationId: options.conversationId,
+            conversationId: options.conversationId, runId,
             content: { url, method },
             abort: { reason: error instanceof Error ? error.message : String(error) },
             latencyMs: Math.max(0, now() - startedAt),
@@ -262,7 +267,7 @@ export function createRetryingFetch(options: {
         if (!isRecoverableModelError(error, signal)) {
           options.logger?.telemetry({
             type: "request.failed",
-            conversationId: options.conversationId,
+            conversationId: options.conversationId, runId,
             content: { url, method, error },
             error,
             latencyMs: Math.max(0, now() - startedAt),
@@ -272,11 +277,12 @@ export function createRetryingFetch(options: {
 
         retries += 1;
         const delayMs = retryBackoffDelay(retries, random);
-        options.logger?.telemetry({
+        await options.logger?.append({
           type: "request.retry",
-          conversationId: options.conversationId,
+          conversationId: options.conversationId, runId,
+          error,
           content: { url, method, error, reason: "network", diagnosis: "Check endpoint connectivity, CORS, and provider configuration while retrying." },
-          retry: { attempt: retries, delayMs },
+          retry: { attempt: retries, delayMs, reason: classifyModelFailure(error) },
           latencyMs: Math.max(0, now() - startedAt),
         });
         await waitForModelRetry(delayMs, signal, options.sleep);

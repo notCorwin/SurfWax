@@ -221,7 +221,6 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
   const [contextStatus, setContextStatus] = useState<{ message: string; error: boolean }>();
   const [compactionBusy, setCompactionBusy] = useState(false);
   const [compactionError, setCompactionError] = useState("");
-  const [retry, setRetry] = useState<{ attempt: number; delayMs: number; reason: string }>();
   const refreshing = useRef(false);
   const pendingRefresh = useRef<{ refresh: (force?: boolean) => Promise<void>; force: boolean } | undefined>(undefined);
   const compactionController = useRef<AbortController | undefined>(undefined);
@@ -240,13 +239,6 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
       setCompactionError(stringifyLogSafe(fromLogValue(event.error, event.valueEncoding)) ?? "模型未能生成摘要");
     } else if (event.type === "context.compaction.aborted") {
       setContextStatus({ message: "上下文压缩已停止；原始历史已保留。", error: false });
-    } else if (event.type === "model.request.retrying") {
-      const value = fromLogValue(event.retry, event.valueEncoding) as { attempt?: number; delayMs?: number } | undefined;
-      const content = fromLogValue(event.content, event.valueEncoding) as { status?: number; reason?: string } | undefined;
-      setRetry({ attempt: value?.attempt ?? 1, delayMs: value?.delayMs ?? 0,
-        reason: content?.status ? `服务返回 ${content.status}` : content?.reason === "network" ? "网络连接中断" : content?.reason ?? "暂时无法完成请求" });
-    } else if (["request.completed", "request.aborted", "request.failed", "conversation.finished", "conversation.aborted", "conversation.failed"].includes(event.type)) {
-      setRetry(undefined);
     }
   }), [conversationId, logger]);
   useEffect(() => {
@@ -317,9 +309,7 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
       {contextStatus && (contextStatus.error
         ? <ErrorNotice testId="context-status" summary={contextStatus.message} />
         : <p role="status" data-testid="context-status">{contextStatus.message}</p>)}
-      {retry && <p role="status" data-testid="request-retry" className="conversation-notice">
-        {retry.reason}；正在第 {retry.attempt} 次重试，等待 {Math.ceil(retry.delayMs / 1000)} 秒。
-      </p>}
+
       {(compactionBusy || compactionError) && <section role="group" aria-label="上下文处理" data-testid="context-maintenance" className="conversation-notice">
         <div className="flex gap-2">
           {compactionBusy ? <Button type="button" variant="outline" onClick={() => compactionController.current?.abort("user-stopped-compaction")}>停止压缩</Button>
