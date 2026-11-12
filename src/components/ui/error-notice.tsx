@@ -10,6 +10,8 @@ const safeMessages = new Set([
   "保存的脚本 world 配置无法识别；原始数据已保留。",
   "Allow User Scripts 尚未开启",
   "Allow User Scripts 未开启，或 Chrome 不支持该操作。",
+  "脚本已更改或删除，请复制草稿后刷新并重新编辑。",
+  "无法安全操作脚本，请重新打开管理页面。",
   "找不到该脚本。", "找不到该脚本，请刷新状态。", "脚本 ID 已存在。",
   "文件必须是 Chrome RegisteredUserScript 对象数组；请检查原生字段、id、matches 和 js。",
   "文件中存在重复的脚本 ID。",

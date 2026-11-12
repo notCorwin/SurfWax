@@ -3,6 +3,7 @@ import type { EventLogger } from "../logging";
 import { safeDiagnosticError } from "../diagnostic-error";
 import { scriptChanges, scriptDefinition, scriptId } from "./schema";
 
+export const USER_SCRIPTS_REVISION_KEY = "side-agent:user-scripts-revision";
 export const USER_SCRIPTS_STORAGE_KEY = "side-agent:user-scripts";
 export const USER_SCRIPTS_ERROR_KEY = "side-agent:user-scripts-error";
 export const USER_SCRIPTS_WORLDS_KEY = "side-agent:user-script-worlds";
@@ -106,7 +107,10 @@ export async function snapshotUserScripts(options: { chromeApi?: UserScriptsChro
 
 let tail: Promise<unknown> = Promise.resolve();
 export function serializeUserScripts<T>(operation: () => Promise<T>): Promise<T> {
-  const task = tail.then(operation);
+  const task = tail.then(() => {
+    if (!globalThis.navigator?.locks) throw new Error("无法安全操作脚本，请重新打开管理页面。");
+    return navigator.locks.request("surf-wax:user-scripts", operation);
+  });
   tail = task.catch(() => undefined);
   return task;
 }
@@ -115,8 +119,8 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
   return serializeUserScripts(async () => {
     options.beforeExecute?.();
     const chromeApi = options.chromeApi ?? globalThis.chrome;
-    if (method === "list" || method === "read") {
-      const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
+    if (method === "list" || method === "read" || method === "readForEdit") {
+      const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_REVISION_KEY]);
       const active = scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]);
       const disabled = scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY]);
       if (method === "list") return [
@@ -126,7 +130,8 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       const id = args[0] as string;
       const script = disabled.find((item) => item.id === id) ?? active.find((item) => item.id === id);
       if (!script) throw new Error("找不到该脚本。");
-      return { script, enabled: !disabled.some((item) => item.id === id) };
+      const enabled = !disabled.some((item) => item.id === id);
+      return method === "readForEdit" ? { script, enabled, revision: stored[USER_SCRIPTS_REVISION_KEY] ?? null } : { script, enabled };
     }
     if (!chromeApi.userScripts) throw new Error("Allow User Scripts 未开启，或 Chrome 不支持该操作。");
     if (!["replace", "setEnabled", "delete", "create", "edit"].includes(method)) throw new Error("不支持的脚本操作。");
@@ -136,12 +141,12 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       scriptId.parse(input?.id);
       scriptChanges.parse(input?.changes);
     }
-    let stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
+    let stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_REVISION_KEY]);
     // A pre-existing native registry is the initial declaration until the
     // first snapshot succeeds. Never overwrite it with a single new script.
     if (stored[USER_SCRIPTS_STORAGE_KEY] === undefined) {
       await restoreUserScripts(options);
-      stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
+      stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_REVISION_KEY]);
     }
     const saved = scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]);
     const disabled = scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY]);
@@ -162,7 +167,14 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       next = args[0] as chrome.userScripts.RegisteredUserScript;
       enabled = true;
     } else if (method === "edit" || method === "replace") {
-      if (method === "edit" && !declared) throw new Error("找不到该脚本。");
+      if (!declared) throw new Error(method === "edit" ? "找不到该脚本。" : "脚本已更改或删除，请复制草稿后刷新并重新编辑。");
+      if (method === "replace") {
+        const baseline = args[1] as { script?: unknown; enabled?: unknown; revision?: unknown } | undefined;
+        if (!baseline || JSON.stringify(baseline.script) !== JSON.stringify(declared)
+          || baseline.enabled !== !disabledScript || baseline.revision !== (stored[USER_SCRIPTS_REVISION_KEY] ?? null)) {
+          throw new Error("脚本已更改或删除，请复制草稿后刷新并重新编辑。");
+        }
+      }
       next = method === "edit"
         ? { ...declared!, ...(args[0] as { changes: Record<string, unknown> }).changes } as chrome.userScripts.RegisteredUserScript
         : args[0] as chrome.userScripts.RegisteredUserScript;
@@ -203,7 +215,10 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       const changes: Record<string, unknown> = {};
       if (JSON.stringify(saved) !== JSON.stringify(activeNext)) changes[USER_SCRIPTS_STORAGE_KEY] = activeNext;
       if (JSON.stringify(disabled) !== JSON.stringify(disabledNext)) changes[USER_SCRIPTS_DISABLED_KEY] = disabledNext;
-      if (Object.keys(changes).length) await chromeApi.storage.local.set(changes);
+      const revision = crypto.randomUUID();
+      changes[USER_SCRIPTS_REVISION_KEY] = revision;
+      await chromeApi.storage.local.set(changes);
+      return { id: scriptIdValue, enabled, ...(method === "replace" && next ? { baseline: { script: next, enabled, revision } } : {}) };
     } catch (error) {
       // Storage is still authoritative. Restore the previous projection when
       // possible; startup reconciliation repairs an interrupted rollback.
@@ -216,6 +231,5 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       }
       throw error;
     }
-    return { id: scriptIdValue, enabled };
   });
 }

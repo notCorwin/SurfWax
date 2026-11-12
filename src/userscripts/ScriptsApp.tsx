@@ -73,11 +73,13 @@ export function ScriptsApp() {
   const [view, setView] = useState<"manager" | "editor">(location.hash === "#edit" ? "editor" : "manager");
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
   const [importScripts, setImportScripts] = useState<Script[] | null>(null);
+  const importBaselines = useRef<Record<string, { script: Script; enabled: boolean; revision: string | null }>>({});
   const [overwriteIds, setOverwriteIds] = useState<string[]>([]);
   const [deleteIds, setDeleteIds] = useState<string[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<"form" | "json">("form");
   const [draft, setDraft] = useState(JSON.stringify(TEMPLATE, null, 2));
+  const editBaseline = useRef<{ script: Script; enabled: boolean; revision: string | null } | null>(null);
   const savedDraft = useRef(JSON.stringify(TEMPLATE, null, 2));
   const draftRevision = useRef(0);
   const refreshRevision = useRef(0);
@@ -174,7 +176,7 @@ export function ScriptsApp() {
   };
 
   const choose = (script?: Script, force = false) => {
-    if (!force && dirty && !confirm("当前脚本有未保存的修改，确定放弃吗？")) return;
+    if (!force && dirty && !confirm("当前脚本有未保存的修改，确定放弃吗？")) return false;
     const revision = ++draftRevision.current;
     const nextDraft = JSON.stringify(script ?? TEMPLATE, null, 2);
     setSelected(script?.id ?? "");
@@ -193,6 +195,16 @@ export function ScriptsApp() {
         setDraft(formatted);
       }).catch(() => undefined);
     }
+    return true;
+  };
+
+  const openScript = async (script: Script) => {
+    setAction("refreshing");
+    try {
+      const baseline = await call("readForEdit", script.id);
+      if (choose(baseline.script)) editBaseline.current = baseline;
+    } catch (cause) { setError(scriptError(cause)); }
+    finally { setAction(null); }
   };
 
   const updateField = (field: Field, value: string) => {
@@ -250,9 +262,15 @@ export function ScriptsApp() {
         try { script = { ...script, js: [{ ...script.js[0], code: await formatUserScriptCode(script.js[0].code) }] }; }
         catch (cause) { formatWarning = scriptError(cause); }
       }
-      if (selected) await call("replace", script);
-      else await call("create", script);
-      choose(script, true);
+      const result = selected ? await call("replace", script, editBaseline.current) : await call("create", script);
+      if (selected) {
+        editBaseline.current = result.baseline;
+        choose(script, true);
+      } else {
+        const baseline = await call("readForEdit", script.id);
+        editBaseline.current = baseline;
+        choose(baseline.script, true);
+      }
       await refresh();
       setMessage(formatWarning ? "脚本已保存，但代码未格式化。" : "脚本已保存");
       if (formatWarning) setError(formatWarning);
@@ -373,8 +391,21 @@ export function ScriptsApp() {
     setFailures([]);
     setImportScripts(null);
     setOverwriteIds([]);
-    try { setImportScripts(parseImport(await file.text())); }
-    catch (cause) { setError(scriptError(cause)); }
+    try {
+      const imported = parseImport(await file.text());
+      const baselines: typeof importBaselines.current = {};
+      for (const item of imported) {
+        const existing = scripts.find((script) => script.id === item.id);
+        if (!existing) continue;
+        const baseline = await call("readForEdit", item.id);
+        if (JSON.stringify(baseline.script) !== JSON.stringify(existing) || baseline.enabled !== !disabledIds.includes(item.id)) {
+          throw new Error("脚本已更改或删除，请复制草稿后刷新并重新编辑。");
+        }
+        baselines[item.id] = baseline;
+      }
+      importBaselines.current = baselines;
+      setImportScripts(imported);
+    } catch (cause) { setError(scriptError(cause)); }
     if (fileInput.current) fileInput.current.value = "";
   };
 
@@ -387,10 +418,12 @@ export function ScriptsApp() {
       const failed: Array<{ id: string; reason: string }> = [];
       let imported = 0;
       for (const script of importScripts) {
-        const existing = scripts.some((item) => item.id === script.id);
+        const existing = Boolean(importBaselines.current[script.id]);
         if (existing && !overwriteIds.includes(script.id)) continue;
         try {
-          await call(existing ? "replace" : "create", script);
+          if (existing) {
+            await call("replace", script, importBaselines.current[script.id]);
+          } else await call("create", script);
           imported++;
         } catch (cause) { failed.push({ id: script.id, reason: scriptError(cause) }); }
       }
@@ -436,7 +469,7 @@ export function ScriptsApp() {
           <div className="scripts-list" aria-label="已保存脚本">
             {visibleScripts.map((script) => <div className="script-row" key={script.id}>
               <Checkbox checked={checkedIds.includes(script.id)} onCheckedChange={(checked) => setCheckedIds((current) => checked ? [...current, script.id] : current.filter((id) => id !== script.id))} aria-label={`选择 ${script.id}`} />
-              <button className="script-item" type="button" disabled={busy} onClick={() => choose(script)}>
+              <button className="script-item" type="button" disabled={busy} onClick={() => void openScript(script)}>
                 <span className="script-item-title">{script.id}</span>
                 <span className="script-item-sites">{script.matches?.join(", ") ?? "未设置网站"}</span>
                 <Badge variant={disabledIds.includes(script.id) ? "secondary" : registered.includes(script.id) ? "default" : "outline"}>{disabledIds.includes(script.id) ? "已停用" : registered.includes(script.id) ? "已注册" : "待恢复"}</Badge>
