@@ -40,8 +40,8 @@ export async function collectCartStage(options: {
   options.phases.push(result);
   const started = await observe('start', async () => { await options.start(); return true; }, 5000);
   if (started) while (Date.now() < end) {
-    const next = await observe('poll', options.read, Math.max(1, Math.min(5000, end - Date.now())));
-    if (!next || Date.now() > end) break;
+    const next = await observe('poll', options.read, 5000);
+    if (!next) break;
     all = next;
     const submission = [...all].reverse().find(event => event.type === 'conversation.submitted' && Date.parse(event.timestamp) >= start);
     if (submission) { scope = { conversationId: submission.conversationId, runId: submission.runId }; options.setScope(scope); }

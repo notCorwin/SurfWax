@@ -91,8 +91,15 @@ async function finalCartPage(opened: Opened, products: Product[], wanted: Item[]
   return { verified: false, selection };
 }
 
-class WebsiteError extends Error {
+export class WebsiteError extends Error {
   constructor(readonly operation: string, readonly status: number | null) { super(`Website ${operation} could not be verified${status === null ? '' : ` (HTTP ${status})`}`); }
+}
+
+/** Classify the failure of the overall evaluation without changing completed phase evidence. */
+export function recordEvaluationFailure(report: { outcome: string; reason?: string; phase?: string }, error: unknown, phase: string) {
+  report.outcome = error instanceof WebsiteError ? 'blocked' : 'setup_failed';
+  report.reason = error instanceof WebsiteError ? error.message : `Evaluation observation failed during ${phase}`;
+  report.phase = phase;
 }
 
 export async function runCart(timeout: number): Promise<string> {
@@ -195,10 +202,7 @@ export async function runCart(timeout: number): Promise<string> {
       }
     }
   } catch (error) {
-    const observed = report.phases.at(-1);
-    report.outcome = observed?.outcome ?? (error instanceof WebsiteError ? 'blocked' : 'setup_failed');
-    report.reason = error instanceof WebsiteError ? error.message : `Evaluation observation failed during ${phase}`;
-    report.phase = phase;
+    recordEvaluationFailure(report, error, phase);
   } finally {
     report.taskOutcome = report.outcome;
     try {

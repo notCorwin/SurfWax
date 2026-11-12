@@ -10,7 +10,7 @@ afterEach(async () => { vi.useRealTimers(); if (root) await rm(root, { recursive
 async function fixture() {
   root = await mkdtemp(join(tmpdir(), 'stateful-stage-'));
   const now = Date.now();
-  const submitted = { type: 'conversation.submitted', conversationId: 'c', runId: 'r', timestamp: new Date(now).toISOString() };
+  const submitted = { type: 'conversation.submitted', conversationId: 'c', runId: 'r', timestamp: new Date(now + 100).toISOString() };
   const finished = { ...submitted, type: 'conversation.finished', content: { goal: { status: 'completed' } } };
   const requests = [{ responseStatus: 200 }];
   const phases: any[] = [];
@@ -65,15 +65,28 @@ it('records a started phase and requests when the first poll fails', async () =>
   expect(await file('stage1-events.json')).toEqual([]);
 });
 
+it('keeps an on-time terminal from a poll that returns after the deadline', async () => {
+  vi.useFakeTimers();
+  const { options, submitted, finished } = await fixture();
+  options.read.mockImplementationOnce(async () => {
+    vi.setSystemTime(Date.now() + 1001);
+    return [submitted, finished];
+  });
+  const result = await collectCartStage(options);
+  expect(result).toMatchObject({ terminal: { state: 'on_time' }, runOutcome: 'finished' });
+  expect(await file('stage1-events.json')).toEqual([submitted, finished]);
+});
+
 it('keeps timeout when a terminal arrives after the deadline', async () => {
   vi.useFakeTimers();
   const { options, submitted, finished } = await fixture();
   options.start = vi.fn(async () => { await vi.advanceTimersByTimeAsync(1001); });
-  options.read = vi.fn(async () => [submitted, finished]);
+  const late = { ...finished, timestamp: new Date(Date.now() + 2000).toISOString() };
+  options.read = vi.fn(async () => [submitted, late]);
   const result = await collectCartStage(options);
   expect(result).toMatchObject({ terminal: { state: 'pending' }, runOutcome: 'timed_out', outcome: 'timed_out' });
   expect(await file('stage1-events.json')).toEqual([]);
-  expect(await file('stage1-final-events.json')).toContainEqual(finished);
+  expect(await file('stage1-final-events.json')).toContainEqual(late);
 });
 
 it('retains the last successful poll when the next poll fails', async () => {
