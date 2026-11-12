@@ -1208,8 +1208,8 @@ export class EventLogger {
         // Recheck after the cross-page lock: maintenance may have advanced while
         // this writer was waiting for another page's terminal transaction.
         if (generation === undefined ? this.handshakePaused : generation !== this.generation) return [];
-        if (requireAtomic) {
-          const dispatch = events.find((event) => event.type === "conversation.followup.dispatched");
+        const dispatch = events.find((event) => event.type === "conversation.followup.dispatched");
+        if (requireAtomic && dispatch) {
           const followup = fromLogValue(dispatch?.content, dispatch?.valueEncoding) as { id?: unknown } | null;
           if (!dispatch?.conversationId || typeof followup?.id !== "string") throw new Error("Invalid follow-up submission");
           const floor = await this.latestClearIdFresh(store);
@@ -1375,19 +1375,21 @@ export class EventLogger {
     try { await write; } finally { if (this.messageWrites.get(key) === write) this.messageWrites.delete(key); }
   }
 
-  /** A follow-up leaves its queue only when its message and run are durable. */
-  async appendFollowupSubmission(input: { conversationId: string; runId: string; chatId: string; message: ConversationMessage;
-    parentId: string | null; followup: { id: string; mode: "followup" | "immediate" }; expectedEpoch?: string }): Promise<void> {
+  /** A new user message and its submission commit together; follow-ups also leave their queue atomically. */
+  async appendRunSubmission(input: { conversationId: string; runId: string; chatId: string; messageId: string | null;
+    message?: ConversationMessage; parentId?: string | null; followup?: { id: string; mode: "followup" | "immediate" }; expectedEpoch?: string }): Promise<void> {
     if (this.fatalError !== undefined) throw this.fatalError;
-    if (!this.accepting) throw new DOMException("日志维护已阻止后续消息发送。", "AbortError");
+    if (!this.accepting) throw new Error("日志正在维护，请稍后重试。");
+    if (input.followup && !input.message) throw new Error("Invalid follow-up submission");
     this.flushBuffer();
     const { conversationId, runId, message, parentId, followup } = input;
-    const saved = await this.enqueue([
-      this.event({ type: "conversation.message", conversationId, runId, parentId, content: message }),
-      this.event({ type: "conversation.followup.dispatched", conversationId, runId, content: followup }),
-      this.event({ type: "conversation.submitted", conversationId, runId, content: { chatId: input.chatId, messageId: message.id } }),
-    ], input.expectedEpoch, undefined, undefined, [], true);
-    if (saved.length !== 3) throw new Error("后续消息已发送、移除或日志正在维护。");
+    const events = [
+      ...(message ? [this.event({ type: "conversation.message", conversationId, runId, parentId, content: message })] : []),
+      ...(followup ? [this.event({ type: "conversation.followup.dispatched", conversationId, runId, content: followup })] : []),
+      this.event({ type: "conversation.submitted", conversationId, runId, content: { chatId: input.chatId, messageId: input.messageId } }),
+    ];
+    const saved = await this.enqueue(events, input.expectedEpoch, undefined, undefined, [], events.length > 1);
+    if (saved.length !== events.length) throw new Error("日志正在维护，请稍后重试。");
   }
 
   async repository(conversationId: string): Promise<ConversationRepository> {

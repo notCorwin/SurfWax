@@ -145,22 +145,13 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         const userMessage = [...initial].reverse().find((message) => message.role === "user");
         parentId = userMessage?.id ?? null;
         const dispatched = options.trigger === "submit-message" ? followupDispatch(userMessage) : undefined;
-        if (userMessage && dispatched) {
-          const index = initial.findIndex((message) => message.id === userMessage.id);
-          await logger.appendFollowupSubmission({ conversationId, runId: currentRunId, chatId: options.chatId,
-            message: userMessage as ConversationMessage, parentId: index > 0 ? initial[index - 1]!.id : null, followup: dispatched, expectedEpoch: options.expectedEpoch });
-        } else {
-          if (userMessage && !existing.messages.some(({ message }) => message.id === userMessage.id)) {
-            const index = initial.findIndex((message) => message.id === userMessage.id);
-            await logger.appendMessage(conversationId, userMessage as ConversationMessage, {
-              runId: currentRunId, parentId: index > 0 ? initial[index - 1]!.id : null, expectedEpoch: options.expectedEpoch,
-            });
-          }
-          const submission = { type: "conversation.submitted", conversationId, runId: currentRunId,
-            content: { chatId: options.chatId, messageId: userMessage?.id ?? null } };
-          if (!await (options.expectedEpoch === undefined ? logger.append(submission) : logger.appendIfEpoch(submission, options.expectedEpoch)))
-            throw new Error("日志正在维护，请稍后重试。");
-        }
+        const isNewMessage = Boolean(userMessage && !existing.messages.some(({ message }) => message.id === userMessage.id));
+        const index = userMessage ? initial.findIndex((message) => message.id === userMessage.id) : -1;
+        await logger.appendRunSubmission({ conversationId, runId: currentRunId, chatId: options.chatId,
+          messageId: userMessage?.id ?? null,
+          ...(userMessage && (isNewMessage || dispatched) ? { message: userMessage as ConversationMessage,
+            parentId: index > 0 ? initial[index - 1]!.id : null } : {}),
+          ...(dispatched ? { followup: dispatched } : {}), expectedEpoch: options.expectedEpoch });
         options.onAccepted?.();
         let attempt = 0;
         let phase = 0;

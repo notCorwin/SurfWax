@@ -101,6 +101,25 @@ describe("canonical event log", () => {
       "unavailable",
     );
   });
+  it("submits existing messages without duplicating them and dispatches a queued follow-up once", async () => {
+    const store = createMemoryEventStore();
+    const logger = new EventLogger({ store });
+    const message = { id: "m", role: "user" as const, parts: [{ type: "text" as const, text: "hello" }] };
+    await logger.appendMessage("c", message, { parentId: null });
+    await logger.appendRunSubmission({ conversationId: "c", runId: "retry", chatId: "c", messageId: "m" });
+    expect((await store.all()).filter(event => event.type === "conversation.message")).toHaveLength(1);
+    await logger.append({ type: "conversation.followup.queued", conversationId: "c", content: { id: "f", text: "next" } });
+    const followup = { conversationId: "c", runId: "next", chatId: "c", messageId: "n",
+      message: { id: "n", role: "user" as const, parts: [{ type: "text" as const, text: "next" }] },
+      parentId: "m", followup: { id: "f", mode: "followup" as const } };
+    await logger.appendRunSubmission(followup);
+    await expect(logger.appendRunSubmission({ ...followup, runId: "duplicate" })).rejects.toThrow();
+    const events = await store.all();
+    expect(events.filter(event => event.type === "conversation.followup.dispatched")).toHaveLength(1);
+    expect(events.filter(event => event.type === "conversation.message")).toHaveLength(2);
+    expect(events.filter(event => event.type === "conversation.submitted")).toHaveLength(2);
+  });
+
   it("keeps a newer run active when recovery finishes an older run", async () => {
     const memory = createMemoryEventStore();
     let block = false;

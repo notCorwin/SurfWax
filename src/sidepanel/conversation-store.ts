@@ -1,6 +1,6 @@
 import { isSyntheticTerminalMessage, restoreConversationRepository } from "../conversations";
 import { abortConversationWork, claimConversationRun, withIdleConversation, type ConversationRunLease } from "../agent/coordinator";
-import { followupDispatch, type ConversationTransport, type SidePanelMessage } from "../agent/transport";
+import { type ConversationTransport, type SidePanelMessage } from "../agent/transport";
 import { ConversationListProjection, fromLogValue, type ConversationRepository, type ConversationSummary, type EventLogger, type LogEvent } from "../logging";
 
 export type PartStatus = { type: "running" | "complete" | "incomplete" | "requires-action"; reason?: string; error?: unknown };
@@ -417,10 +417,6 @@ export class ConversationStore {
         if (!await this.logger.appendIfEpoch({ type: "conversation.created", conversationId: id, content: { title: "新对话" } }, epoch))
           throw new Error("日志正在维护，请稍后重试。");
         this.publish({ threadListItem: { id, remoteId: id } });
-      }
-      const user = messages.at(-1);
-      if (user?.role === "user" && !followupDispatch(user) && !this.repository.messages.some((item) => item.message.id === user.id)) {
-        await this.logger.appendMessage(id, { ...user }, { parentId: messages.at(-2)?.id ?? null, expectedEpoch: epoch });
       }
       priorFailureEventId = Math.max(0, ...events
         .filter((event) => event.type === "conversation.failed").map((event) => event.id));

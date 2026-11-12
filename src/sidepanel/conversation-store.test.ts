@@ -48,27 +48,45 @@ describe("conversation command persistence", () => {
     expect(panel.getState().threads.threadItems[0]?.title).toBe("Changed");
   });
 
-  it("retains a draft if the run submission cannot be committed", async () => {
+  it("commits a draft and submission atomically across failed maintenance and retry", async () => {
     const memory = createMemoryEventStore();
-    let logger!: EventLogger;
-    let stopOnMessage = false;
-    const store = { ...memory, async appendMany(events: Parameters<typeof memory.appendMany>[0]) {
-      const saved = await memory.appendMany(events);
-      if (stopOnMessage && events.some(event => event.type === "conversation.message")) logger.stop();
-      return saved;
-    } };
-    logger = new EventLogger({ store });
+    let receive!: (message: any) => void;
+    const port = { onMessage: { addListener: (listener: typeof receive) => { receive = listener; } },
+      onDisconnect: { addListener: () => {} }, postMessage: () => {} } as unknown as chrome.runtime.Port;
+    const logger = new EventLogger({ store: memory, writerPort: port });
+    receive({ type: "writer-ready", generation: 1 });
     await logger.append({ type: "conversation.created", conversationId: "c" });
-    const agent = vi.fn(() => { throw new Error("model should not start"); });
-    const panel = new ConversationStore(logger, id => createChatTransport(agent, logger, id), "c");
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    let block = true;
+    vi.stubGlobal("navigator", { locks: { request: async (name: string, options: unknown, callback?: (lock: object) => Promise<unknown>) => {
+      const action = callback ?? options as (lock: object) => Promise<unknown>;
+      if (name === "surf-wax:job-state-log" && block) { block = false; entered(); await gate; }
+      return action({});
+    } } });
+    const inputs: unknown[] = [];
+    const agent = vi.fn(() => ({ generate: async ({ messages }: { messages: unknown }) => { inputs.push(messages); } }));
+    const panel = new ConversationStore(logger, id => createChatTransport(agent as never, logger, id), "c");
     await panel.threads.switchToThread("c");
     panel.composer.setText("keep this draft");
-    stopOnMessage = true;
-    await panel.composer.send();
+    const first = panel.composer.send();
+    await waiting;
+    receive({ type: "writer-ready", generation: 2, paused: true });
+    receive({ type: "clear-failed" });
+    release();
+    await first;
     expect(panel.getState().composer.text).toBe("keep this draft");
-    expect(panel.getState().thread.error).toBeDefined();
-    expect(agent).not.toHaveBeenCalled();
-    expect((await memory.all()).some(event => event.type === "conversation.submitted")).toBe(false);
+    expect((await memory.all()).filter(event => ["conversation.message", "conversation.submitted"].includes(event.type))).toEqual([]);
+    expect(inputs).toEqual([]);
+    await panel.composer.send();
+    const events = await memory.all();
+    expect(events.filter(event => event.type === "conversation.message")).toHaveLength(1);
+    expect(events.filter(event => event.type === "conversation.submitted")).toHaveLength(1);
+    expect(inputs).toHaveLength(1);
+    expect(JSON.stringify(inputs[0]).match(/keep this draft/g)).toHaveLength(1);
+    expect(panel.getState().composer.text).toBe("");
   });
 
   it("rejects a command delayed across a successful clear", async () => {
