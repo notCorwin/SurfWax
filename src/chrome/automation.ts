@@ -137,7 +137,7 @@ type ObservationRecord = {
 };
 type IsolatedFrameRead = { objectId: string; executionContextId: number; frameId: string; guard: () => void };
 type AccessibilityRead = { world: IsolatedFrameRead; documentBackend: number; documentId: string; nodes: Map<string, any>; backends: Map<number, any[]> };
-type ObservationContext = { id: number; uniqueId: string; frameId: string; extension: boolean };
+type ObservationContext = { id: number; uniqueId: string; frameId: string; candidate: boolean };
 type RootReadScope = { frameId: string; loaderId?: string; revision: number; context?: ObservationContext; signal?: AbortSignal };
 type Session = {
   tabId: number;
@@ -775,16 +775,17 @@ export class AutomationRuntime {
     if (session && !source.sessionId && method === "Runtime.executionContextCreated") {
       const context = params?.context, auxiliary = context?.auxData, extensionId = this.options.chromeApi.runtime?.id;
       if (typeof auxiliary?.frameId === "string" && Number.isSafeInteger(context?.id) && typeof context.uniqueId === "string") {
-        const extension = Boolean(this.options.observationWorldName && context.name === this.options.observationWorldName
+        const candidate = Boolean(this.options.observationWorldName && context.name === this.options.observationWorldName
           && auxiliary.type === "isolated" && auxiliary.isDefault === false) || Boolean(extensionId && typeof context.origin === "string"
           && context.origin.replace(/\/$/, "") === `chrome-extension://${extensionId}`
           && auxiliary.type === "isolated" && auxiliary.isDefault === false);
         const previous = session.observationContexts.get(context.id);
-        if (previous?.uniqueId !== context.uniqueId || previous?.frameId !== auxiliary.frameId || previous?.extension !== extension) {
-          const replacedRoot = auxiliary.frameId === session.rootFrameId && (previous || extension
-            && [...session.observationContexts.values()].some((value) => value.extension && value.frameId === auxiliary.frameId));
+        if (previous?.uniqueId !== context.uniqueId || previous?.frameId !== auxiliary.frameId || previous?.candidate !== candidate) {
+          // Another isolated world (including USER_SCRIPT) does not replace
+          // the document or the already identified observation world.
+          const replacedRoot = auxiliary.frameId === session.rootFrameId && previous;
           if (replacedRoot) session.rootDocumentRevision++;
-          session.observationContexts.set(context.id, { id: context.id, uniqueId: context.uniqueId, frameId: auxiliary.frameId, extension });
+          session.observationContexts.set(context.id, { id: context.id, uniqueId: context.uniqueId, frameId: auxiliary.frameId, candidate });
         }
       }
     }
@@ -4285,9 +4286,8 @@ export class AutomationRuntime {
   }
 
   private extensionObservationContext(session: Session, frameId: string): ObservationContext | undefined {
-    const matches = [...session.observationContexts.values()].filter((context) => context.extension && context.frameId === frameId);
-    if (matches.length > 1) throw automationError("stale-observation", { reason: "ambiguous-extension-observation-context" });
-    return matches[0];
+    const context = session.observationPrimitives?.context;
+    return context?.frameId === frameId && session.observationContexts.get(context.id) === context ? context : undefined;
   }
 
   /** Install pure helpers once per root document, independent of child frames. */
@@ -4295,13 +4295,32 @@ export class AutomationRuntime {
     const scope = this.rootReadScope(session), previous = session.observationPrimitives;
     if (previous && previous.frameId === scope.frameId && previous.loaderId === scope.loaderId && previous.revision === scope.revision)
       return previous.ready;
+    const identity = crypto.randomUUID();
     const ready = this.options.chromeApi.scripting.executeScript({
-      target: { tabId: session.tabId, frameIds: [0] }, world: "ISOLATED", func: snapshotObservationPrimitives as (install: true) => 2, args: [true],
-    }).then((results) => {
+      target: { tabId: session.tabId, frameIds: [0] }, world: "ISOLATED", func: snapshotObservationPrimitives as (install: true, worldIdentity: string) => 2, args: [true, identity],
+    }).then(async (results) => {
       if (results.length !== 1 || results[0]?.frameId !== 0 || results[0].result !== 2)
         throw automationError("snapshot-unavailable", { reason: "observation-primitives-unavailable" });
+      // Origin/name only identifies candidates: Chrome gives USER_SCRIPT
+      // worlds the same extension origin. Identify the world of this trusted
+      // ISOLATED injection using a fresh value never sent to other worlds.
+      await this.options.command(session.debuggee, "Runtime.evaluate", { expression: "void 0", returnByValue: true });
+      this.assertRootReadScope(session, scope);
+      const candidates = [...session.observationContexts.values()].filter((context) => context.candidate && context.frameId === scope.frameId);
+      const reads = await Promise.allSettled(candidates.map(async (context) => {
+        const response = await this.options.command(session.debuggee, "Runtime.evaluate", {
+          expression: 'globalThis[Symbol.for("surf-wax.snapshot-observation-primitives.v2")]?.worldIdentity',
+          contextId: context.id, returnByValue: true,
+        });
+        return !response.exceptionDetails && response.result?.value === identity ? context : undefined;
+      }));
+      this.assertRootReadScope(session, scope);
+      const matches = reads.flatMap((read) => read.status === "fulfilled" && read.value
+        && session.observationContexts.get(read.value.id) === read.value ? [read.value] : []);
+      if (matches.length !== 1) throw automationError("snapshot-unavailable", { reason: "observation-context-identity-unavailable" });
+      cached.context = matches[0];
     });
-    const cached = { frameId: scope.frameId, loaderId: scope.loaderId, revision: scope.revision, ready };
+    const cached: RootReadScope & { ready: Promise<void> } = { frameId: scope.frameId, loaderId: scope.loaderId, revision: scope.revision, ready };
     session.observationPrimitives = cached;
     void ready.catch(() => { if (session.observationPrimitives === cached) delete session.observationPrimitives; });
     return ready;

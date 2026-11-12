@@ -612,4 +612,8 @@ Excalidraw 的编辑、文件导出与恢复尚未完成准入，其初步 oracl
 
 已明确选定 frame 后，区域选择器在该 frame 内执行；若选择器无匹配，检查工具提示使用同一 frame 的 `html` 区域，而不切回主文档。失效 frame 和导航变化仍按原守卫报错。点击的 `performed` 表示浏览器输入已执行，异步业务状态仍须通过后续观察或 `verify_state` 确认；此说明不增加等待或重试。工具目录语义变更时递增版本。
 
+### 观察 world 与用户脚本隔离
+
+2026-11-12 Chrome 为本扩展的 ISOLATED、默认 USER_SCRIPT 和具名用户脚本 world 提供相同的扩展来源与名称，不能据此选择观察上下文。可信 ISOLATED helper 注入时携带一次随机身份值，随后只读取候选 world 内的实际值，期望值不送入其他 world；唯一匹配的 context 绑定现有文档、frame 和生命周期缓存。无法确认唯一身份时明确失败，不任选候选或回退到页面 world。新增其他隔离 world 本身不代表根文档替换，原有文档、context 销毁和读取一致性守卫继续生效。
+
 来源：`src/chrome/automation.ts`、`src/chrome/tool.ts`、`src/chrome/atomic-tools.ts`。

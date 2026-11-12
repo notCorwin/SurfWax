@@ -10,4 +10,4 @@ export type ObservationPrimitives = {
   /** Fresh local flow evidence; this does not certify ordinary overflow/paint. */
   textFlowCoverage(text: Node, styleFor?: (element: Element) => ObservationStyle, composedParent?: (node: Node) => Element | null): { coverage: "complete" | "unknown"; clipInputs: string[] };
 };
-export function snapshotObservationPrimitives<Install extends boolean = false>(install?: Install): Install extends true ? 2 : ObservationPrimitives;
+export function snapshotObservationPrimitives<Install extends boolean = false>(install?: Install, worldIdentity?: string): Install extends true ? 2 : ObservationPrimitives;
