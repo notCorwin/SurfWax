@@ -10,6 +10,14 @@ export const USER_SCRIPTS_WORLDS_KEY = "side-agent:user-script-worlds";
 export const USER_SCRIPTS_LEGACY_KEY = "side-agent:user-scripts-unparsed";
 export const USER_SCRIPTS_DISABLED_KEY = "side-agent:user-scripts-disabled";
 
+function scriptRevisions(value: unknown): Record<string, string> {
+  const revisions: Record<string, string> = Object.create(null);
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [id, revision] of Object.entries(value)) if (typeof revision === "string") revisions[id] = revision;
+  }
+  return revisions;
+}
+
 type UserScriptsApi = Pick<typeof chrome.userScripts, "getScripts" | "register" | "unregister">
   & Partial<Pick<typeof chrome.userScripts, "getWorldConfigurations" | "configureWorld">>;
 type UserScriptsChrome = {
@@ -131,7 +139,7 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       const script = disabled.find((item) => item.id === id) ?? active.find((item) => item.id === id);
       if (!script) throw new Error("找不到该脚本。");
       const enabled = !disabled.some((item) => item.id === id);
-      return method === "readForEdit" ? { script, enabled, revision: stored[USER_SCRIPTS_REVISION_KEY] ?? null } : { script, enabled };
+      return method === "readForEdit" ? { script, enabled, revision: scriptRevisions(stored[USER_SCRIPTS_REVISION_KEY])[id] ?? null } : { script, enabled };
     }
     if (!chromeApi.userScripts) throw new Error("Allow User Scripts 未开启，或 Chrome 不支持该操作。");
     if (!["replace", "setEnabled", "delete", "create", "edit"].includes(method)) throw new Error("不支持的脚本操作。");
@@ -159,6 +167,8 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
     const disabledScript = disabled.find((item) => item.id === scriptIdValue);
     const previous = (await chromeApi.userScripts.getScripts({ ids: [scriptIdValue] }))[0];
     const declared = disabledScript ?? savedScript;
+    const revisions = scriptRevisions(stored[USER_SCRIPTS_REVISION_KEY]);
+    const previousRevision = Object.hasOwn(revisions, scriptIdValue) ? revisions[scriptIdValue] : null;
     let next: chrome.userScripts.RegisteredUserScript | undefined;
     let enabled = false;
 
@@ -171,7 +181,7 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       if (method === "replace") {
         const baseline = args[1] as { script?: unknown; enabled?: unknown; revision?: unknown } | undefined;
         if (!baseline || JSON.stringify(baseline.script) !== JSON.stringify(declared)
-          || baseline.enabled !== !disabledScript || baseline.revision !== (stored[USER_SCRIPTS_REVISION_KEY] ?? null)) {
+          || baseline.enabled !== !disabledScript || baseline.revision !== previousRevision) {
           throw new Error("脚本已更改或删除，请复制草稿后刷新并重新编辑。");
         }
       }
@@ -215,10 +225,20 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       const changes: Record<string, unknown> = {};
       if (JSON.stringify(saved) !== JSON.stringify(activeNext)) changes[USER_SCRIPTS_STORAGE_KEY] = activeNext;
       if (JSON.stringify(disabled) !== JSON.stringify(disabledNext)) changes[USER_SCRIPTS_DISABLED_KEY] = disabledNext;
-      const revision = crypto.randomUUID();
-      changes[USER_SCRIPTS_REVISION_KEY] = revision;
-      await chromeApi.storage.local.set(changes);
-      return { id: scriptIdValue, enabled, ...(method === "replace" && next ? { baseline: { script: next, enabled, revision } } : {}) };
+      const changed = JSON.stringify(declared) !== JSON.stringify(next) || (declared && enabled !== !disabledScript);
+      let revision = previousRevision;
+      if (changed) {
+        if (next) {
+          revision = crypto.randomUUID();
+          revisions[scriptIdValue] = revision;
+        } else {
+          delete revisions[scriptIdValue];
+          revision = null;
+        }
+        changes[USER_SCRIPTS_REVISION_KEY] = revisions;
+      }
+      if (Object.keys(changes).length) await chromeApi.storage.local.set(changes);
+      return { id: scriptIdValue, enabled, ...((method === "replace" || method === "create") && next ? { baseline: { script: next, enabled, revision } } : {}) };
     } catch (error) {
       // Storage is still authoritative. Restore the previous projection when
       // possible; startup reconciliation repairs an interrupted rollback.

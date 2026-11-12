@@ -263,14 +263,8 @@ export function ScriptsApp() {
         catch (cause) { formatWarning = scriptError(cause); }
       }
       const result = selected ? await call("replace", script, editBaseline.current) : await call("create", script);
-      if (selected) {
-        editBaseline.current = result.baseline;
-        choose(script, true);
-      } else {
-        const baseline = await call("readForEdit", script.id);
-        editBaseline.current = baseline;
-        choose(baseline.script, true);
-      }
+      editBaseline.current = result.baseline;
+      choose(script, true);
       await refresh();
       setMessage(formatWarning ? "脚本已保存，但代码未格式化。" : "脚本已保存");
       if (formatWarning) setError(formatWarning);

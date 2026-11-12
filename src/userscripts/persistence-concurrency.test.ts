@@ -17,7 +17,15 @@ it("protects stale replacements and preserves native projection through failures
   const call = (method: string, ...args: unknown[]) => callUserScripts(method, args, { chromeApi });
   const script = { id: "one", matches: ["https://example.com/*"], js: [{ code: "1" }] };
   try {
-    await call("create", script);
+    const created = await call("create", script) as { baseline: { script: typeof script; enabled: boolean; revision: string } };
+    expect(created.baseline.script).toEqual(script);
+    expect(created.baseline.enabled).toBe(true);
+    expect(created.baseline.revision).toBeTruthy();
+    const other = { ...script, id: "other" };
+    await call("create", other);
+    await call("edit", { id: "other", changes: { js: [{ code: "other change" }] } });
+    await call("setEnabled", { id: "one", enabled: true });
+    await call("replace", script, created.baseline);
     const old = await call("readForEdit", "one");
     await call("delete", { id: "one" });
     register.mockClear();
@@ -27,21 +35,22 @@ it("protects stale replacements and preserves native projection through failures
     await expect(call("replace", script, old)).rejects.toThrow("脚本已更改或删除");
     const draft = await call("readForEdit", "one");
     await call("edit", { id: "one", changes: { js: [{ code: "2" }] } });
+    await expect(call("replace", script, created.baseline)).rejects.toThrow("脚本已更改或删除");
     await expect(call("replace", script, draft)).rejects.toThrow("脚本已更改或删除");
     const beforeToggle = await call("readForEdit", "one");
     await call("setEnabled", { id: "one", enabled: false });
     await expect(call("replace", script, beforeToggle)).rejects.toThrow("脚本已更改或删除");
     const disabled = await call("readForEdit", "one");
     await call("replace", { ...script, js: [{ code: "3" }] }, disabled);
-    expect(native).toEqual([]);
+    expect(native.find(s => s.id === "one")).toBeUndefined();
     expect((await call("read", "one") as { enabled: boolean }).enabled).toBe(false);
     await call("setEnabled", { id: "one", enabled: true });
     const baseline = await call("readForEdit", "one");
     failSet = true;
     await expect(call("replace", script, baseline)).rejects.toThrow("storage failure");
-    expect(native[0].js).toEqual([{ code: "3" }]);
+    expect(native.find(s => s.id === "one")?.js).toEqual([{ code: "3" }]);
     expect((await call("read", "one") as { script: typeof script }).script.js).toEqual([{ code: "3" }]);
     await call("replace", script, await call("readForEdit", "one"));
-    expect(native[0].js).toEqual(script.js);
+    expect(native.find(s => s.id === "one")?.js).toEqual(script.js);
   } finally { vi.unstubAllGlobals(); }
 });
