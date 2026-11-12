@@ -18,6 +18,8 @@ export type ConversationTransport = {
     abortSignal?: AbortSignal;
     runLease?: ConversationRunLease;
     messageId?: string;
+    expectedEpoch?: string;
+    onAccepted?: () => void;
     onMessage?: (message: SidePanelMessage, priorMessages?: SidePanelMessage[]) => void | Promise<void>;
   }): Promise<SidePanelMessage>;
 };
@@ -146,17 +148,20 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         if (userMessage && dispatched) {
           const index = initial.findIndex((message) => message.id === userMessage.id);
           await logger.appendFollowupSubmission({ conversationId, runId: currentRunId, chatId: options.chatId,
-            message: userMessage as ConversationMessage, parentId: index > 0 ? initial[index - 1]!.id : null, followup: dispatched });
+            message: userMessage as ConversationMessage, parentId: index > 0 ? initial[index - 1]!.id : null, followup: dispatched, expectedEpoch: options.expectedEpoch });
         } else {
           if (userMessage && !existing.messages.some(({ message }) => message.id === userMessage.id)) {
             const index = initial.findIndex((message) => message.id === userMessage.id);
             await logger.appendMessage(conversationId, userMessage as ConversationMessage, {
-              runId: currentRunId, parentId: index > 0 ? initial[index - 1]!.id : null,
+              runId: currentRunId, parentId: index > 0 ? initial[index - 1]!.id : null, expectedEpoch: options.expectedEpoch,
             });
           }
-          await logger.append({ type: "conversation.submitted", conversationId, runId: currentRunId,
-            content: { chatId: options.chatId, messageId: userMessage?.id ?? null } });
+          const submission = { type: "conversation.submitted", conversationId, runId: currentRunId,
+            content: { chatId: options.chatId, messageId: userMessage?.id ?? null } };
+          if (!await (options.expectedEpoch === undefined ? logger.append(submission) : logger.appendIfEpoch(submission, options.expectedEpoch)))
+            throw new Error("日志正在维护，请稍后重试。");
         }
+        options.onAccepted?.();
         let attempt = 0;
         let phase = 0;
         let resumed = false;

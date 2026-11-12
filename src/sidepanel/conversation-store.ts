@@ -268,11 +268,12 @@ export class ConversationStore {
         .flatMap((part) => part.type === "text" ? [part.text] : []).join("\n") ?? "",
       reload: () => { const item = this.repository.messages.find((entry) => entry.message.id === id);
         if (item?.parentId) return this.thread.startRun({ parentId: item.parentId }); },
-      switchToBranch: ({ position }: { position: "previous" | "next" }) => withIdleConversation(async () => {
+      switchToBranch: async ({ position }: { position: "previous" | "next" }) => {
+        const epoch = await this.logger.canonicalEpoch();
+        return withIdleConversation(async () => {
         if (this.state.thread.isRunning || this.state.thread.isLoading) return;
         const item = this.repository.messages.find((entry) => entry.message.id === id);
         if (!item) return;
-        this.remember(this.repository.headId);
         const siblings = this.repository.messages.filter((entry) => entry.parentId === item.parentId);
         let head = siblings[siblings.indexOf(item) + (position === "previous" ? -1 : 1)]?.message.id;
         if (!head) return;
@@ -285,10 +286,13 @@ export class ConversationStore {
           if (!next) break;
           head = next.message.id;
         }
-        await this.logger.append({ type: "conversation.branch.selected", conversationId: this.state.threadListItem.id, content: { headId: head } });
+        const saved = await this.logger.appendIfEpoch({ type: "conversation.branch.selected", conversationId: this.state.threadListItem.id, content: { headId: head } }, epoch);
+        if (!saved) throw new Error("日志正在维护，请稍后重试。");
+        this.remember(this.repository.headId);
         this.repository = { ...this.repository, headId: head };
         this.display(branchMessages(this.repository));
-      }),
+        });
+      },
     }),
   };
   threads = {
@@ -318,11 +322,23 @@ export class ConversationStore {
     switchToNewThread: () => withIdleConversation(() => this.switchConversation(crypto.randomUUID(), false)),
     switchToThread: (id: string) => withIdleConversation(() => this.switchConversation(id, true)),
     item: ({ id }: { id: string }) => ({
-      rename: (title: string) => withIdleConversation(() => this.logger.append({ type: "conversation.title.updated", conversationId: id, content: { title: title.trim() || "新对话", source: "manual" } })),
-      delete: () => withIdleConversation(async () => { await abortConversationWork(id); await this.logger.deleteConversation(id);
-        if (this.state.threadListItem.id === id) await this.switchConversation(crypto.randomUUID(), false); }),
+      rename: async (title: string) => {
+        const epoch = await this.logger.canonicalEpoch();
+        return withIdleConversation(async () => {
+          const saved = await this.logger.appendIfEpoch({ type: "conversation.title.updated", conversationId: id, content: { title: title.trim() || "新对话", source: "manual" } }, epoch);
+          if (!saved) throw new Error("日志正在维护，请稍后重试。");
+        });
+      },
+      delete: async () => {
+        const epoch = await this.logger.canonicalEpoch();
+        return withIdleConversation(async () => { await abortConversationWork(id); await this.logger.deleteConversation(id, epoch);
+          if (this.state.threadListItem.id === id) await this.switchConversation(crypto.randomUUID(), false); });
+      },
     }),
-    restore: (id: string) => withIdleConversation(() => this.logger.restoreConversation(id)),
+    restore: async (id: string) => {
+      const epoch = await this.logger.canonicalEpoch();
+      return withIdleConversation(() => this.logger.restoreConversation(id, epoch));
+    },
   };
   private refreshExternal(): Promise<void> {
     this.externalDirty = true;
@@ -385,6 +401,7 @@ export class ConversationStore {
     let priorFailureEventId = 0;
     let accepted = false;
     try {
+      const epoch = await this.logger.canonicalEpoch();
       lease = await claimConversationRun(id, controller.signal);
       const summary = await this.logger.summaryEvents(id);
       if (summary.some(event => event.type === "conversation.deleted") && !new ConversationListProjection().reset(summary).some(item => item.id === id))
@@ -397,20 +414,20 @@ export class ConversationStore {
       messages = trigger === "submit-message" ? [...history, messages.at(-1)!] : history;
       this.display(messages);
       if (!events.some((event) => event.type === "conversation.message") && !this.state.threadListItem.remoteId) {
-        await this.logger.append({ type: "conversation.created", conversationId: id, content: { title: "新对话" } });
+        if (!await this.logger.appendIfEpoch({ type: "conversation.created", conversationId: id, content: { title: "新对话" } }, epoch))
+          throw new Error("日志正在维护，请稍后重试。");
         this.publish({ threadListItem: { id, remoteId: id } });
       }
       const user = messages.at(-1);
       if (user?.role === "user" && !followupDispatch(user) && !this.repository.messages.some((item) => item.message.id === user.id)) {
-        await this.logger.appendMessage(id, { ...user }, { parentId: messages.at(-2)?.id ?? null });
+        await this.logger.appendMessage(id, { ...user }, { parentId: messages.at(-2)?.id ?? null, expectedEpoch: epoch });
       }
-      accepted = true;
-      onAccepted?.();
       priorFailureEventId = Math.max(0, ...events
         .filter((event) => event.type === "conversation.failed").map((event) => event.id));
       controller.signal.throwIfAborted();
       const modelMessages = messages.filter((message) => !isSyntheticTerminalMessage(message));
-      await this.transport(id).sendMessages({ trigger, chatId: id, messages: modelMessages, abortSignal: controller.signal, runLease: lease,
+      await this.transport(id).sendMessages({ trigger, chatId: id, messages: modelMessages, abortSignal: controller.signal, runLease: lease, expectedEpoch: epoch,
+        onAccepted: () => { accepted = true; onAccepted?.(); },
         onMessage: (message, prior = []) => { if (!controller.signal.aborted) this.display([...messages, ...prior, message], message.id); } });
     } catch (error) { if (!controller.signal.aborted) failure = error; }
     finally {

@@ -1347,13 +1347,14 @@ export class EventLogger {
     this.bufferTimer ??= setTimeout(() => this.flushBuffer(), 16);
   }
 
-  async appendMessage(conversationId: string, message: ConversationMessage, options: { runId?: string; parentId?: string | null; changedParts?: readonly number[] } = {}): Promise<void> {
+  async appendMessage(conversationId: string, message: ConversationMessage, options: { runId?: string; parentId?: string | null; changedParts?: readonly number[]; expectedEpoch?: string } = {}): Promise<void> {
     const key = JSON.stringify([conversationId, message.id]);
     const priorWrite = this.messageWrites.get(key) ?? Promise.resolve();
     const write = priorWrite.then(async () => {
       if (this.fatalError !== undefined) throw this.fatalError;
       if (!this.accepting) throw new DOMException("日志维护已阻止消息保存。", "AbortError");
       const epoch = await this.canonicalEpoch();
+      if (options.expectedEpoch !== undefined && options.expectedEpoch !== epoch) throw new Error("日志正在维护，请稍后重试。");
       let previous = this.messageHeads.get(key);
       if (previous?.epoch !== epoch) previous = undefined;
       if (options.changedParts?.some((index) => !Number.isSafeInteger(index) || index < 0 || index >= message.parts.length)) throw new Error("Invalid changed message part index");
@@ -1365,7 +1366,7 @@ export class EventLogger {
         content: previous ? { ...message, parts: indices.map((index) => message.parts[index]) } : message });
       if (previous) prepared.messagePatch = { baseId: previous.event.id, partsLength: message.parts.length, indices };
       this.flushBuffer();
-      const [saved] = await this.enqueue([prepared]);
+      const [saved] = await this.enqueue([prepared], epoch);
       if (!saved) throw new DOMException("日志维护已阻止消息保存。", "AbortError");
       const full = materializeMessageEvent(saved, previous?.event);
       this.rememberMessage(full, encodedMessageFields(full) as ConversationMessage, epoch);
@@ -1376,7 +1377,7 @@ export class EventLogger {
 
   /** A follow-up leaves its queue only when its message and run are durable. */
   async appendFollowupSubmission(input: { conversationId: string; runId: string; chatId: string; message: ConversationMessage;
-    parentId: string | null; followup: { id: string; mode: "followup" | "immediate" } }): Promise<void> {
+    parentId: string | null; followup: { id: string; mode: "followup" | "immediate" }; expectedEpoch?: string }): Promise<void> {
     if (this.fatalError !== undefined) throw this.fatalError;
     if (!this.accepting) throw new DOMException("日志维护已阻止后续消息发送。", "AbortError");
     this.flushBuffer();
@@ -1385,7 +1386,7 @@ export class EventLogger {
       this.event({ type: "conversation.message", conversationId, runId, parentId, content: message }),
       this.event({ type: "conversation.followup.dispatched", conversationId, runId, content: followup }),
       this.event({ type: "conversation.submitted", conversationId, runId, content: { chatId: input.chatId, messageId: message.id } }),
-    ], undefined, undefined, undefined, [], true);
+    ], input.expectedEpoch, undefined, undefined, [], true);
     if (saved.length !== 3) throw new Error("后续消息已发送、移除或日志正在维护。");
   }
 
@@ -1838,12 +1839,18 @@ export class EventLogger {
       : (await store.all()).filter((event) => event.id > floor && event.conversationId === conversationId)));
   }
 
-  async deleteConversation(conversationId: string): Promise<void> {
-    await this.append({ type: "conversation.deleted", conversationId, content: null });
+  async deleteConversation(conversationId: string, epoch?: string): Promise<void> {
+    const saved = epoch === undefined
+      ? await this.append({ type: "conversation.deleted", conversationId, content: null })
+      : await this.appendIfEpoch({ type: "conversation.deleted", conversationId, content: null }, epoch);
+    if (!saved) throw new Error("日志正在维护，请稍后重试。");
   }
 
-  async restoreConversation(conversationId: string): Promise<void> {
-    await this.append({ type: "conversation.restored", conversationId, content: null });
+  async restoreConversation(conversationId: string, epoch?: string): Promise<void> {
+    const saved = epoch === undefined
+      ? await this.append({ type: "conversation.restored", conversationId, content: null })
+      : await this.appendIfEpoch({ type: "conversation.restored", conversationId, content: null }, epoch);
+    if (!saved) throw new Error("日志正在维护，请稍后重试。");
   }
 
   private async artifactForCall(event: LogEvent, events: readonly LogEvent[], source?: { store: EventStore; floor: number }): Promise<{ id: number } | undefined> {

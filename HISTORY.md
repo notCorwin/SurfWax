@@ -617,3 +617,11 @@ Excalidraw 的编辑、文件导出与恢复尚未完成准入，其初步 oracl
 已明确选定 frame 后，区域选择器在该 frame 内执行；若选择器无匹配，检查工具提示使用同一 frame 的 `html` 区域，而不切回主文档。失效 frame 和导航变化仍按原守卫报错。点击的 `performed` 表示浏览器输入已执行，异步业务状态仍须通过后续观察或 `verify_state` 确认；此说明不增加等待或重试。工具目录语义变更时递增版本。
 
 来源：`src/chrome/automation.ts`、`src/chrome/tool.ts`、`src/chrome/atomic-tools.ts`。
+
+### 会话运行身份与命令持久性
+
+会话列表仅让最新提交的运行终态改变运行状态；缺少提交记录的旧历史保留终态投影，未知运行身份的提交仅匹配未知身份终态。创建事件重置运行身份；恢复旧运行仍将其终态写入 canonical 日志。
+
+会话重命名、删除、恢复和分支切换以提交回执作为成功条件，并以命令进入时的日志代次拒绝跨清空的迟到写入。消息和运行提交同样绑定代次，草稿仅在运行提交持久化后清除。诊断及取消路径仍可使用允许无回执的普通追加；维护失败恢复后可重新执行命令。
+
+来源：`src/logging.ts`、`src/sidepanel/conversation-store.ts`、`src/agent/transport.ts`。
