@@ -618,6 +618,14 @@ Excalidraw 的编辑、文件导出与恢复尚未完成准入，其初步 oracl
 
 来源：`src/chrome/automation.ts`、`src/chrome/tool.ts`、`src/chrome/atomic-tools.ts`。
 
+### 观察 world 与用户脚本隔离
+
+2026-11-12 Chrome 为本扩展的 ISOLATED、默认 USER_SCRIPT 和具名用户脚本 world 提供相同的扩展来源与名称，不能据此选择观察上下文。2026-11-13 复核拒绝了候选 world 属性读取方案：即使随机身份不可伪造，读取也会执行候选访问器。身份现在仅由可信 ISOLATED 注入携带随机挑战，并通过原生 console 事件回执其 context；不执行或枚举未知 world 的对象、访问器或 Proxy。只有完整匹配当前有效 pending challenge 的内部回执由执行器消费，其他 console 内容不变。唯一匹配的 context 绑定现有文档、frame 和生命周期缓存；取消、导航或无法确认唯一身份时明确失败，不任选候选或回退到页面 world。新增其他隔离 world 本身不代表根文档替换，原有文档、context 销毁和读取一致性守卫继续生效。
+
+未完成的 helper 初始化由发起操作持有：该操作取消时立即移除其缓存和回执归属，下一次同文档观察重新初始化，不等待旧原生请求。旧请求仍须接受原 scope 与对象归属校验，迟到完成不得删除或绑定新状态；监听器在取消或完成后移除。已完成且文档有效的 helper 缓存不再持有发起操作的 signal，也不因成功调用收尾时的 abort 被丢弃。
+
+来源：`src/chrome/automation.ts`、`src/chrome/executor.ts`、`src/chrome/snapshot-observation-primitives.js`、`e2e/userscript-observation.spec.ts`。
+
 ### 设置草稿冲突保护
 
 设置页保存以读取时的原始持久化配置为基线，在跨上下文锁内比较并写入。其他页面或路由迁移先写入时，保留草稿并提示用户复制后重新加载；不自动合并不同字段。迁移使用同一锁，避免检查后被其他写入抢占。

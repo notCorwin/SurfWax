@@ -137,7 +137,7 @@ type ObservationRecord = {
 };
 type IsolatedFrameRead = { objectId: string; executionContextId: number; frameId: string; guard: () => void };
 type AccessibilityRead = { world: IsolatedFrameRead; documentBackend: number; documentId: string; nodes: Map<string, any>; backends: Map<number, any[]> };
-type ObservationContext = { id: number; uniqueId: string; frameId: string; extension: boolean };
+type ObservationContext = { id: number; uniqueId: string; frameId: string; candidate: boolean };
 type RootReadScope = { frameId: string; loaderId?: string; revision: number; context?: ObservationContext; signal?: AbortSignal };
 type Session = {
   tabId: number;
@@ -168,7 +168,8 @@ type Session = {
   lastSnapshot?: SnapshotLine[];
   snapshotStyleProfile?: { generation: number; computedStyles: readonly string[] };
   rootDocumentRevision: number;
-  observationPrimitives?: RootReadScope & { ready: Promise<void> };
+  observationPrimitives?: RootReadScope & { ready: Promise<void>; pending: boolean; abandon?: () => void };
+  observationReceipt?: { identity: string; scope: RootReadScope; matches: Set<ObservationContext> };
   observationContexts: Map<number, ObservationContext>;
   nativeControlCandidates?: NativeControlCandidates & { frameId: string; loaderId?: string };
 };
@@ -765,26 +766,42 @@ export class AutomationRuntime {
     return false;
   }
 
-  handleEvent(source: Debuggee, method: string, params: any): void {
+  handleEvent(source: Debuggee, method: string, params: any): true | void {
     const tabId = source.tabId;
     if (!Number.isInteger(tabId)) return;
     const session = this.sessions.get(tabId!);
     // Events already queued by a retired target must not restore stale frames,
     // overwrite their ancestry, or detach a replacement target.
     if (source.sessionId && session?.retiredTargetSessions?.has(source.sessionId)) return;
+    const receipt = session?.observationReceipt;
+    if (session && !source.sessionId && receipt && method === "Runtime.consoleAPICalled"
+      && params?.type === "debug" && params.args?.length === 2
+      && params.args[0]?.type === "string" && params.args[0].value === "surf-wax.observation-world.v1"
+      && params.args[1]?.type === "string" && params.args[1].value === receipt.identity) {
+      const { scope } = receipt, context = session.observationContexts.get(params.executionContextId);
+      if (!scope.signal?.aborted && !session.lifetime.signal.aborted
+        && session.rootFrameId === scope.frameId && session.rootDocumentRevision === scope.revision
+        && session.frameLoaders.get(scope.frameId) === scope.loaderId
+        && (!scope.context || session.observationContexts.get(scope.context.id) === scope.context)
+        && context?.candidate && context.frameId === scope.frameId) {
+        receipt.matches.add(context);
+        return true;
+      }
+    }
     if (session && !source.sessionId && method === "Runtime.executionContextCreated") {
       const context = params?.context, auxiliary = context?.auxData, extensionId = this.options.chromeApi.runtime?.id;
       if (typeof auxiliary?.frameId === "string" && Number.isSafeInteger(context?.id) && typeof context.uniqueId === "string") {
-        const extension = Boolean(this.options.observationWorldName && context.name === this.options.observationWorldName
+        const candidate = Boolean(this.options.observationWorldName && context.name === this.options.observationWorldName
           && auxiliary.type === "isolated" && auxiliary.isDefault === false) || Boolean(extensionId && typeof context.origin === "string"
           && context.origin.replace(/\/$/, "") === `chrome-extension://${extensionId}`
           && auxiliary.type === "isolated" && auxiliary.isDefault === false);
         const previous = session.observationContexts.get(context.id);
-        if (previous?.uniqueId !== context.uniqueId || previous?.frameId !== auxiliary.frameId || previous?.extension !== extension) {
-          const replacedRoot = auxiliary.frameId === session.rootFrameId && (previous || extension
-            && [...session.observationContexts.values()].some((value) => value.extension && value.frameId === auxiliary.frameId));
+        if (previous?.uniqueId !== context.uniqueId || previous?.frameId !== auxiliary.frameId || previous?.candidate !== candidate) {
+          // Another isolated world (including USER_SCRIPT) does not replace
+          // the document or the already identified observation world.
+          const replacedRoot = auxiliary.frameId === session.rootFrameId && previous;
           if (replacedRoot) session.rootDocumentRevision++;
-          session.observationContexts.set(context.id, { id: context.id, uniqueId: context.uniqueId, frameId: auxiliary.frameId, extension });
+          session.observationContexts.set(context.id, { id: context.id, uniqueId: context.uniqueId, frameId: auxiliary.frameId, candidate });
         }
       }
     }
@@ -798,6 +815,7 @@ export class AutomationRuntime {
       // An unknown context cannot be proved to belong to an unrelated child.
       if (!destroyed || destroyed.frameId === session.rootFrameId) {
         session.rootDocumentRevision++;
+        session.observationPrimitives?.abandon?.();
         delete session.observationPrimitives;
       }
       if (destroyed) session.observationContexts.delete(destroyed.id);
@@ -4286,25 +4304,69 @@ export class AutomationRuntime {
   }
 
   private extensionObservationContext(session: Session, frameId: string): ObservationContext | undefined {
-    const matches = [...session.observationContexts.values()].filter((context) => context.extension && context.frameId === frameId);
-    if (matches.length > 1) throw automationError("stale-observation", { reason: "ambiguous-extension-observation-context" });
-    return matches[0];
+    const context = session.observationPrimitives?.context;
+    return context?.frameId === frameId && session.observationContexts.get(context.id) === context ? context : undefined;
   }
 
   /** Install pure helpers once per root document, independent of child frames. */
   private prepareObservationPrimitives(session: Session): Promise<void> {
     const scope = this.rootReadScope(session), previous = session.observationPrimitives;
-    if (previous && previous.frameId === scope.frameId && previous.loaderId === scope.loaderId && previous.revision === scope.revision)
+    if (previous && previous.frameId === scope.frameId && previous.loaderId === scope.loaderId && previous.revision === scope.revision
+      && (!previous.pending || !previous.signal?.aborted))
       return previous.ready;
-    const ready = this.options.chromeApi.scripting.executeScript({
-      target: { tabId: session.tabId, frameIds: [0] }, world: "ISOLATED", func: snapshotObservationPrimitives as (install: true) => 2, args: [true],
-    }).then((results) => {
+    previous?.abandon?.();
+    const receipt = { identity: crypto.randomUUID(), scope, matches: new Set<ObservationContext>() };
+    const removeAbortListeners = () => {
+      scope.signal?.removeEventListener("abort", abandon);
+      session.lifetime.signal.removeEventListener("abort", abandon);
+    };
+    const abandon = () => {
+      if (!cached.pending) return;
+      removeAbortListeners();
+      if (session.observationPrimitives === cached) delete session.observationPrimitives;
+      if (session.observationReceipt === receipt) delete session.observationReceipt;
+    };
+    session.observationReceipt = receipt;
+    const ready = Promise.resolve().then(() => {
+      this.assertRootReadScope(session, scope);
+      return this.options.chromeApi.scripting.executeScript({
+        target: { tabId: session.tabId, frameIds: [0] }, world: "ISOLATED",
+        func: snapshotObservationPrimitives as (install: true, observationReceipt: string) => 2, args: [true, receipt.identity],
+      });
+    }).then(async (results) => {
+      this.assertRootReadScope(session, scope);
+      if (session.observationPrimitives !== cached || session.observationReceipt !== receipt)
+        throw automationError("stale-observation", { reason: "observation-context-changed-during-read" });
       if (results.length !== 1 || results[0]?.frameId !== 0 || results[0].result !== 2)
         throw automationError("snapshot-unavailable", { reason: "observation-primitives-unavailable" });
+      // Only the trusted ISOLATED injection receives the fresh challenge.
+      // Its native console receipt identifies that context without executing
+      // or inspecting properties in any candidate world. This metadata-only
+      // command settles the preceding native events without evaluating JS.
+      await this.options.command(session.debuggee, "Page.getFrameTree", {});
+      this.assertRootReadScope(session, scope);
+      const matches = [...receipt.matches].filter(context => session.observationContexts.get(context.id) === context);
+      if (session.observationReceipt !== receipt) throw automationError("stale-observation", { reason: "observation-context-changed-during-read" });
+      if (matches.length !== 1) throw automationError("snapshot-unavailable", { reason: "observation-context-identity-unavailable" });
+      cached.context = matches[0];
+      cached.pending = false;
+    }).finally(() => {
+      // Abort only abandons unfinished work. A completed, document-valid
+      // helper survives the successful caller's deadline-controller cleanup.
+      abandon();
+      removeAbortListeners();
+      delete cached.abandon;
+      delete cached.signal;
+      if (session.observationReceipt === receipt) delete session.observationReceipt;
     });
-    const cached = { frameId: scope.frameId, loaderId: scope.loaderId, revision: scope.revision, ready };
+    const cached: NonNullable<Session["observationPrimitives"]> = { frameId: scope.frameId, loaderId: scope.loaderId,
+      revision: scope.revision, signal: scope.signal, ready, pending: true, abandon };
     session.observationPrimitives = cached;
-    void ready.catch(() => { if (session.observationPrimitives === cached) delete session.observationPrimitives; });
+    scope.signal?.addEventListener("abort", abandon, { once: true });
+    session.lifetime.signal.addEventListener("abort", abandon, { once: true });
+    if (scope.signal?.aborted || session.lifetime.signal.aborted) abandon();
+    // A cancelled capture may have returned before this native work settles.
+    void ready.catch(() => undefined);
     return ready;
   }
 

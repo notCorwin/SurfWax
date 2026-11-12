@@ -284,8 +284,8 @@ export class ChromeExecutor {
         void this.handleCommandEvent(source, method, params);
         this.automation.handleEvent(source, method, params);
       } else {
-        this.automation.handleEvent(source, method, params);
-        void this.handleCommandEvent(source, method, params);
+        if (this.automation.handleEvent(source, method, params) !== true)
+          void this.handleCommandEvent(source, method, params);
       }
     });
     listeners.onDetach.add((source) => {

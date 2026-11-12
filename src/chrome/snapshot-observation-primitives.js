@@ -1,5 +1,5 @@
 /** Self-contained so Chrome can install the same algorithms in an isolated world. */
-export function snapshotObservationPrimitives(install = false) {
+export function snapshotObservationPrimitives(install = false, observationReceipt) {
   const get = (style, name) => typeof style?.getPropertyValue === "function" ? style.getPropertyValue(name).trim() : String(style?.[name] ?? "").trim();
   const finiteRect = (r) => r && [r.left, r.top, r.right, r.bottom].every(Number.isFinite) && r.right > r.left && r.bottom > r.top;
   const within = (r, b) => r.left >= b.left && r.top >= b.top && r.right <= b.right && r.bottom <= b.bottom;
@@ -256,6 +256,10 @@ export function snapshotObservationPrimitives(install = false) {
     const mask = maskStatus(style, box, rects), clip = clipStatus(style, box, rects);
     return mask === "opaque" && clip === "opaque" ? "complete" : mask === "transparent" || clip === "transparent" ? "empty" : "unknown";
   }, neutralGeometry };
-  if (install) { globalThis[Symbol.for("surf-wax.snapshot-observation-primitives.v2")] = api; return api.version; }
+  if (install) {
+    globalThis[Symbol.for("surf-wax.snapshot-observation-primitives.v2")] = api;
+    if (typeof observationReceipt === "string") console.debug("surf-wax.observation-world.v1", observationReceipt);
+    return api.version;
+  }
   return api;
 }
