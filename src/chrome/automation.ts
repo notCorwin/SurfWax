@@ -2933,7 +2933,7 @@ export class AutomationRuntime {
     }
   }
 
-  private async resolveOnce(session: Session, spec: LocatorSpec, observe?: (matches: Candidate[]) => void, immediate = false): Promise<string | undefined> {
+  private async resolveOnce(session: Session, spec: LocatorSpec, observe?: (matches: Candidate[]) => void, immediate = false, includeUnbound = false): Promise<string | undefined> {
     if (spec.ref && standaloneRef(spec)) {
       const { ref, objectId } = await this.resolveRef(session, spec.ref);
       observe?.([{ role: ref.role, name: ref.name, ref: spec.ref }]);
@@ -2944,7 +2944,7 @@ export class AutomationRuntime {
     try {
     const resolve = async (): Promise<string | undefined> => {
     if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
-      const matches = await this.resolveAccessibility(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
+      const matches = await this.resolveAccessibility(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, undefined, includeUnbound);
       observe?.(matches);
       this.assertStrict(spec, matches);
       const match = matches[0];
@@ -3038,7 +3038,7 @@ export class AutomationRuntime {
   }
 
   private async resolveAccessibility(session: Session, debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string,
-    reads?: Map<string, Promise<AccessibilityRead>>): Promise<Candidate[]> {
+    reads?: Map<string, Promise<AccessibilityRead>>, includeUnbound = false): Promise<Candidate[]> {
     const contextId = rootObjectId ? this.objectContexts.get(rootObjectId) : undefined;
     const scopedDocument = rootObjectId ? [...this.frameDocuments.values()].find(entry => entry.session === session
       && entry.frame.debuggee.sessionId === debuggee.sessionId && entry.executionContextId === contextId) : undefined;
@@ -3093,7 +3093,7 @@ export class AutomationRuntime {
     const query = spec.queries[0]!, expected = semanticName(query.name ?? "");
     const equal = (actual: string) => query.exact ? actual === expected : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
     const matches = ordered.flatMap((node: any): Candidate[] => {
-      if (node.ignored || !Number.isSafeInteger(node.backendDOMNodeId) || node.backendDOMNodeId <= 0) return [];
+      if (node.ignored || !includeUnbound && (!Number.isSafeInteger(node.backendDOMNodeId) || node.backendDOMNodeId <= 0)) return [];
       const role = axValue(node.role), name = semanticName(axValue(node.name));
       return role === query.value && (query.name === undefined || equal(name)) ? [{ role, name, backendNodeId: node.backendDOMNodeId, debuggee }] : [];
     });
@@ -4592,7 +4592,8 @@ export class AutomationRuntime {
         retryGeneration = generation; retryFrameRevision = frameRevision; retriedUnstableCapture = false; speculativeDynamic = false; dynamicTextByTarget.clear();
       }
       const changed = () => generation !== session.generation || frameRevision !== session.frameRevision;
-      const regionTask = region ? this.resolveOnce(session, region) : undefined;
+      let regionCandidateCount: number | undefined;
+      const regionTask = region ? this.resolveOnce(session, region, matches => { regionCandidateCount = matches.length; }, false, true) : undefined;
       if (regionTask) void regionTask.then(async (objectId) => {
         if (!objectId || !signal?.aborted && !session.lifetime.signal.aborted && this.sessions.get(session.tabId) === session) return;
         const debuggee = this.objectDebuggees.get(objectId) ?? session.debuggee;
@@ -4613,7 +4614,7 @@ export class AutomationRuntime {
       guard();
       if (changed()) { await delay(0, signal); continue; }
       if (region && !regionNode?.node?.backendNodeId) throw automationError("not-found", { locator: region,
-        ...(!regionObject && region.queries.some(query => query.kind === "frame" || query.kind === "frameRef") ? { reason: "frame-region-no-match", recovery: 'The region selector runs inside the selected frame. To inspect the whole frame, use inspect_page with region:{by:"css",value:"html",frame:{ref:"<frameRef>"}} using the selected frame ref.' } : {}) });
+        ...(!regionObject && regionCandidateCount === 0 && region.queries.some(query => query.kind === "frame" || query.kind === "frameRef") ? { reason: "frame-region-no-match", recovery: 'The region selector runs inside the selected frame. To inspect the whole frame, use inspect_page with region:{by:"css",value:"html",frame:{ref:"<frameRef>"}} using the selected frame ref.' } : {}) });
       const depthOf = (frameId: string) => { let depth = 0; let current = session.frameParents.get(frameId); while (current) { depth += 1; current = session.frameParents.get(current); } return depth; };
       const childFrames = [...session.frames]
         .filter(([, debuggee]) => debuggee.sessionId)

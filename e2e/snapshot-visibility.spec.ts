@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, closeServer, type MockResponse } from "./fixtures";
+import { test, commandResponse, textResponse, delayedResponse, startProvider, openExtension, dispose, configure, readEvents, closeServer, type MockResponse } from "./fixtures";
 import { itemLine } from "./snapshot-format";
 import { manifestFixture } from "./evaluation/manifest-fixture";
 
@@ -848,16 +848,41 @@ test("frame region recovery stays within the selected document", async () => {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
     await target.evaluate(() => {
-      document.body.innerHTML = `<p>Root marker</p><iframe id="child" srcdoc="<p>Child marker</p>"></iframe><button id="navigate">Navigate</button>`;
+      document.body.innerHTML = `<p>Root marker</p><iframe id="child" srcdoc="<p>Child marker</p><button>Unbound candidate</button><button>Detached candidate</button>"></iframe><button id="navigate">Navigate</button>`;
       document.querySelector<HTMLButtonElement>("#navigate")!.onclick = () => { document.querySelector<HTMLIFrameElement>("#child")!.srcdoc = "<p>New child</p>"; };
     });
     await target.frameLocator("#child").getByText("Child marker").waitFor();
+    const worker = opened.context.serviceWorkers().find(worker => worker.url().startsWith("chrome-extension:"))!;
+    await worker.evaluate(() => {
+      const native = chrome.debugger.sendCommand.bind(chrome.debugger);
+      const state = { mode: "", backend: 0, unbound: 0, detached: 0 };
+      (globalThis as any).__frameScopeBoundary = state;
+      chrome.debugger.sendCommand = (async (...args: any[]) => {
+        const [, method, params] = args;
+        if (state.mode === "detached" && method === "DOM.resolveNode" && state.backend && params.backendNodeId === state.backend) {
+          state.mode = ""; state.detached++; throw new Error("No node with given id found");
+        }
+        const result = await (native as any)(...args);
+        if (method === "Accessibility.getFullAXTree" && state.mode) {
+          const name = state.mode === "unbound" ? "Unbound candidate" : "Detached candidate";
+          const node = result.nodes?.find((entry: any) => entry.name?.value === name && entry.role?.value === "button");
+          if (node && state.mode === "unbound") { delete node.backendDOMNodeId; state.unbound++; state.mode = ""; }
+          else if (node) state.backend = node.backendDOMNodeId;
+        }
+        return result;
+      }) as any;
+    });
     let frameRef = "";
     const region = (value: string, ref = frameRef) => ({ by: "css", value, frame: { ref } });
+    const injected = (mode: string, name: string, id: string) => delayedResponse(
+      commandResponse("inspect_page", { region: { by: "role", value: "button", name, frame: { ref: frameRef } }, timeoutMs: 3000 }, id), 0,
+      worker.evaluate(mode => { const state = (globalThis as any).__frameScopeBoundary; state.mode = mode; state.backend = 0; }, mode));
     responses.push(
       commandResponse("list_frames", {}, "scope-frames"),
       (request) => { const frames = lastTool(request).frames; frameRef = frames.find((frame: any) => frame.parentFrameRef)?.frameRef; return commandResponse("inspect_page", { region: region("iframe"), timeoutMs: 3000 }, "scope-missing"); },
       () => commandResponse("inspect_page", { region: region("html"), full: true }, "scope-html"),
+      (() => injected("unbound", "Unbound candidate", "scope-unbound")) as any,
+      (() => injected("detached", "Detached candidate", "scope-detached")) as any,
       commandResponse("inspect_page", { region: { by: "css", value: "#missing" }, timeoutMs: 3000 }, "scope-root"),
       () => commandResponse("inspect_page", { region: region("iframe", "invalid-frame"), timeoutMs: 3000 }, "scope-invalid"),
       commandResponse("click", { target: { by: "css", value: "#navigate" } }, "scope-navigate"),
@@ -871,6 +896,15 @@ test("frame region recovery stays within the selected document", async () => {
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FRAME_SCOPE_OK", { timeout: 45_000 });
     const events = await readEvents(opened.page);
     const event = (id: string) => events.find((entry) => ["tool.finished", "tool.failed"].includes(entry.type) && entry.toolCallId === id);
+    const boundary = await worker.evaluate(() => (globalThis as any).__frameScopeBoundary);
+    await test.info().attach("frame-scope-tool-returns", { body: Buffer.from(JSON.stringify({ boundary, events: Object.fromEntries(["scope-missing", "scope-html", "scope-unbound", "scope-detached", "scope-root", "scope-invalid", "scope-stale"].map(id => [id, event(id)])) }, null, 2)), contentType: "application/json" });
+    expect(boundary).toMatchObject({ unbound: 1, detached: 1 });
+    for (const id of ["scope-unbound", "scope-detached"]) {
+      const failure = event(id)!.output.error;
+      expect(failure.code).toBe("not-found");
+      expect(JSON.stringify(failure)).not.toContain("frame-region-no-match");
+      expect(failure.recovery).toContain("list_frames");
+    }
     const missing = event("scope-missing")!;
     expect(missing.output.error).toMatchObject({ code: "not-found", retryable: false });
     expect(missing.output.error.recovery).toContain("selector runs inside the selected frame");
