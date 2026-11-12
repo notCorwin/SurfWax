@@ -29,7 +29,6 @@ export async function runPublicTask(task: Task, timeoutMs: number): Promise<Outc
   const documents: DocumentEvidence[] = [];
   let nextPageId = 0;
   const pageTabs = new Map<number, number>();
-  const pageAssociations: Promise<void>[] = [];
   const navigationFailures: { url: string; error: string | null; duringTask: boolean }[] = [];
   let browser: string | null = null;
   let runError: string | null = null;
@@ -50,14 +49,14 @@ export async function runPublicTask(task: Task, timeoutMs: number): Promise<Outc
     browser = opened.context.browser()?.version() ?? null;
     const watch = (page: Page) => {
       const pageId = ++nextPageId;
-      pageAssociations.push((async () => {
+      void (async () => {
         const session = await opened!.context.newCDPSession(page);
         try {
           const { targetInfo } = await session.send("Target.getTargetInfo");
           const tabId = await opened!.page.evaluate(async id => (await chrome.debugger.getTargets()).find(target => target.id === id)?.tabId ?? null, targetInfo.targetId);
           if (tabId !== null) pageTabs.set(pageId, tabId);
         } finally { await session.detach(); }
-      })().catch(() => {}));
+      })().catch(() => {});
       page.on("dialog", () => {});
       page.on("response", response => {
         if (!response.request().isNavigationRequest() || response.request().resourceType() !== "document" || response.frame() !== page.mainFrame()) return;
@@ -101,14 +100,12 @@ export async function runPublicTask(task: Task, timeoutMs: number): Promise<Outc
   } finally {
     // Freeze one observation for both the summary and events.json.
     try {
-    await Promise.allSettled(pageAssociations);
-    for (const doc of documents) doc.tabId = pageTabs.get(doc.pageId) ?? null;
     const result = await finalizePublicEvidence({
       prior: events, hasObservation, read: opened && startedAt !== null ? () => readBounded(opened!.page, 5000) : undefined,
       persist: observation => writeFile(resolve(root, "events.json"), JSON.stringify(observation, null, 2), { flag: "wx", mode: 0o600 }),
       startedAt, deadlineAt, outcome, reason, runError, deadlineExpired,
       required: () => requiredUrls.map(url => ({ url, terms: task.evidenceTerms(expected, url), alternatives: task.evidenceUrls(url) })),
-      documents, navigationFailures, grade: value => task.grade(value, expected),
+      documents, navigationFailures, pageTabs, grade: value => task.grade(value, expected),
       redact: error => {
         let message = error instanceof Error ? error.message : "Evaluation operation failed";
         for (const value of [process.env.SURFWAX_EVAL_API_KEY, proxy?.token]) if (value) message = message.replaceAll(value, "[redacted]");
@@ -116,14 +113,14 @@ export async function runPublicTask(task: Task, timeoutMs: number): Promise<Outc
       },
     });
     ({ outcome, reason } = result);
-    const { capture, derivationError, derived } = result;
+    const { capture, derivationError, derived, metadata } = result;
     if (buildBefore) buildAfter = await buildFingerprint(resolve(process.env.SURFWAX_EXTENSION_PATH ?? "dist")).catch(() => null);
     if (outcome === "passed" && buildBefore?.sha256 !== buildAfter?.sha256) { outcome = "setup_failed"; reason = "Extension build changed during evaluation"; }
     const gitDirty = !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
     const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const report = { task: task.id, title: task.title, difficulty: task.difficulty, outcome, reason, runError, capture, derivationError, phase, gitHead: head, gitDirty, gitHeadAtStart, gitDirtyAtStart,
       model: process.env.SURFWAX_EVAL_MODEL, browser, timeoutMs, startedAt, deadlineAt, elapsedMs: startedAt ? Date.now() - startedAt : null,
-      buildBefore, buildAfter, sources: sources.map(({ body: _body, ...metadata }) => metadata), requiredUrls, documents, navigationFailures,
+      buildBefore, buildAfter, sources: sources.map(({ body: _body, ...metadata }) => metadata), requiredUrls, documents: metadata.documents, navigationFailures: metadata.navigationFailures,
       browsing: derived?.browsing ?? null, httpEvidence: derived?.http.map(({ text, ...metadata }) => ({ ...metadata, deliveredCharacters: text.length })) ?? null, snapshots: derived?.snapshots.map(({ text: _text, ...metadata }) => metadata) ?? null, finalAnswer: derived?.answer ?? null, correct: derived?.correct ?? null, lifecycle: derived?.lifecycle ?? null, jobs: derived?.jobs ?? null, effectCertainty: derived?.effectCertainty ?? null, readOnlyResearch: true, usage: derived?.usage ?? null, requests: structuredClone(proxy?.requests ?? []) };
       await writeFile(resolve(root, "report.json"), JSON.stringify(report, null, 2), { flag: "wx", mode: 0o600 });
       console.log(JSON.stringify({ outcome, reason, report: resolve(root, "report.json") }));

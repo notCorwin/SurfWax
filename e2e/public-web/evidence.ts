@@ -81,10 +81,16 @@ export async function finalizePublicEvidence(options: {
   outcome: "passed" | "failed" | "blocked" | "timed_out" | "setup_failed";
   reason: string; runError: string | null; deadlineExpired: boolean;
   required: () => { url: string; terms: string[]; alternatives: string[] }[];
-  documents: DocumentEvidence[]; navigationFailures: { url: string; duringTask: boolean }[];
+  documents: DocumentEvidence[]; navigationFailures: { url: string; error?: string | null; duringTask: boolean }[];
+  pageTabs?: ReadonlyMap<number, number>;
   grade: (value: unknown) => boolean;
   redact: (error: unknown) => string;
 }) {
+  // Auxiliary associations are best effort: snapshot only what has completed now.
+  const metadata = {
+    documents: options.documents.map(doc => ({ ...doc, tabId: options.pageTabs ? options.pageTabs.get(doc.pageId) ?? null : doc.tabId })),
+    navigationFailures: options.navigationFailures.map(failure => ({ ...failure })),
+  };
   let events = options.prior, hasObservation = options.hasObservation;
   let capture: { status: "not_attempted" | "succeeded" | "failed"; error: string | null; hasObservation: boolean } = { status: "not_attempted", error: null, hasObservation };
   if (options.read) try {
@@ -101,7 +107,7 @@ export async function finalizePublicEvidence(options: {
       const lifecycle = toolLifecycleEvidence(events), effectCertainty = capture.status === "succeeded" ? browserJobsSettled(events) : null;
       const jobs = settledReadJobs(events), answer = finalAnswer(events), snapshots = snapshotEvidence(events);
       const required = options.required();
-      const http = await httpEvidence(events), browsing = verifyBrowsing(required, options.documents, snapshots, http);
+      const http = await httpEvidence(events), browsing = verifyBrowsing(required, metadata.documents, snapshots, http);
       let correct: boolean | null = null;
       if (!options.runError && outcome !== "timed_out" && outcome !== "failed" && capture.status === "failed") { outcome = "setup_failed"; reason = "Final canonical event capture failed"; }
       else if (!options.runError && outcome !== "failed" && (options.deadlineExpired || terminal.state === "pending" || terminal.state === "late")) { outcome = "timed_out"; reason = "Task deadline exceeded"; }
@@ -111,7 +117,7 @@ export async function finalizePublicEvidence(options: {
         outcome = correct && browsing.complete && lifecycle.complete === true && jobs === true ? "passed" : "failed";
         reason = !correct ? "Structured result is incorrect or incomplete" : !browsing.complete ? "Required sources lack verified visible or HTTP response facts" : lifecycle.complete !== true || jobs !== true ? "Tool or browser-job terminal evidence is incomplete" : "All required facts and browser evidence verified";
         const inaccessible = browsing.blocked || required.some(({ url }) => {
-          const failure = options.navigationFailures.filter(item => canonicalUrl(item.url) === canonicalUrl(url) && item.duringTask).at(-1);
+          const failure = metadata.navigationFailures.filter(item => canonicalUrl(item.url) === canonicalUrl(url) && item.duringTask).at(-1);
           return !!failure && !browsing.checks.find(check => canonicalUrl(check.url) === canonicalUrl(url))?.verified;
         });
         if (inaccessible) { outcome = "blocked"; reason = "A required source failed to load in Chrome"; }
@@ -122,5 +128,5 @@ export async function finalizePublicEvidence(options: {
     derivationError = options.redact(error);
     if (!options.runError && outcome !== "timed_out" && outcome !== "failed") { outcome = "setup_failed"; reason = "Canonical evidence derivation failed"; }
   }
-  return { events, capture, outcome, reason, derivationError, derived };
+  return { events, capture, outcome, reason, derivationError, derived, metadata };
 }
