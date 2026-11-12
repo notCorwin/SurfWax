@@ -105,3 +105,53 @@ it("accepts settled interrupted reads, rejects active jobs and refuses missing j
   expect(settledReadJobs([{ ...tool, type: "tool.finished", content: { toolName: "send_extension_request" }, output: { ok: true, result: {} } }] as any)).toBe(null);
   expect(settledReadJobs([state, { ...state, id: 2, content: { jobId: "j", state: "succeeded" } }, { ...tool, toolCallId: "observer", content: { toolName: "get_job" } }] as any)).toBe(true);
 });
+
+import { finalizePublicEvidence, pollPublicEvidence } from "../e2e/public-web/evidence";
+
+describe("final canonical observation", () => {
+  const startedAt = Date.parse("2026-01-01T00:00:00.000Z"), deadlineAt = startedAt + 1000;
+  const submission = { id: 1, type: "conversation.submitted", conversationId: "c", runId: "r", timestamp: new Date(startedAt).toISOString() };
+  const terminal = { id: 3, type: "conversation.finished", conversationId: "c", runId: "r", timestamp: new Date(startedAt + 500).toISOString() };
+  const unknown = { id: 2, type: "tool.failed", conversationId: "c", runId: "r", toolCallId: "t", content: { toolName: "navigate", effectUnknown: true }, output: { ok: false } };
+  const run = async (changes: Record<string, unknown> = {}) => {
+    let raw: unknown;
+    const result = await finalizePublicEvidence({ prior: [submission] as any, hasObservation: true, read: async () => [submission, unknown, terminal] as any,
+      persist: async events => { raw = structuredClone(events); }, startedAt, deadlineAt, outcome: "setup_failed", reason: "poll failed", runError: "poll failed", deadlineExpired: false,
+      required: () => [], documents: [], navigationFailures: [], grade: () => true, redact: error => error instanceof Error ? error.message : String(error), ...changes });
+    return { ...result, raw };
+  };
+  it("retains the poll error while reporting the final terminal and unknown effect from the saved events", async () => {
+    let prior: any[] = [];
+    let pollError: string | null = null;
+    try { await pollPublicEvidence(async () => { throw new Error("poll failed"); }, Date.now(), Date.now() + 1000, events => { prior = events; }); }
+    catch (error) { pollError = (error as Error).message; }
+    const result = await run({ prior, hasObservation: false, runError: pollError, reason: pollError });
+    expect(result.raw).toEqual(result.events);
+    expect(result.events).toContainEqual(terminal);
+    expect(result.capture).toEqual({ status: "succeeded", error: null, hasObservation: true });
+    expect(result.outcome).toBe("setup_failed");
+    expect(result.reason).toBe("poll failed");
+    expect(result.derived?.effectCertainty).toBeNull();
+    expect(result.derived?.lifecycle).toEqual((await import("../e2e/evaluation/tool-lifecycle")).toolLifecycleEvidence(result.raw as any));
+  });
+  it("retains the previous observation and marks failed final capture incomplete", async () => {
+    const result = await run({ read: async () => { throw new Error("read failed"); }, runError: null, reason: "", outcome: "setup_failed" });
+    expect(result.raw).toEqual([submission]);
+    expect(result.events).toEqual(result.raw);
+    expect(result.capture).toEqual({ status: "failed", error: "read failed", hasObservation: true });
+    expect(result.derived?.effectCertainty).toBeNull();
+    expect(result.outcome).toBe("setup_failed");
+  });
+  it.each(["timed_out", "failed"] as const)("does not upgrade %s after a late final read", async outcome => {
+    const result = await run({ outcome, reason: "original", runError: null, deadlineExpired: outcome === "timed_out", read: async () => [submission, terminal] });
+    expect(result.outcome).toBe(outcome);
+    expect(result.outcome).not.toBe("passed");
+  });
+  it("preserves raw events and the original error when evidence derivation throws", async () => {
+    const result = await run({ required: () => { throw new Error("derivation failed"); } });
+    expect(result.raw).toEqual(result.events);
+    expect(result.reason).toBe("poll failed");
+    expect(result.derivationError).toBe("derivation failed");
+    expect(result.capture.status).toBe("succeeded");
+  });
+});

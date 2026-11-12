@@ -6,13 +6,9 @@ import { fitWindowToScreen } from "../../scripts/development-extension.mjs";
 import type { Page } from "@playwright/test";
 import { expect } from "@playwright/test";
 import { configure, openExtension, readEvents, dispose, closeServer } from "../fixtures";
-import { modelProxy, usageEvidence } from "../evaluation/model-proxy";
-import { deadlineEvidence } from "../evaluation/deadline-evidence";
-import { toolLifecycleEvidence } from "../evaluation/tool-lifecycle";
-import { browserJobsSettled } from "../evaluation/job-evidence";
+import { modelProxy } from "../evaluation/model-proxy";
 import { buildFingerprint, type BuildFingerprint } from "../evaluation/build-fingerprint";
-import { httpEvidence, settledReadJobs } from "./http-evidence";
-import { canonicalUrl, finalAnswer, snapshotEvidence, verifyBrowsing, type DocumentEvidence } from "./evidence";
+import { finalizePublicEvidence, pollPublicEvidence, type DocumentEvidence } from "./evidence";
 import { sourceReader, type FrozenSource } from "./sources";
 import type { publicTasks } from "./tasks";
 
@@ -27,20 +23,18 @@ export async function runPublicTask(task: Task, timeoutMs: number): Promise<Outc
   let sources: FrozenSource[] = [], expected: unknown, requiredUrls: string[] = [];
   let events: any[] = [], outcome: Outcome = "setup_failed", phase = "oracle_preflight", reason = "";
   let startedAt: number | null = null, deadlineAt: number | null = null;
-  let http: Awaited<ReturnType<typeof httpEvidence>> = [];
-  let effectCertainty: boolean | null = null;
   const gitHeadAtStart = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const gitDirtyAtStart = !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
-  let answer: ReturnType<typeof finalAnswer> = { text: "", value: null };
-  let correct: boolean | null = null, lifecycle: ReturnType<typeof toolLifecycleEvidence> | null = null, jobs: boolean | null = null;
   let buildBefore: BuildFingerprint | null = null, buildAfter: BuildFingerprint | null = null;
   const documents: DocumentEvidence[] = [];
-  let browsing: ReturnType<typeof verifyBrowsing> | null = null;
   let nextPageId = 0;
   const pageTabs = new Map<number, number>();
   const pageAssociations: Promise<void>[] = [];
   const navigationFailures: { url: string; error: string | null; duringTask: boolean }[] = [];
   let browser: string | null = null;
+  let runError: string | null = null;
+  let hasObservation = false;
+  let deadlineExpired = false;
   let progressAt = 0;
   try {
     const read = sourceReader();
@@ -94,55 +88,44 @@ export async function runPublicTask(task: Task, timeoutMs: number): Promise<Outc
     await opened.page.getByTestId("composer-input").fill(task.prompt);
     startedAt = Date.now(); deadlineAt = startedAt + timeoutMs;
     await opened.page.getByTestId("composer-input").press("Enter");
-    while (Date.now() < deadlineAt) {
-      events = await readBounded(opened.page, Math.max(1, Math.min(5000, deadlineAt - Date.now())));
-      if (Date.now() - progressAt > 30_000) { console.log(JSON.stringify({ task: task.id, elapsedMs: Date.now() - startedAt, toolCalls: events.filter(event => event.type === "tool.started").length })); progressAt = Date.now(); }
-      if (deadlineEvidence(events, startedAt, deadlineAt).state !== "pending") break;
-      await new Promise(resolveWait => setTimeout(resolveWait, Math.min(1000, deadlineAt! - Date.now())));
-    }
-    events = await readBounded(opened.page, 5000);
-    const terminal = deadlineEvidence(events, startedAt, deadlineAt);
-    lifecycle = toolLifecycleEvidence(events); effectCertainty = browserJobsSettled(events); jobs = settledReadJobs(events);
-    answer = finalAnswer(events);
-    await Promise.allSettled(pageAssociations);
-    for (const doc of documents) doc.tabId = pageTabs.get(doc.pageId) ?? null;
-    const snapshots = snapshotEvidence(events);
-    http = await httpEvidence(events);
-    browsing = verifyBrowsing(requiredUrls.map(url => ({ url, terms: task.evidenceTerms(expected, url), alternatives: task.evidenceUrls(url) })), documents, snapshots, http);
-    const observed = browsing.complete;
-    if (terminal.state === "pending" || terminal.state === "late") { outcome = "timed_out"; reason = "Task deadline exceeded"; }
-    else if (terminal.state !== "on_time" || terminal.terminal !== "conversation.finished") {
-      outcome = "blocked"; reason = "Provider or conversation did not finish normally; inspect events";
-    } else {
-      correct = task.grade(answer.value, expected);
-      outcome = correct && observed && lifecycle.complete === true && jobs === true ? "passed" : "failed";
-      reason = !correct ? "Structured result is incorrect or incomplete" : !observed ? "Required sources lack verified visible or HTTP response facts"
-        : lifecycle.complete !== true || jobs !== true ? "Tool or browser-job terminal evidence is incomplete" : "All required facts and browser evidence verified";
-      // A demonstrated failure to load a required source makes research inconclusive, never an invented answer a pass.
-      const inaccessible = browsing.blocked || requiredUrls.some(url => {
-        const latestFailure = navigationFailures.filter(failure => canonicalUrl(failure.url) === canonicalUrl(url) && failure.duringTask).at(-1);
-        return !!latestFailure && !browsing?.checks.find(check => canonicalUrl(check.url) === canonicalUrl(url))?.verified;
-      });
-      if (inaccessible) { outcome = "blocked"; reason = "A required source failed to load in Chrome"; }
-    }
+    deadlineExpired = await pollPublicEvidence(timeout => readBounded(opened!.page, timeout), startedAt, deadlineAt, observation => {
+      events = observation; hasObservation = true;
+      if (Date.now() - progressAt > 30_000) { console.log(JSON.stringify({ task: task.id, elapsedMs: Date.now() - startedAt!, toolCalls: events.filter(event => event.type === "tool.started").length })); progressAt = Date.now(); }
+    });
   } catch (error) {
     outcome = phase === "oracle_preflight" || phase === "browser_preflight" ? "blocked" : "setup_failed";
     // Error details are local evidence; credentials are never copied from config or requests.
     reason = error instanceof Error ? error.message : "Evaluation operation failed";
     for (const value of [process.env.SURFWAX_EVAL_API_KEY, proxy?.token]) if (value) reason = reason.replaceAll(value, "[redacted]");
+    runError = reason;
   } finally {
     // Freeze one observation for both the summary and events.json.
     try {
+    await Promise.allSettled(pageAssociations);
+    for (const doc of documents) doc.tabId = pageTabs.get(doc.pageId) ?? null;
+    const result = await finalizePublicEvidence({
+      prior: events, hasObservation, read: opened && startedAt !== null ? () => readBounded(opened!.page, 5000) : undefined,
+      persist: observation => writeFile(resolve(root, "events.json"), JSON.stringify(observation, null, 2), { flag: "wx", mode: 0o600 }),
+      startedAt, deadlineAt, outcome, reason, runError, deadlineExpired,
+      required: () => requiredUrls.map(url => ({ url, terms: task.evidenceTerms(expected, url), alternatives: task.evidenceUrls(url) })),
+      documents, navigationFailures, grade: value => task.grade(value, expected),
+      redact: error => {
+        let message = error instanceof Error ? error.message : "Evaluation operation failed";
+        for (const value of [process.env.SURFWAX_EVAL_API_KEY, proxy?.token]) if (value) message = message.replaceAll(value, "[redacted]");
+        return message;
+      },
+    });
+    ({ outcome, reason } = result);
+    const { capture, derivationError, derived } = result;
     if (buildBefore) buildAfter = await buildFingerprint(resolve(process.env.SURFWAX_EXTENSION_PATH ?? "dist")).catch(() => null);
     if (outcome === "passed" && buildBefore?.sha256 !== buildAfter?.sha256) { outcome = "setup_failed"; reason = "Extension build changed during evaluation"; }
     const gitDirty = !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
     const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    const report = { task: task.id, title: task.title, difficulty: task.difficulty, outcome, reason, phase, gitHead: head, gitDirty, gitHeadAtStart, gitDirtyAtStart,
+    const report = { task: task.id, title: task.title, difficulty: task.difficulty, outcome, reason, runError, capture, derivationError, phase, gitHead: head, gitDirty, gitHeadAtStart, gitDirtyAtStart,
       model: process.env.SURFWAX_EVAL_MODEL, browser, timeoutMs, startedAt, deadlineAt, elapsedMs: startedAt ? Date.now() - startedAt : null,
       buildBefore, buildAfter, sources: sources.map(({ body: _body, ...metadata }) => metadata), requiredUrls, documents, navigationFailures,
-      browsing, httpEvidence: http.map(({ text, ...metadata }) => ({ ...metadata, deliveredCharacters: text.length })), snapshots: snapshotEvidence(events).map(({ text: _text, ...metadata }) => metadata), finalAnswer: answer, correct, lifecycle, jobs, effectCertainty, readOnlyResearch: true, usage: usageEvidence(events), requests: structuredClone(proxy?.requests ?? []) };
+      browsing: derived?.browsing ?? null, httpEvidence: derived?.http.map(({ text, ...metadata }) => ({ ...metadata, deliveredCharacters: text.length })) ?? null, snapshots: derived?.snapshots.map(({ text: _text, ...metadata }) => metadata) ?? null, finalAnswer: derived?.answer ?? null, correct: derived?.correct ?? null, lifecycle: derived?.lifecycle ?? null, jobs: derived?.jobs ?? null, effectCertainty: derived?.effectCertainty ?? null, readOnlyResearch: true, usage: derived?.usage ?? null, requests: structuredClone(proxy?.requests ?? []) };
       await writeFile(resolve(root, "report.json"), JSON.stringify(report, null, 2), { flag: "wx", mode: 0o600 });
-      await writeFile(resolve(root, "events.json"), JSON.stringify(events, null, 2), { flag: "wx", mode: 0o600 });
       console.log(JSON.stringify({ outcome, reason, report: resolve(root, "report.json") }));
     } finally {
       await Promise.allSettled([...(opened ? [dispose(opened.context, opened.userDataDirectory)] : []), ...(proxy ? [closeServer(proxy.server)] : [])]);
