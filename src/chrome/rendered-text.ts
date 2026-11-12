@@ -1,11 +1,13 @@
 import { sampleReadableSnapshot } from "./snapshot-readable-source.js";
 import { snapshotObservationPrimitives } from "./snapshot-observation-primitives.js";
+import { markerInkRects } from "./rendered-marker";
 
 /** All evidence lives only for this synchronous call: no DOM, CSS, frame or
  * animation evidence survives a task boundary. Chrome owns serialization. */
 export function createRenderedTextReader(
   sample: typeof sampleReadableSnapshot,
   install: typeof snapshotObservationPrimitives,
+  nativeMarkers: typeof markerInkRects,
 ) {
   const results = new WeakMap<Element, string | null>();
   const styles = new WeakMap<Element, CSSStyleDeclaration>();
@@ -16,12 +18,17 @@ export function createRenderedTextReader(
   let sampled = false;
   let accepted = new Set<Text>();
   let unknown = new Set<Element>();
+  let unprovenMarkers = new Set<Element>();
+  const queryToken = (globalThis as any)[Symbol.for("surf-wax.rendered-text-active-query.v1")];
+  const nativeState = (globalThis as any)[Symbol.for("surf-wax.rendered-marker-query.v1")];
+  const attemptedNativeProof = typeof queryToken === "string" && nativeState?.token === queryToken;
   const ensureProof = () => {
     if (sampled) return;
     sampled = true;
     install(true);
-    sample(NaN, [], { shadowRoots: [], placeholder: () => null, controls: () => null },
-      { scope: document.documentElement, accept: (nodes, unsafe) => { accepted = nodes; unknown = unsafe; } });
+    sample(NaN, [], { shadowRoots: [], placeholder: () => null, controls: () => null,
+      ...(attemptedNativeProof ? { markerRects: nativeMarkers(nativeState) } : {}) },
+      { scope: document.documentElement, accept: (nodes, unsafe, _painted, markers) => { accepted = nodes; unknown = unsafe; unprovenMarkers = markers; } });
   };
   const composedUnknown = (el: Element) => {
     if (el.localName === "slot" || el.shadowRoot) return true;
@@ -45,7 +52,7 @@ export function createRenderedTextReader(
   return function read(this: Element): string | null {
     const root = this, view = root.ownerDocument.defaultView;
     if (results.has(root)) return results.get(root)!;
-    if (!view || !root.isConnected || !(root instanceof view.HTMLElement) || omitted(root)
+    if (root.ownerDocument !== document || !view || !root.isConnected || !(root instanceof view.HTMLElement) || omitted(root)
       || !root.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return null;
     ensureProof();
     const summarize = (el: Element): boolean => {
@@ -60,9 +67,15 @@ export function createRenderedTextReader(
       proven.set(el, complete); return complete;
     };
     const valid = summarize(root);
+    if (!valid && queryToken && !attemptedNativeProof && unprovenMarkers.size) {
+      const error = Object.assign(new Error("Native marker paint evidence is required"), {
+        name: "NativeTextProofRequired", nativeMarkerQuery: queryToken, markerOwners: [...unprovenMarkers],
+      });
+      throw error;
+    }
     const value = valid && root.isConnected ? root.innerText : null;
     results.set(root, value); return value;
   };
 }
-export const RENDERED_TEXT_READER_SOURCE = `(${createRenderedTextReader.toString()})(${sampleReadableSnapshot.toString()}, ${snapshotObservationPrimitives.toString()})`;
+export const RENDERED_TEXT_READER_SOURCE = `(${createRenderedTextReader.toString()})(${sampleReadableSnapshot.toString()}, ${snapshotObservationPrimitives.toString()}, ${markerInkRects.toString()})`;
 export const RENDERED_TEXT_SOURCE = `function(){return (${RENDERED_TEXT_READER_SOURCE}).call(this)}`;

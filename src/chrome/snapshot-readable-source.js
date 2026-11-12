@@ -334,11 +334,14 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
       ) &&
       effects.every((k) => !p.getPropertyValue(k) || p.getPropertyValue(k) === "none") &&
       (!p.getPropertyValue("-webkit-box-reflect") || p.getPropertyValue("-webkit-box-reflect") === "none"));
+  const unprovenMarkers = new Set();
   const markerPaint = (element, s) => {
     if (!s.display.split(/\s+/).includes("list-item")) return false;
     const content = getComputedStyle(element, "::marker").content;
-    return content && !["none", "normal", '""'].includes(content)
+    const painted = content && !["none", "normal", '""'].includes(content)
       || content === "normal" && (s.listStyleType !== "none" || s.listStyleImage !== "none");
+    if (painted && !nativeProofs?.markerRects?.has(element)) unprovenMarkers.add(element);
+    return painted && !nativeProofs?.markerRects?.has(element);
   };
   const uncomplicated = (element) => {
     if (safe.has(element)) return safe.get(element);
@@ -1150,6 +1153,8 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
       });
     }
     const path = paintPath(element);
+    for (const markerRect of nativeProofs?.markerRects?.get(element) ?? [])
+      addCover({ element, rect: markerRect, path, foregroundEffect: true });
     if (unbounded) {
       addCover({
         element,
@@ -1560,6 +1565,34 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
       covers.push({ element, rect: viewportRect, path });
     }
   }
+  if (textEvidence?.frameOwner) {
+    const owner = textEvidence.frameOwner, rect = owner.getBoundingClientRect();
+    let painted = owner.ownerDocument === document && owner.isConnected && composedOrder.has(owner)
+      && ['iframe', 'frame'].includes(owner.localName) && owner.namespaceURI === 'http://www.w3.org/1999/xhtml'
+      && [rect.left,rect.top,rect.right,rect.bottom,rect.width,rect.height].every(Number.isFinite)
+      && rect.width > 0 && rect.height > 0 && !hiddenTree(owner);
+    // The ordinary ancestor-background exemption is not proof for negative
+    // stacking descendants: their paint can sit behind that same background.
+    for (let path = stack(owner); painted && path; path = path.parent)
+      if (path.level === null || path.level < 0) painted = false;
+    for (let current = owner; painted && current; current = parentOf(current)) {
+      const s = style(current);
+      painted = s.visibility === 'visible' && Number(s.opacity) === 1 && s.mixBlendMode === 'normal'
+        && s.contentVisibility === 'visible' && s.contain === 'none'
+        && effects.every(key => key === 'clip-path' || key === 'mask-image' || noGeometryEffect(s, key))
+        // Ancestor backgrounds are behind the owner, generated boxes need
+        // their own ordering/geometry proof and cannot inherit that exemption.
+        && ['::before','::after'].every(pseudo => {
+          const p = getComputedStyle(current, pseudo);
+          return !p.content || p.content === 'none' || p.content === 'normal' || p.display === 'none'
+            || p.visibility !== 'visible' || Number(p.opacity) === 0;
+        });
+    }
+    if (painted) painted = [style(owner).borderTopLeftRadius,style(owner).borderTopRightRadius,style(owner).borderBottomLeftRadius,style(owner).borderBottomRightRadius].every(value => value === '0px')
+      && !clippedRects(owner, [rect], true) && !foreignCover(owner, [rect], true);
+    textEvidence.acceptFrame(painted);
+    return null;
+  }
   for (const slot of unsupportedSlots) if (!hiddenTree(slot) && style(slot).visibility === "visible") {
     let owner = slot;
     while (owner && !(owner.getBoundingClientRect().width > 0 && owner.getBoundingClientRect().height > 0)) owner = composedParent(owner);
@@ -1723,7 +1756,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     if (overlap) gap("text-overlap", item.node, item.region);
     return !overlap;
   });
-  if (textEvidence) { textEvidence.accept(new Set(accepted.map(item => item.node)), new Set([...uncertainLabels, ...shadowRoots.keys()]), accepted); return null; }
+  if (textEvidence) { textEvidence.accept(new Set(accepted.map(item => item.node)), new Set([...uncertainLabels, ...shadowRoots.keys()]), accepted, unprovenMarkers); return null; }
   const interactiveRoles = new Set([
     "button",
     "checkbox",

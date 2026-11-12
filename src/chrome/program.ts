@@ -41,6 +41,7 @@ const reads = new Set([
   "isEnabled",
   "isChecked",
   "readCondition",
+  "readElements",
   "isMultiple",
 ]);
 const waits = new Set([

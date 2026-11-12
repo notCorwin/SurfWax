@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
-import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
+import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, closeServer, type MockResponse } from "./fixtures";
 import { itemLine } from "./snapshot-format";
+import { manifestFixture } from "./evaluation/manifest-fixture";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
 const button = (items: any[], name: string) => items.find((item) => itemLine(item).includes(`button "${name}"`));
@@ -364,6 +365,7 @@ test("text tools require rendered evidence rather than hidden source", async () 
   test.setTimeout(120_000);
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
+  const manifest = await manifestFixture(17);
   const opened = await openExtension();
   try {
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -387,8 +389,9 @@ test("text tools require rendered evidence rather than hidden source", async () 
         <div id="custom-closed">Closed parent<x-closed></x-closed></div>
         <div id="custom-hidden">Hidden parent<x-hidden style="display:none"></x-hidden></div>
         <p id="empty"></p><p id="offscreen" style="position:absolute;top:2500px">Offscreen text</p>
+        <section id="nested-roles" style="position:absolute;top:5000px"><div role="group" aria-label="outer">Outer<div role="group" aria-label="inner">Inner<div role="group" aria-label="deep">Deep</div></div></div><div role="group" aria-label="sibling">Sibling</div></section>
         <button id="start">Start real stamp</button>
-        <iframe id="child" srcdoc="<p id='frame-status'>Frame ready</p>"></iframe>
+        <iframe id="child" srcdoc="<p id='frame-status'>Frame ready</p><button>Start real stamp</button>"></iframe>
         <iframe id="hidden-child" style="opacity:0" srcdoc="<p id='frame-status'>Hidden frame text</p>"></iframe>`;
       document.querySelector('x-open')!.attachShadow({ mode: 'open' }).innerHTML = 'Unknown shadow';
       document.querySelector('x-closed')!.attachShadow({ mode: 'closed' }).innerHTML = 'Unknown shadow';
@@ -400,7 +403,96 @@ test("text tools require rendered evidence rather than hidden source", async () 
         setTimeout(() => { document.querySelector('#status')!.textContent = 'Ready'; }, 500);
       });
     });
+    await target.evaluate(desk => {
+      const cover = document.createElement('div'); cover.id = 'frame-cover';
+      cover.style.cssText = 'position:absolute;left:8px;top:3000px;width:770px;height:190px;background:white;z-index:100000;display:none'; document.body.append(cover);
+      const remove = document.createElement('button'); remove.id = 'remove-frame-cover'; remove.textContent = 'Uncover list';
+      remove.onclick = () => { cover.remove(); remove.blur(); }; document.body.append(remove);
+      const native = document.createElement('iframe'); native.id = 'native-list'; native.src = desk;
+      const backdrop = document.createElement('div'); backdrop.id = 'negative-frame-backdrop';
+      backdrop.style.cssText = 'position:absolute;left:8px;top:3000px;width:770px;height:190px;background:white;z-index:auto'; document.body.append(backdrop);
+      native.style.cssText = 'position:absolute;left:0;top:0;width:760px;height:180px;z-index:-1'; backdrop.append(native);
+      const raise = document.createElement('button'); raise.id = 'raise-native-frame'; raise.textContent = 'Raise list';
+      raise.onclick = () => { native.style.zIndex = '0'; cover.style.display = 'block'; raise.blur(); }; document.body.append(raise);
+      const clear = document.createElement('button'); clear.id = 'clear-post-read-cover'; clear.textContent = 'Clear temporary frame cover';
+      clear.onclick = () => { document.querySelector('#post-read-cover')?.remove(); clear.blur(); }; document.body.append(clear);
+      const clipped = document.createElement('iframe'); clipped.id = 'clipped-read-frame';
+      clipped.style.cssText = 'position:absolute;left:8px;top:4000px;width:760px;height:180px;clip-path:inset(50%)';
+      clipped.srcdoc = '<p id="frame-status">Clipped frame text</p>'; document.body.append(clipped);
+    }, `${manifest.origin.replace('127.0.0.1', 'localhost')}/desk`);
+    await expect(target.frameLocator('#native-list').locator('#page')).toHaveText('Page 1 of 20');
+    const nativeFrame = target.frames().find(frame => frame.url().endsWith('/desk'))!;
+    const negativePaint = await target.evaluate(() => {
+      scrollTo(0, 3000);
+      const owner = document.querySelector('#native-list')!, backdrop = document.querySelector('#negative-frame-backdrop')!;
+      const r = owner.getBoundingClientRect(), b = backdrop.getBoundingClientRect(), x = r.left + 20, y = r.top + 20;
+      const result = { topAtOwnerPoint: document.elementFromPoint(x, y)?.id, owner: { x:r.x,y:r.y,width:r.width,height:r.height },
+        backdrop: { x:b.x,y:b.y,width:b.width,height:b.height }, ownerZ: getComputedStyle(owner).zIndex, backdropZ: getComputedStyle(backdrop).zIndex, background: getComputedStyle(backdrop).backgroundColor };
+      scrollTo(0, 0); return result;
+    });
+    expect(negativePaint).toMatchObject({ topAtOwnerPoint: 'negative-frame-backdrop', ownerZ: '-1', backdropZ: 'auto', background: 'rgb(255, 255, 255)' });
+    expect(negativePaint.backdrop.x).toBe(negativePaint.owner.x); expect(negativePaint.backdrop.y).toBe(negativePaint.owner.y);
+    expect(negativePaint.backdrop.width).toBeGreaterThanOrEqual(negativePaint.owner.width);
+    expect(negativePaint.backdrop.height).toBeGreaterThanOrEqual(negativePaint.owner.height);
+    const codes = await nativeFrame.locator('ol li').allTextContents();
+    const instrumentAuthorGetters = () => {
+      const hits = { innerText: 0, attribute: 0, rect: 0 };
+      (globalThis as any).__textGetterHits = hits;
+      const stacks: unknown[] = []; (globalThis as any).__textGetterStacks = stacks;
+      (globalThis as any).__textGetterOmitted = 0;
+      const text = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerText')!;
+      const attribute = Element.prototype.getAttribute, rect = Element.prototype.getBoundingClientRect;
+      Object.defineProperty(HTMLElement.prototype, 'innerText', { ...text, get() { hits.innerText++; return text.get!.call(this); } });
+      Element.prototype.getAttribute = function(...args) { hits.attribute++; return attribute.apply(this, args); };
+      Element.prototype.getBoundingClientRect = function() { hits.rect++; if (stacks.length < 256) stacks.push({ at: Date.now(), tag: this.localName, id: this.id, stack: new Error().stack }); else (globalThis as any).__textGetterOmitted++; return rect.call(this); };
+    };
+    await target.evaluate(instrumentAuthorGetters);
+    await nativeFrame.evaluate(instrumentAuthorGetters);
+    // Count the real native boundary only for the chained-root query below.
+    const worker = opened.context.serviceWorkers().find(worker => worker.url().startsWith('chrome-extension:'))!;
+    await worker.evaluate(() => {
+      const native = chrome.debugger.sendCommand.bind(chrome.debugger), state = { enabled: false, reads: 0, race: false, backend: 0, navigations: 0, bound: '', released: 0, paintBackend: 0, paintOwners: new Set<string>(), paintRemaining: 2, pendingPaint: -1, paintChecks: [] as any[] };
+      (globalThis as any).__textAXQueryCounter = state;
+      chrome.debugger.sendCommand = (async (...args: any[]) => {
+        if (state.enabled && args[1] === 'Accessibility.getFullAXTree') state.reads++;
+        const [source, method, params] = args;
+        const paint = state.pendingPaint >= 0 && method === 'Runtime.callFunctionOn' && String(params.functionDeclaration).includes('createRenderedTextReader') ? state.paintChecks[state.pendingPaint] : undefined;
+        if (paint) paint.phases.push('child-read-dispatched');
+        const result = await (native as any)(...args);
+        if (paint) { paint.phases.push('child-read-finished'); paint.childException = Boolean(result.exceptionDetails); paint.childLocalText = typeof result.result?.value === 'string' ? result.result.value : result.result?.value?.actual; state.pendingPaint = -1; }
+        if (method === 'DOM.describeNode' && result.node?.nodeName === 'IFRAME') {
+          const attributes = result.node.attributes ?? [], index = attributes.indexOf('id');
+          if (index >= 0 && attributes[index + 1] === 'child') state.paintBackend = result.node.backendNodeId;
+        }
+        if (method === 'DOM.resolveNode' && params.backendNodeId === state.paintBackend && result.object?.objectId) state.paintOwners.add(result.object.objectId);
+        if (state.paintRemaining > 0 && method === 'Runtime.callFunctionOn' && state.paintOwners.has(params.objectId)
+          && String(params.functionDeclaration).includes('{frameOwner:this,acceptFrame:') && result.result?.value === true) {
+          state.paintRemaining--;
+          const changed = await (native as any)(source, 'Runtime.callFunctionOn', { objectId: params.objectId, returnByValue: true,
+            functionDeclaration: `function(){const r=this.getBoundingClientRect(),before=!!document.querySelector('#post-read-cover'),cover=document.createElement('div');cover.id='post-read-cover';cover.style.cssText='position:fixed;background:white;z-index:2147483647;left:'+r.left+'px;top:'+r.top+'px;width:'+r.width+'px;height:'+r.height+'px';document.body.append(cover);return {before,id:this.id,box:[r.left,r.top,r.width,r.height]}}` });
+          state.pendingPaint = state.paintChecks.length;
+          state.paintChecks.push({ precheck: result.result.value, mutation: changed.result?.value, phases: ['parent-precheck-complete', 'opaque-cover-created'] });
+        }
+        if (method === 'Runtime.releaseObject' && params.objectId === state.bound) state.released++;
+        if (state.race && method === 'Accessibility.getFullAXTree') state.backend = result.nodes.find((node: any) => node.role?.value === 'group' && node.name?.value === 'deep')?.backendDOMNodeId;
+        if (state.race && method === 'DOM.resolveNode' && params.backendNodeId === state.backend) {
+          state.race = false; state.bound = result.object?.objectId;
+          let listener: any, timer: ReturnType<typeof setTimeout>;
+          const navigated = new Promise<void>((resolve, reject) => {
+            listener = (eventSource: any, event: string) => { if (eventSource.tabId === source.tabId && eventSource.sessionId === source.sessionId && event === 'Page.navigatedWithinDocument') { state.navigations++; resolve(); } };
+            chrome.debugger.onEvent.addListener(listener);
+            timer = setTimeout(() => reject(new Error('Native same-document navigation was not observed')), 2000);
+          });
+          try {
+            await (native as any)(source, 'Runtime.evaluate', { expression: `history.pushState(null,'','#semantic-binding-race')`, returnByValue: true });
+            await navigated;
+          } finally { clearTimeout(timer!); chrome.debugger.onEvent.removeListener(listener); }
+        }
+        return result;
+      }) as any;
+    });
     const css = (value: string) => ({ by: "css", value });
+    const native = (target: object) => ({ ...target, frame: css('#native-list') });
     const steps: { name: string; input: object; expected: Record<string, any> }[] = [
       { name: "verify_state", input: { target: { by: "text", value: "Ready" }, textIncludes: "Ready", timeoutMs: 200 }, expected: { ok: true, result: { verified: false, present: false, actual: null } } },
       { name: "verify_state", input: { target: css("#status"), textIncludes: "Ready" }, expected: { ok: true, result: { verified: false, actual: "Waiting for stamp" } } },
@@ -411,6 +503,28 @@ test("text tools require rendered evidence rather than hidden source", async () 
       { name: "read_text", input: { target: css("#source") }, expected: { ok: false, error: { code: "text-unavailable" } } },
       { name: "read_text", input: { target: css("#mixed") }, expected: { ok: true, result: "Visible" } },
       { name: "read_elements", input: { target: css("#mixed") }, expected: { ok: true, result: { items: [{ text: "Visible" }] } } },
+      { name: "read_text", input: { target: native(css('ol li:first-child')) }, expected: { ok: false, error: { code: 'text-unavailable' } } },
+      { name: "click", input: { target: css('#raise-native-frame') }, expected: { ok: true } },
+      { name: "read_text", input: { target: native(css('ol li:first-child')) }, expected: { ok: false, error: { code: 'text-unavailable' } } },
+      { name: "verify_state", input: { target: native(css('ol li:first-child')), textEquals: codes[0] }, expected: { ok: true, result: { verified: false, actual: null } } },
+      { name: "click", input: { target: css('#remove-frame-cover') }, expected: { ok: true } },
+      { name: "read_elements", input: { target: native(css('ol li')), offset: 0, limit: 25 }, expected: { ok: true, result: {
+        total: 60, items: codes.slice(0, 25).map((text, index) => ({ index, text, attributes: {} })), nextOffset: 25,
+      } } },
+      { name: "read_elements", input: { target: native({ by: 'role', value: 'listitem' }), offset: 25, limit: 35 }, expected: { ok: true, result: {
+        total: 60, items: codes.slice(25).map((text, index) => ({ index: index + 25, text, attributes: {} })),
+      } } },
+      { name: "read_text", input: { target: native({ by: 'role', value: 'listitem', index: 0 }) }, expected: { ok: true, result: codes[0] } },
+      { name: "verify_state", input: { target: native({ by: 'role', value: 'listitem', index: 59 }), textEquals: codes[59] }, expected: { ok: true, result: { verified: true, actual: codes[59] } } },
+      { name: "find_elements", input: { target: native({ by: 'role', value: 'listitem', index: 0 }) }, expected: { total: 1, elements: [{ role: 'listitem', name: '', text: codes[0] }] } },
+      { name: "find_elements", input: { target: native({ by: 'text', value: codes[0], exact: true }) }, expected: { total: 1 } },
+      { name: "read_attribute", input: { target: { by: 'role', value: 'group', index: 1 }, name: 'aria-label' }, expected: { ok: true, result: 'inner' } },
+      { name: "read_attribute", input: { target: { by: 'role', value: 'group', index: -1 }, name: 'aria-label' }, expected: { ok: true, result: 'sibling' } },
+      ...['ol', 'body'].map(value => ({ name: 'read_elements', input: { target: native({ by: 'role', value: 'listitem', scope: css(value) }), limit: 1 }, expected: {
+        ok: true, result: { total: 60, items: [{ index: 0, text: codes[0], attributes: {} }], nextOffset: 1 },
+      } })),
+      { name: "read_text", input: { target: { ...css('#frame-status'), frame: css('#clipped-read-frame') } }, expected: { ok: false, error: { code: 'text-unavailable' } } },
+      { name: "verify_state", input: { target: { ...css('#frame-status'), frame: css('#clipped-read-frame') }, textEquals: 'Clipped frame text' }, expected: { ok: true, result: { verified: false, actual: null } } },
       { name: "verify_state", input: { target: css("#mixed"), textIncludes: "Ready" }, expected: { ok: true, result: { verified: false, actual: "Visible" } } },
       { name: "read_text", input: { target: css("#uncertain") }, expected: { ok: false, error: { code: "text-unavailable" } } },
       { name: "verify_state", input: { target: css("#uncertain"), textIncludes: "Ready" }, expected: { ok: true, result: { verified: false, actual: null } } },
@@ -426,7 +540,15 @@ test("text tools require rendered evidence rather than hidden source", async () 
       { name: "read_text", input: { target: css("#covered") }, expected: { ok: false, error: { code: "text-unavailable" } } },
       { name: "verify_state", input: { target: css("#covered"), textEquals: "Covered" }, expected: { ok: true, result: { verified: false, actual: null } } },
       { name: "read_text", input: { target: css("#offscreen") }, expected: { ok: true, result: "Offscreen text" } },
+      { name: "read_text", input: { target: { ...css("#frame-status"), frame: css("#child") } }, expected: { ok: false, error: { code: "text-unavailable" } } },
+      { name: "click", input: { target: css('#clear-post-read-cover') }, expected: { ok: true } },
+      { name: "verify_state", input: { target: { ...css("#frame-status"), frame: css("#child") }, textEquals: 'Frame ready' }, expected: { ok: true, result: { verified: false, actual: null } } },
+      { name: "click", input: { target: css('#clear-post-read-cover') }, expected: { ok: true } },
       { name: "read_text", input: { target: { ...css("#frame-status"), frame: { by: "css", value: "#child" } } }, expected: { ok: true, result: "Frame ready" } },
+      { name: "verify_state", input: { target: { ...css("#frame-status"), frame: css("#child") }, textEquals: "Frame ready" }, expected: { ok: true, result: { verified: true, actual: "Frame ready" } } },
+      { name: "read_text", input: { target: { by: 'role', value: 'paragraph', frame: css('#child') } }, expected: { ok: true, result: 'Frame ready' } },
+      { name: "count_elements", input: { target: { by: 'role', value: 'button', name: 'Start real stamp', exact: true } }, expected: { ok: true, result: 1 } },
+      { name: "count_elements", input: { target: { by: 'role', value: 'button', name: 'Start real stamp', exact: true, frame: css('#child') } }, expected: { ok: true, result: 1 } },
       { name: "read_text", input: { target: { ...css("#frame-status"), frame: css("#hidden-child") } }, expected: { ok: false, error: { code: "text-unavailable" } } },
       { name: "verify_state", input: { target: { ...css("#frame-status"), frame: css("#hidden-child") }, textEquals: "Hidden frame text" }, expected: { ok: true, result: { verified: false, actual: null } } },
       { name: "click", input: { target: css("#start") }, expected: { ok: true } },
@@ -437,7 +559,7 @@ test("text tools require rendered evidence rather than hidden source", async () 
     ];
     responses.push(commandResponse(steps[0]!.name, steps[0]!.input, "rendered-0"));
     steps.forEach((step, index) => responses.push(request => {
-      expect(lastTool(request), JSON.stringify(lastTool(request))).toMatchObject(step.expected);
+      expect(lastTool(request), `rendered step ${index}: ${step.name}`).toMatchObject(step.expected);
       const next = steps[index + 1];
       return next ? commandResponse(next.name, next.input, `rendered-${index + 1}`) : textResponse("RENDERED_TEXT_OK");
     }));
@@ -446,8 +568,52 @@ test("text tools require rendered evidence rather than hidden source", async () 
     await opened.page.getByTestId("composer-input").fill("Check rendered text evidence");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RENDERED_TEXT_OK", { timeout: 100_000 });
+    const paintChecks = await worker.evaluate(() => (globalThis as any).__textAXQueryCounter.paintChecks);
+    await test.info().attach('post-read-parent-paint', { contentType: 'application/json', body: Buffer.from(JSON.stringify({ paintChecks })) });
+    expect(paintChecks).toHaveLength(2);
+    for (const paint of paintChecks) {
+      expect(paint).toMatchObject({ precheck: true, mutation: { before: false, id: 'child' }, childException: false, childLocalText: 'Frame ready', phases: ['parent-precheck-complete', 'opaque-cover-created', 'child-read-dispatched', 'child-read-finished'] });
+    }
     expect(await target.locator("#status").innerText()).toBe("Ready");
-  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+    await expect.poll(() => opened.page.evaluate(async () => Boolean((await chrome.runtime.sendMessage({ type: 'surf-wax:run-status' })).identity))).toBe(false);
+    await worker.evaluate(() => { (globalThis as any).__textAXQueryCounter.enabled = true; });
+    const fixtureTabId = await opened.page.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url)!.id!, target.url());
+    const runScope = (race: boolean) => opened.page.evaluate(async ({ dev, tabId, race }) => {
+      const { ChromeExecutor } = await import(`${dev}/src/chrome/executor.ts`), { EventLogger } = await import(`${dev}/src/logging.ts`);
+      const { claimConversationRun } = await import(`${dev}/src/agent/coordinator.ts`);
+      const conversationId = crypto.randomUUID(), lease = await claimConversationRun(conversationId), logger = new EventLogger(); logger.beginRun(conversationId, lease.runId);
+      const executor = new ChromeExecutor({ logger }); await executor.beginRun();
+      const code = `const target=await browser.page(${tabId});return await ${race
+        ? "target.getByRole('group',{name:'outer',exact:true}).getByRole('group',{name:'deep',exact:true})"
+        : "target.getByRole('group').getByRole('group')"}.count();`;
+      const run = () => { const toolCallId = crypto.randomUUID(); return executor.runProgram({ code }, lease.signal,
+        { conversationId, toolCallId, logIdentity: { runId: lease.runId, toolCallId, toolCallIdCanonical: true } }); };
+      try { const first = await run(); return race ? { old: first, fresh: await run() } : first; }
+      finally { await executor.endRun(); executor.dispose(); logger.dispose(); lease.finish(); }
+    }, { dev: process.env.SURFWAX_DEV_SERVER_URL!, tabId: fixtureTabId, race });
+    expect(await runScope(false)).toMatchObject({ ok: true, result: 2 });
+    expect(await worker.evaluate(() => (globalThis as any).__textAXQueryCounter.reads)).toBe(1);
+    await worker.evaluate(() => { const state = (globalThis as any).__textAXQueryCounter; state.enabled = false; state.race = true; });
+    const raced = await runScope(true);
+    await test.info().attach('semantic-lifetime-race', { contentType: 'application/json', body: Buffer.from(JSON.stringify(raced)) });
+    expect(raced).toMatchObject({ old: { ok: false, result: { ok: false, error: { code: 'stale-frame', effectUnknown: false } } }, fresh: { ok: true, result: 1 } });
+    expect(await worker.evaluate(() => { const { navigations, released } = (globalThis as any).__textAXQueryCounter; return { navigations, released }; })).toEqual({ navigations: 1, released: 1 });
+
+    // Each response above has already passed through canonical tool delivery
+    // and the next real SDK HTTP request, including automatic observations.
+    for (const page of [target, nativeFrame]) {
+      const state = await page.evaluate(() => ({ hits: (globalThis as any).__textGetterHits, stacks: (globalThis as any).__textGetterStacks, omitted: (globalThis as any).__textGetterOmitted }));
+      expect(state.hits.innerText).toBe(0); expect(state.hits.attribute).toBe(0);
+      expect(state.omitted).toBe(0); expect(state.hits.rect).toBe(state.stacks.length);
+      // Playwright's trace Streamer itself reads iframe geometry in the main
+      // world. Preserve each call; every unrecognized caller remains a failure.
+      expect(state.stacks.filter((entry: any) => !(entry.tag === 'iframe' && entry.stack.includes('at visitNode ')
+        && entry.stack.includes('at Streamer.captureSnapshot ')))).toEqual([]);
+    }
+    expect(manifest.evidence().attempts).toEqual([]);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server); await closeServer(manifest.server);
+  }
 });
 
 test("duplicate text queries share current paint work and preserve strictness and paging", async () => {

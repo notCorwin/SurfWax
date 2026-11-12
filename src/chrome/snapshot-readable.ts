@@ -29,6 +29,8 @@ export type SampledSnapshotNode = {
 };
 /** Internal same-read evaluators supplied by the CDP caller, never tool parameters. */
 export type NativeSnapshotProofs = {
+  /** Same-query native ink bounds bound to the live marker owner; not text. */
+  markerRects?: ReadonlyMap<Element, readonly { left: number; top: number; right: number; bottom: number }[]>;
   /** Complete CDP census of live roots, guarded against shadow-tree mutation. */
   shadowRoots?: readonly ShadowRoot[];
   placeholder: (this: HTMLInputElement | HTMLTextAreaElement, text: Text | null, expected: string) => unknown;

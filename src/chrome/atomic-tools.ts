@@ -106,17 +106,7 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
   define("count_elements", "Count elements matching a target.", targetArgs, "return await (await locate(currentPage, input.target)).count();", locator),
   define("read_elements", "Read visible text and selected attributes from a page of matching elements. The list is live: elements can change between reads or pages. offset defaults to 0 and limit defaults to 25, maximum 100.", z.object({
     ...targetFields, offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().max(100).optional(), attributes: z.array(z.string().min(1)).max(20).optional(),
-  }).strict(), `const elements = (await locate(currentPage, input.target));
-    const total = await elements.count();
-    const offset = input.offset ?? 0, limit = input.limit ?? 25;
-    const items = [];
-    for (let index = offset; index < Math.min(total, offset + limit); index++) {
-      const element = elements.nth(index), entries = [];
-      const text = await element.innerText();
-      for (const name of input.attributes ?? []) entries.push([name, await element.getAttribute(name)]);
-      items.push({ index, text, attributes: Object.fromEntries(entries) });
-    }
-    return { total, items, ...(offset + items.length < total ? { nextOffset: offset + items.length } : {}) };`, { ...locator, summary: "Read text and selected attributes from matching elements in pages." }),
+  }).strict(), `return await (await locate(currentPage, input.target)).readElements({offset:input.offset,limit:input.limit,attributes:input.attributes});`, { ...locator, summary: "Read text and selected attributes from matching elements in pages." }),
   define("verify_state", "Specify exactly one of textIncludes, textEquals, valueEquals, or state. Checks immediately by default (timeoutMs=0); a positive timeoutMs waits for the condition. textEquals compares the complete visible text exactly; textIncludes checks a substring. A timed-out wait returns verified=false and timedOut=true.", z.object({
     tabId, target, timeoutMs: z.number().int().nonnegative().optional(),
     textIncludes: z.string().optional(), textEquals: z.string().optional(), valueEquals: z.string().optional(),

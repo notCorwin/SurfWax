@@ -16,7 +16,7 @@ import { createDeadline } from "../deadline";
 import { ARTIFACT_READ_NOTE, artifactReadSelection, nativeArtifactPageLimit as nativePageLimit } from "../artifact-selection";
 
 const timeoutMs = z.number().int().positive().optional();
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v53";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v54";
 export const inspectInputSchema = z.object({ timeoutMs, since: z.string().min(1).max(256).optional().describe("Compare with this completely delivered observation ID from the same tab, run and scope. Omit to reuse the latest valid baseline automatically."), full: z.boolean().optional().describe("Request a complete new baseline instead of an automatic delta when prior rows are unavailable."), tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional().describe("Restrict inspection to one matching element. To inspect a frame use region:{by:\"css\",value:\"html\",frame:{ref:\"frameRef\"}}; frame is not a top-level inspect_page field. Prefer a structured target. A plain string is a CSS selector, except supported locator expressions such as getByRole('button', {name:'Save'})."),
   fields: z.array(z.enum(["text", "state", "actions"])).min(1).optional().describe("Fields to include; defaults to visible text, state and measured layout. IDs are always present; actionable=true identifies a single element usable as target:{id}. Request actions for supported action hints."), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -59,7 +59,7 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "get_job", inputSchema: getJobInputSchema, summary: "Read a job's status and receipts", description: "Read status and paginated receipts for a job. Pass the previous response's nextCursor as after to read subsequent receipts. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' or 'resultAccess' refers to that top-level field. A running job is not complete." },
   { name: "cancel_job", inputSchema: cancelJobInputSchema, summary: "Request cancellation of a job", description: "Cancel a job in the current conversation. Cancellation does not roll back dispatched effects." },
 ]);
-export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nAn element target {id} already identifies its frame; do not combine it with frame. To use a frameRef, supply a locator target with by, value and frame:{ref}. Byte counts describe the expanded page. A snapshot marked partial=true includes uncertain content and is not complete evidence; inspect the relevant area to verify it. Snapshot lookahead is sparse, non-authoritative context without actionability; use a locator or continue nextCursor to reconstruct items. Use background=true for long operations or actions that may block on a browser event. Use get_job with after set to the previous nextCursor for incremental receipts and bounded waits, or cancel_job to cancel. Continue until terminal; cancellation never rolls back completed effects. Restart preserves job records, not running work. A foreground action blocked by a native dialog may return state=blocked with jobId and blockedBy.dialogId. Use handle_dialog, then check the job until terminal. To upload files, use upload_file with the file input target and existing artifact IDs. If a file chooser must be triggered instead, check fileChoosers in the action result or call list_file_choosers, then use upload_file_chooser with the chooserId. An observed chooser may come from another page event; verify its source before uploading. Handles expire on replacement, navigation, handling, or run end. Event subscriptions belong to this run. Every tool result includes evidenceId for citing that actual result in complete_goal. A snapshot with mode=delta applies added/updated/removed/moved items to the fully delivered baseObservationId; after identifies the previous row (null means first). Unchanged visible rows remain in that baseline. A new full snapshot replaces it; inspect_page full=true requests a fresh complete baseline, while since pins a specific fully delivered observation from this run and scope. Finish every nextCursor before using a snapshot as a baseline. pageSnapshot.actionContexts links only delivered actionable targetId values to same-capture observed container labels; these are not business identity or persistence guarantees. Container and label itemId fields are observation addresses, not action targets; their labels may come from outside this page in the frozen capture. omitted counts associations excluded by the bounded delivery budget; absent associations are unknown. Each completed operation includes pageSnapshot when available; use inspect_page with its nextCursor as cursor and the same tabId to continue a truncated snapshot. pageSnapshotStatus explains when it could not be captured. Background work has no completed snapshot until its terminal get_job result. resultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
+export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nAn element target {id} already identifies its frame; do not combine it with frame. To use a frameRef, supply a locator target with by, value and frame:{ref}. Byte counts describe the expanded page. A snapshot marked partial=true includes uncertain content and is not complete evidence; inspect the relevant area to verify it. Snapshot lookahead is sparse, non-authoritative context without actionability; use a locator or continue nextCursor to reconstruct items. Use background=true for long operations or actions that may block on a browser event. Use get_job with after set to the previous nextCursor for incremental receipts and bounded waits, or cancel_job to cancel. Continue until terminal; cancellation never rolls back completed effects. Restart preserves job records, not running work. A foreground action blocked by a native dialog may return state=blocked with jobId and blockedBy.dialogId. Use handle_dialog, then check the job until terminal. To upload files, use upload_file with the file input target and existing artifact IDs. If a file chooser must be triggered instead, check fileChoosers in the action result or call list_file_choosers, then use upload_file_chooser with the chooserId. An observed chooser may come from another page event; verify its source before uploading. Handles expire on replacement, navigation, handling, or run end. Event subscriptions belong to this run. Every tool result includes evidenceId for citing that actual result in complete_goal. A snapshot with mode=delta applies added/updated/removed/moved items to the fully delivered baseObservationId; after identifies the previous row (null means first). Unchanged visible rows remain in that baseline. A new full snapshot replaces it; inspect_page full=true requests a fresh complete baseline, while since pins a specific fully delivered observation from this run and scope. Finish every nextCursor before using a snapshot as a baseline. pageSnapshot.actionContexts links only delivered actionable targetId values to same-capture observed container labels; these are not business identity or persistence guarantees. Container and label itemId fields are observation addresses, not action targets; their labels may come from outside this page in the frozen capture. omitted counts associations excluded by the bounded delivery budget; absent associations are unknown. Each completed operation includes pageSnapshot when available; use inspect_page with its nextCursor as cursor and the same tabId to continue a truncated snapshot. pageSnapshotStatus describes missing or self-delivered observations: captured is the inspect_page result at capture time; frozen is a cursor continuation, not a new capture. pending, unavailable and not-captured have freshness=unknown; older observations may be stale. Pending can mean handed-off work has not been observed terminal, not that it is still running. Use inspect_page for current page state when browser work permits. resultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
 
 export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean>; scheduler?: ToolScheduler; runSignal?: AbortSignal } = {}): Record<string, ReturnType<typeof dynamicTool>> {
   return Object.fromEntries(PROGRAM_TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
@@ -81,6 +81,10 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
         const startedAt = performance.now();
         let failureCause: unknown;
         let artifactLookup: Promise<{ id: number } | undefined> | undefined;
+        let observedTerminalJob: string | undefined;
+        let resultPending = false;
+        const observationStatus = (output: Record<string, unknown>) => pageObservationStatus(output, definition.name,
+          resultPending || (executor.pendingBackgroundJobs?.() ?? []).some(id => id !== observedTerminalJob), abortSignal?.aborted === true);
         if (options.logger) {
           const started = await logIO(options.logger.append({ type: "tool.started", conversationId: options.conversationId,
             content: { callId, toolName: definition.name }, input, toolCallId, ...identity }), "记录工具启动", Math.min(timeout, 10_000), abortSignal);
@@ -88,9 +92,44 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
         }
         let terminal: Promise<unknown> | undefined;
         const finish = (output: unknown): Promise<unknown> => terminal ??= (async () => {
-          output = output && typeof output === "object" && !Array.isArray(output)
-            ? { ...output, evidenceId: identity?.toolCallId ?? toolCallId }
-            : { result: output, evidenceId: identity?.toolCallId ?? toolCallId };
+          const record = output && typeof output === "object" && !Array.isArray(output) ? output as Record<string, unknown> : { result: output };
+          const status = observationStatus(record);
+          const decorated: Record<string, unknown> = { ...record, ...(status ? { pageSnapshotStatus: status } : {}) };
+          const { pageSnapshot, ...core } = decorated;
+          const ownInspection = definition.name === "inspect_page" && typeof record.observationId === "string" && Array.isArray(record.items) && record.ok !== false;
+          const compaction = { ...options, toolCallId, ...identity,
+            preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job",
+            preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames",
+            preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console" || Boolean(core.sourcePagination),
+            preserveEventStatus: definition.name === "wait_event", preserveVerification: definition.name === "verify_state" };
+          const jobRef = jobResultReferenceInfo(core.result);
+          if (definition.name === "read_artifact")
+            output = core.ok === false && core.error ? { ...core, error: boundedError(core.error) } : core;
+          else if (ownInspection) output = core;
+          else if (jobRef) {
+            const resultAccess = { artifactId: jobRef.id, path: ["result"], ...(jobRef.info.limit === undefined ? {} : { offset: 0, limit: jobRef.info.limit }) };
+            const access = jobRef.info.page ? { artifactId: jobRef.id, path: jobRef.info.page.path, offset: 0, limit: jobRef.info.page.limit } : resultAccess;
+            const reference = { $ref: jobRef.id, resultAccess, access, sidecarsDeferred: true,
+              readNote: ARTIFACT_READ_NOTE, pathsNote: "Shared or cyclic object identity is not exposed.",
+              ...(jobRef.info.error ? { error: recoveryError(jobRef.info.error, definition.name), errorAccess: { artifactId: jobRef.id, path: ["result", "error"] } } : {}),
+              ...(jobRef.info.artifact ? { artifact: jobRef.info.artifact, artifactAccess: { artifactId: jobRef.id, path: ["result", "artifact"] } } : {}),
+              ...(jobRef.info.screenshot ? { ...jobRef.info.visualContext, screenshot: { ...jobRef.info.screenshot, ...(jobRef.info.inlineScreenshot ? { artifactId: jobRef.id, artifactPath: ["result", "screenshot"] } : {}) }, visualAccess: { artifactId: jobRef.id, path: ["result"] } } : {}) };
+            const reservedBytes = previewEncoder.encode(JSON.stringify({ ...reference, evidenceId: identity?.toolCallId ?? toolCallId })).byteLength;
+            const { result: _result, ...rest } = core;
+            const compact = normalizationExceedsBudget(rest)
+              ? await storeUnnormalizedResult(rest, compaction)
+              : await compactToolResult(normalizeResultEnvelope(rest), { ...compaction, reservedBytes });
+            const visible = compact as Record<string, unknown>;
+            const { access: receiptsAccess, oversizedItem: receiptsOversizedItem, ...visibleEnvelope } = visible;
+            output = { ...visibleEnvelope, ...(visible.$ref ? { receiptsArtifactId: visible.$ref, receiptsAccess, ...(receiptsOversizedItem ? { receiptsOversizedItem } : {}) } : {}), ...reference };
+          } else if (normalizationExceedsBudget(core)) output = await storeUnnormalizedResult(core, compaction);
+          else {
+            const normalized = normalizeResultEnvelope(core);
+            const originalResult = normalized.envelopeWrapped === true ? core : Object.hasOwn(core, "result") ? core.result : undefined;
+            const hasResult = Object.hasOwn(normalized, "result");
+            output = await compactToolResult(normalized, { ...compaction, preserveArtifactValue: hasResult, ...(hasResult ? { originalResult } : {}) });
+          }
+          output = { ...output as object, ...(pageSnapshot ? { pageSnapshot } : {}), evidenceId: identity?.toolCallId ?? toolCallId };
           if (options.logger) {
             const failed = Boolean(output && typeof output === "object" && "ok" in output && output.ok === false);
             const interrupted = failed && parent?.aborted === true;
@@ -129,8 +168,6 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           entered = true;
           let output: unknown;
           let executing = false;
-          let observedTerminalJob: string | undefined;
-          let resultPending = false;
           let inspectionDelivery: SnapshotDeliveryLease | undefined;
           let openedTabId: number | undefined;
           let recentRefs: string[] = [];
@@ -140,14 +177,14 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             abortSignal?.throwIfAborted();
             const value = definition.inputSchema.parse(input);
             executing = true;
-            const result = definition.name === "inspect_page" ? await executor.inspect({ ...value, wire: { maxBytes: INSPECTION_RESULT_BYTES, evidenceId: identity?.toolCallId ?? toolCallId } } as any, abortSignal, context)
+            const result = definition.name === "inspect_page" ? await executor.inspect({ ...value, wire: { maxBytes: INSPECTION_RESULT_BYTES - INSPECTION_STATUS_BYTES, evidenceId: identity?.toolCallId ?? toolCallId } } as any, abortSignal, context)
               : definition.name === "find_elements" ? await executor.findElements(value as any, abortSignal, context)
               : definition.name === "list_frames" ? await executor.listFrames(value as any, abortSignal, context)
               : definition.name === "list_tabs" ? await executor.listTabs(abortSignal, value.timeoutMs)
               : definition.name === "switch_tab" ? await executor.switchTab(value.tabId, abortSignal, value.timeoutMs)
               : definition.name === "list_downloads" ? await executor.listDownloads(value, abortSignal)
               : definition.name === "read_console" && value.mode === "retained" ? await executor.readRetainedConsole(value as any, abortSignal, context)
-              : definition.name === "read_artifact" ? await executor.readArtifact(value, abortSignal, context)
+              : definition.name === "read_artifact" ? await executor.readArtifact(value, abortSignal, context, observationStatus({}))
               : definition.name === "list_file_choosers" ? await executor.listFileChoosers(value, abortSignal, context)
               : definition.name === "subscribe_event" ? await executor.subscribeEvent(value, abortSignal, context)
               : definition.name === "wait_event" ? await executor.waitEvent(value, abortSignal, context)
@@ -159,6 +196,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
               : definition.name === "cancel_job" ? await executor.queryJobs({ action: "cancel", id: value.jobId }, abortSignal, context)
               : await executor.runProgram(program!, abortSignal, context);
             resultPending = (result as any)?.complete === false || ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal !== true);
+            if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
             if (definition.name === "open_tab" && Number.isSafeInteger((result as any)?.result?.tabId)) openedTabId = (result as any).result.tabId;
             if (definition.name === "find_elements" && Array.isArray((result as any)?.elements))
               recentRefs = (result as any).elements.flatMap((element: any) => typeof element?.id === "string" ? [element.id] : []);
@@ -171,49 +209,13 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? jobRef?.info.error ?? (result as any).result?.error : undefined;
             const artifact = (result as any)?.result?.artifact;
             const baseEnvelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: recoveryError(failure, definition.name) } : result;
-            const envelope = pagination ? { ...baseEnvelope as object, ...presentation } : baseEnvelope;
-            if (definition.name === "read_artifact") {
-              output = result;
-            } else if (definition.name === "inspect_page" && envelope && typeof envelope === "object"
-              && Object.hasOwn(envelope, "observationId") && Object.hasOwn(envelope, "items")) {
+            const skippedCapture = definition.name !== "inspect_page" && (NO_PAGE_CAPTURE.has(definition.name) || definition.name === "read_console" && value.mode === "retained");
+            const skippedStatus = skippedCapture ? observationStatus(baseEnvelope as Record<string, unknown>) : undefined;
+            const envelope = pagination || skippedStatus ? { ...baseEnvelope as object, ...presentation, ...(skippedStatus ? { pageSnapshotStatus: skippedStatus } : {}) } : baseEnvelope;
+            if (definition.name === "inspect_page" && envelope && typeof envelope === "object"
+              && Object.hasOwn(envelope, "observationId") && Object.hasOwn(envelope, "items"))
               inspectionDelivery = inspectionPageDelivery(result, identity?.toolCallId ?? toolCallId, value.cursor !== undefined);
-              output = envelope;
-            } else if (definition.name === "find_elements") {
-              output = envelope;
-            } else if (jobRef) {
-              const resultAccess = { artifactId: jobRef.id, path: ["result"], ...(jobRef.info.limit === undefined ? {} : { offset: 0, limit: jobRef.info.limit }) };
-              const access = jobRef.info.page ? { artifactId: jobRef.id, path: jobRef.info.page.path, offset: 0, limit: jobRef.info.page.limit } : resultAccess;
-              const reference = { $ref: jobRef.id, resultAccess, access, sidecarsDeferred: true,
-                readNote: ARTIFACT_READ_NOTE, pathsNote: "Shared or cyclic object identity is not exposed.",
-                ...(jobRef.info.error ? { error: recoveryError(jobRef.info.error, definition.name), errorAccess: { artifactId: jobRef.id, path: ["result", "error"] } } : {}),
-                ...(jobRef.info.artifact ? { artifact: jobRef.info.artifact, artifactAccess: { artifactId: jobRef.id, path: ["result", "artifact"] } } : {}),
-                ...(jobRef.info.screenshot ? { ...jobRef.info.visualContext, screenshot: { ...jobRef.info.screenshot, ...(jobRef.info.inlineScreenshot ? { artifactId: jobRef.id, artifactPath: ["result", "screenshot"] } : {}) }, visualAccess: { artifactId: jobRef.id, path: ["result"] } } : {}) };
-              const reservedBytes = previewEncoder.encode(JSON.stringify({ ...reference, evidenceId: identity?.toolCallId ?? toolCallId })).byteLength;
-              const { result: _result, ...rest } = envelope as Record<string, unknown>;
-              const compact = normalizationExceedsBudget(rest)
-                ? await storeUnnormalizedResult(rest, { ...options, toolCallId, ...identity, preserveDiagnosticStatus: Boolean(pagination), preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" })
-                : await compactToolResult(normalizeResultEnvelope(rest), { ...options, toolCallId, ...identity, reservedBytes, preserveDiagnosticStatus: Boolean(pagination), preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" });
-              const visible = compact as Record<string, unknown>;
-              const { access: receiptsAccess, oversizedItem: receiptsOversizedItem, ...visibleEnvelope } = visible;
-              output = { ...visibleEnvelope, ...(visible.$ref ? { receiptsArtifactId: visible.$ref, receiptsAccess, ...(receiptsOversizedItem ? { receiptsOversizedItem } : {}) } : {}), ...reference };
-            } else
-            if (normalizationExceedsBudget(envelope)) {
-              output = await storeUnnormalizedResult(envelope, { ...options, toolCallId, ...identity,
-                preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job",
-                preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames",
-                preserveInspectionStatus: definition.name === "inspect_page", preserveEventStatus: definition.name === "wait_event",
-                preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveVerification: definition.name === "verify_state" });
-            } else {
-              const normalized = envelope && typeof envelope === "object" && !Array.isArray(envelope)
-                ? normalizeResultEnvelope(envelope as Record<string, unknown>) : envelope;
-              const originalResult = normalized && typeof normalized === "object" && "envelopeWrapped" in normalized && normalized.envelopeWrapped === true
-                ? envelope : envelope && typeof envelope === "object" && Object.hasOwn(envelope, "result") ? (envelope as Record<string, unknown>).result : undefined;
-              const hasResult = Boolean(normalized && typeof normalized === "object" && Object.hasOwn(normalized, "result"));
-              output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveEventStatus: definition.name === "wait_event", preserveArtifactValue: hasResult, ...(hasResult ? { originalResult } : {}) });
-            }
-            if (pagination && previewEncoder.encode(JSON.stringify({ ...output as object, evidenceId: identity?.toolCallId ?? toolCallId })).byteLength > LARGE_RESULT_BYTES)
-              throw new Error("CommandError[diagnostic-delivery-too-large]: Diagnostic metadata cannot fit the response budget; no complete source delivery was established");
-            if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
+            output = envelope;
           } catch (error) {
             output = await failureFor(error, executing);
           }
@@ -225,7 +227,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             const otherPending = pending.some((id) => id !== observedTerminalJob);
             let pageEvidence: Record<string, unknown>;
             if (resultPending || otherPending) {
-              pageEvidence = { pageSnapshotStatus: { state: "pending", reason: "browser-job-running" } };
+              pageEvidence = { pageSnapshotStatus: { state: "pending", reason: "browser-job-unobserved-terminal" } };
             } else {
               try {
                 const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
@@ -275,17 +277,11 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           }
           let saved: unknown;
           try {
-            if (definition.name === "find_elements" && output && typeof output === "object") {
-              const { pageSnapshot, pageSnapshotStatus, ...core } = output as Record<string, unknown>;
-              if (!pageSnapshot && Array.isArray(core.elements)) core.elements = core.elements.map((element: any) => {
+            if (definition.name === "find_elements" && output && typeof output === "object" && !(output as any).pageSnapshot && Array.isArray((output as any).elements))
+              output = { ...output, elements: (output as any).elements.map((element: any) => {
                 const { context: _context, ...rest } = element;
                 return { ...rest, context: { status: "unknown", reason: "snapshot-unavailable" } };
-              });
-              const compact = normalizationExceedsBudget(core)
-                ? await storeUnnormalizedResult(core, { ...options, toolCallId, ...identity, preserveSearchStatus: true })
-                : await compactToolResult(normalizeResultEnvelope(core), { ...options, toolCallId, ...identity, preserveSearchStatus: true });
-              output = { ...compact as object, ...(pageSnapshot ? { pageSnapshot } : {}), ...(pageSnapshotStatus ? { pageSnapshotStatus } : {}) };
-            }
+              }) };
             saved = await finish(output);
             if (!abortSignal?.aborted) inspectionDelivery?.finish();
             else inspectionDelivery?.cancel();
@@ -310,6 +306,36 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
 
 const LARGE_RESULT_BYTES = TOOL_RESULT_BYTES;
 const INSPECTION_RESULT_BYTES = 16 * 1024;
+const INSPECT_CURRENT_GUIDANCE = "Use inspect_page for current page state; previous observations may be stale.";
+const PENDING_OBSERVATION_GUIDANCE = "Use get_job for handed-off work, then inspect_page for current page state.";
+const FROZEN_OBSERVATION_STATUS = { state: "frozen", freshness: "frozen", guidance: "Use inspect_page without cursor for a new observation." };
+const observationEncoder = new TextEncoder();
+const INSPECTION_STATUS_BYTES = observationEncoder.encode(JSON.stringify({ pageSnapshotStatus: FROZEN_OBSERVATION_STATUS })).byteLength;
+
+/** Describe this result's observation without consulting or asserting an old baseline. */
+function pageObservationStatus(output: Record<string, unknown>, toolName: string, unobservedJob: boolean, interrupted: boolean): Record<string, unknown> | undefined {
+  if (output.pageSnapshot && typeof output.pageSnapshot === "object") return undefined;
+  if (toolName === "inspect_page" && typeof output.observationId === "string" && Array.isArray(output.items) && output.ok !== false)
+    return output.continuation === true ? FROZEN_OBSERVATION_STATUS : { state: "captured", freshness: "at-capture" };
+  const existing = output.pageSnapshotStatus;
+  if (interrupted || output.ok === false)
+    return { ...(existing && typeof existing === "object" && !Array.isArray(existing) ? existing : {}),
+      state: "unavailable", reason: interrupted ? "tool-interrupted" : "tool-failed", freshness: "unknown", guidance: INSPECT_CURRENT_GUIDANCE };
+  if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+    const status = existing as Record<string, unknown>;
+    return { ...status, freshness: "unknown", guidance: status.state === "pending" ? PENDING_OBSERVATION_GUIDANCE : INSPECT_CURRENT_GUIDANCE };
+  }
+  return unobservedJob
+    ? { state: "pending", reason: "browser-job-unobserved-terminal", freshness: "unknown", guidance: PENDING_OBSERVATION_GUIDANCE }
+    : { state: "not-captured", reason: "tool-does-not-capture-page", freshness: "unknown", guidance: INSPECT_CURRENT_GUIDANCE };
+}
+
+function observationMetadata(record: Record<string, unknown> | undefined, artifactId: number, prefix: (string | number)[] = []): Record<string, unknown> {
+  if (!record?.pageSnapshotStatus || typeof record.pageSnapshotStatus !== "object") return {};
+  const status = record.pageSnapshotStatus as Record<string, unknown>;
+  return { pageSnapshotStatus: { ...status, ...(Object.hasOwn(status, "error") ? { error: boundedError(status.error),
+    errorAccess: { artifactId, path: [...prefix, "pageSnapshotStatus", "error"] } } : {}) } };
+}
 // Only the native, already-paginated inspection envelope gets the larger
 // allowance. Unknown wrappers and additional fields retain artifact handling.
 const inspectionInteger = z.number().int().nonnegative();
@@ -687,6 +713,7 @@ async function storeUnnormalizedResult(value: unknown, options: { logger?: Event
     ...(job ? jobMetadata(job) : {}), ...(search ? { ...searchMetadata(search), ...candidateContextPreview(search) } : {}),
     ...(inspection ? inspectionMetadata(inspection, event.id) : {}), ...(browserEvents ? eventMetadata(browserEvents) : {}),
     ...retainedConsoleMetadata(root, event.id),
+    ...observationMetadata(root, event.id),
     ...(options.preserveDiagnosticStatus ? diagnosticPresentationMetadata(root) : {}),
     ...(diagnostic ? { ...(diagnostic.integrity === "complete" || diagnostic.integrity === "incomplete" ? { integrity: diagnostic.integrity } : {}),
       ...(typeof diagnostic.hasMore === "boolean" || diagnostic.hasMore === null ? { hasMore: diagnostic.hasMore } : {}),
@@ -816,6 +843,7 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
     ...(inspection ? inspectionMetadata(inspection, event.id) : {}),
     ...(browserEvents ? eventMetadata(browserEvents) : {}),
     ...retainedConsoleMetadata(original, event.id, prefix),
+    ...observationMetadata(original, event.id, prefix),
     ...(options.preserveDiagnosticStatus ? diagnosticPresentationMetadata(original) : {}),
     ...(diagnostic ? { ...(diagnostic.integrity === "complete" || diagnostic.integrity === "incomplete" ? { integrity: diagnostic.integrity } : {}),
       ...(typeof diagnostic.hasMore === "boolean" || diagnostic.hasMore === null ? { hasMore: diagnostic.hasMore } : {}),
@@ -858,6 +886,8 @@ function recoveryError<T extends Record<string, any>>(error: T, toolName: string
   if (error.effectUnknown === true) return { ...error, retryable: false, recovery: "Effect unknown. Inspect the current state and verify the outcome before deciding whether to act again." };
   if (toolName === "read_console" && ["invalid-tab-id", "bound-tab-closed", "tab-closed", "window-closed", "target-closed"].includes(error.code))
     return { ...error, retryable: false, recovery: "For previously captured console history, use read_console with mode=retained and the original tabId. It reads only this conversation/run's canonical captures without reopening the page; missing capture remains unknown. Continue every returned cursor while hasMore=true." };
+  if (["window-closed", "bound-tab-closed", "no-bound-tab"].includes(error.code))
+    return { ...error, retryable: false, recovery: "Use list_tabs to find an available tab, then switch_tab to select it before continuing." };
   if (["not-found", "strict-mode", "frame-not-found"].includes(error.code))
     return { ...error, retryable: false, recovery: "Use list_frames and specify the target frame, or inspect_page/find_elements and use a unique observed element ID." };
   if (typeof error.code === "string" && /stale|expired|detached|identity-unknown/.test(error.code))

@@ -477,26 +477,104 @@ test("debugger cleanup quarantines delayed native calls without blocking another
     // native target is gone instead of persisting a false unknown detach.
     const opener = await opened.context.newPage();
     await opener.goto(`${provider.origin}/target`);
+    await opener.setContent(`<h1>Surviving portal</h1><button>Portal action</button><iframe src="${provider.origin}/target?portal-frame"></iframe>`);
     const sourceUrl = `${provider.origin}/target?self-closing-cleanup`;
     const popupEvent = opener.waitForEvent("popup");
-    await opener.evaluate(url => window.open(url), sourceUrl);
+    await opener.evaluate(url => window.open(url, "_blank", "popup,width=900,height=700"), sourceUrl);
     const source = await popupEvent;
     await source.waitForLoadState();
     await source.setContent('<button onclick="setTimeout(()=>window.close(),100)">Close source</button>');
-    const sourceTabId = await opened.page.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url)!.id!, sourceUrl);
-    const bounds = (await source.getByRole("button", { name: "Close source" }).boundingBox())!;
-    await claim("self-closed");
-    const selfClosedIdentity = await opened.page.evaluate(() => (globalThis as any).__debuggerLifecycle.bridges.get("self-closed").identity);
-    expect((await request("self-closed", "attach", [{ tabId: sourceTabId }, "1.3"])).error).toBeUndefined();
+    const pages = await opened.page.evaluate(async ({ sourceUrl, portalUrl }) => {
+      const tabs = await chrome.tabs.query({});
+      const source = tabs.find(tab => tab.url === sourceUrl)!;
+      const portal = tabs.find(tab => tab.url === portalUrl)!;
+      return { source: { tabId: source.id!, windowId: source.windowId }, portal: { tabId: portal.id!, windowId: portal.windowId } };
+    }, { sourceUrl, portalUrl: `${provider.origin}/target` });
+    const sourceTabId = pages.source.tabId;
+    expect(pages.source.windowId).not.toBe(pages.portal.windowId);
+    const selfClosedIdentity = await opened.page.evaluate(async ({ dev, sourceTabId }) => {
+      const { ChromeExecutor } = await import(`${dev}/src/chrome/executor.ts`);
+      const { createProgramTools } = await import(`${dev}/src/chrome/tool.ts`);
+      const { EventLogger } = await import(`${dev}/src/logging.ts`);
+      const { claimConversationRun, getRunIdentity } = await import(`${dev}/src/agent/coordinator.ts`);
+      const harness = (globalThis as any).__debuggerLifecycle;
+      const conversationId = crypto.randomUUID();
+      const lease = await claimConversationRun(conversationId);
+      const identity = getRunIdentity()!;
+      const logger = new EventLogger();
+      logger.beginRun(conversationId, identity.runId);
+      const executor = new ChromeExecutor({ logger });
+      await executor.beginRun();
+      // Bind through the real selection operation before the window closes;
+      // do not replace browserState or the native Chrome API in this regression.
+      await executor.switchTab(sourceTabId);
+      const tools = createProgramTools(executor, { logger, conversationId, runSignal: lease.signal });
+      harness.observation = { executor, logger, lease, async call(name: string, input: unknown = {}) {
+        return tools[name].execute(input, { toolCallId: crypto.randomUUID(), messages: [], context: {} });
+      } };
+      return identity;
+    }, { dev: process.env.SURFWAX_DEV_SERVER_URL!, sourceTabId });
     const sourceClosed = source.waitForEvent("close");
-    const clicked = await request("self-closed", "sendCommand", [{ tabId: sourceTabId }, "Input.dispatchMouseEvent", {
-      type: "mousePressed", x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2,
-      button: "left", buttons: 1, clickCount: 1, surfWaxAtomicClick: true,
-    }]);
-    expect(clicked.error).toBeUndefined();
+    const clicked = await opened.page.evaluate(sourceTabId => (globalThis as any).__debuggerLifecycle.observation.call("click", {
+      tabId: sourceTabId, target: { by: "role", value: "button", name: "Close source", exact: true },
+    }), sourceTabId);
+    expect(clicked, JSON.stringify(clicked)).toMatchObject({ ok: true, result: { performed: true } });
     await sourceClosed;
+    await expect.poll(() => opened.page.evaluate(id => chrome.windows.get(id).then(() => true, () => false), pages.source.windowId)).toBe(false);
+    const reads = await opened.page.evaluate(async ({ portalTabId, sourceTabId }) => {
+      const { call } = (globalThis as any).__debuggerLifecycle.observation;
+      const target = { by: "role", value: "button", name: "Portal action", exact: true };
+      const results: Record<string, any> = {};
+      results.defaultClosed = await call("inspect_page", { full: true });
+      results.tabs = await call("list_tabs");
+      results.explicitInspect = await call("inspect_page", { tabId: portalTabId, full: true });
+      results.explicitFind = await call("find_elements", { tabId: portalTabId, target });
+      results.explicitFrames = await call("list_frames", { tabId: portalTabId });
+      results.explicitSubscribe = await call("subscribe_event", { tabId: portalTabId, kind: "console" });
+      await chrome.scripting.executeScript({ target: { tabId: portalTabId }, func: () => console.log("SURVIVING_PORTAL_CONSOLE") });
+      results.consoleEvent = await call("wait_event", { subscriptionId: results.explicitSubscribe.subscriptionId, waitMs: 1_000 });
+      await call("unsubscribe_event", { subscriptionId: results.explicitSubscribe.subscriptionId });
+      for (const [name, input] of [
+        ["inspect_page", { full: true }], ["find_elements", { target }],
+        ["list_frames", {}], ["subscribe_event", { kind: "console" }],
+      ] as const) results[`invalid:${name}`] = await call(name, { ...input, tabId: sourceTabId });
+      // Explicit observations do not silently move the default binding.
+      results.defaultStillClosed = await call("inspect_page", { full: true });
+      results.switched = await call("switch_tab", { tabId: portalTabId });
+      results.defaultInspect = await call("inspect_page", { full: true });
+      results.defaultFind = await call("find_elements", { target });
+      results.defaultFrames = await call("list_frames");
+      results.defaultSubscribe = await call("subscribe_event", { kind: "console" });
+      await call("unsubscribe_event", { subscriptionId: results.defaultSubscribe.subscriptionId });
+      return results;
+    }, { portalTabId: pages.portal.tabId, sourceTabId });
+    for (const key of ["defaultClosed", "defaultStillClosed"]) {
+      expect(reads[key]).toMatchObject({ ok: false, error: { code: "window-closed", recovery: expect.stringContaining("switch_tab") } });
+    }
+    expect(reads.tabs.result.some((tab: any) => tab.id === pages.portal.tabId && tab.windowId === pages.portal.windowId)).toBe(true);
+    for (const key of ["explicitInspect", "defaultInspect"]) {
+      expect(reads[key].ok, JSON.stringify(reads[key])).not.toBe(false);
+      expect(JSON.stringify(reads[key])).toContain("Surviving portal");
+    }
+    for (const key of ["explicitFind", "defaultFind"]) expect(reads[key].elements).toHaveLength(1);
+    for (const key of ["explicitFrames", "defaultFrames"]) expect(reads[key].frames.length).toBeGreaterThan(0);
+    for (const key of ["explicitSubscribe", "defaultSubscribe"]) expect(reads[key].subscriptionId).toEqual(expect.any(String));
+    expect(JSON.stringify(reads.consoleEvent)).toContain("SURVIVING_PORTAL_CONSOLE");
+    for (const key of Object.keys(reads).filter(key => key.startsWith("invalid:"))) {
+      expect(reads[key]).toMatchObject({ ok: false });
+      expect(reads[key].error.code).not.toBe("window-closed");
+    }
+    expect(reads.switched.result.find((tab: any) => tab.id === pages.portal.tabId)).toMatchObject({ current: true });
+    await test.info().attach("closed-window-explicit-targets", { body: JSON.stringify({ pages, reads }, null, 2), contentType: "application/json" });
+    // The public executor has its own normal UI-side teardown reads. Measure
+    // the background finalization separately, as in the original raw-port case.
+    await opened.page.evaluate(() => (globalThis as any).__debuggerLifecycle.observation.executor.endRun());
     const targetQueriesBeforeCleanup = await worker.evaluate(() => (globalThis as any).__debuggerGate.targetQueries);
-    await finish("self-closed");
+    await opened.page.evaluate(async () => {
+      const { executor, logger, lease } = (globalThis as any).__debuggerLifecycle.observation;
+      executor.dispose(); logger.dispose(); lease.finish();
+      delete (globalThis as any).__debuggerLifecycle.observation;
+    });
     await idle();
     const selfClosedEvents = (await readEvents(opened.page)).filter(event => event.runId === selfClosedIdentity.runId);
     const cleanupTargetQueries = await worker.evaluate(() => (globalThis as any).__debuggerGate.targetQueries) - targetQueriesBeforeCleanup;
@@ -520,6 +598,11 @@ test("debugger cleanup quarantines delayed native calls without blocking another
       contentType: "application/json",
     });
   } finally {
+    await opened.page.evaluate(async () => {
+      const observation = (globalThis as any).__debuggerLifecycle?.observation;
+      if (observation) try { await observation.executor.endRun(); }
+      finally { observation.executor.dispose(); observation.logger.dispose(); observation.lease.finish(); }
+    }).catch(() => undefined);
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });

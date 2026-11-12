@@ -1,5 +1,6 @@
 import { SNAPSHOT_CANDIDATE_CONTEXT, semanticContexts, automaticContexts, type CandidateAssociation } from "./candidate-context";
 import { RENDERED_TEXT_READER_SOURCE, RENDERED_TEXT_SOURCE } from "./rendered-text";
+import { MARKER_STYLES, markerCaptureEvidence, prepareMarkerQuery, measureMarkerInk } from "./rendered-marker";
 import type { EventLogger } from "../logging";
 import { ElementIds } from "./element-ids";
 import { resolveSampledElement } from "./sampled-element";
@@ -28,19 +29,20 @@ import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotClip, type S
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
 import { axEllipsisCandidate, confirmAxEllipsis, type AxEllipsisCandidate } from "./snapshot-ax-ellipsis";
 import { AX_ELLIPSIS_GEOMETRY_SOURCE } from "./snapshot-ellipsis-geometry";
-import { SNAPSHOT_FRAME_PAINT_SOURCE } from "./snapshot-frame-paint";
+import { SNAPSHOT_FRAME_PAINT_SOURCE, RENDERED_FRAME_PAINT_SOURCE } from "./snapshot-frame-paint";
 import { SNAPSHOT_CONTROL_PAINT_SOURCE } from "./snapshot-control-paint";
 import { PLACEHOLDER_EVIDENCE_SOURCE, samePlaceholderEvidence, type PlaceholderEvidence } from "./snapshot-placeholder";
 import { FRAME_OWNER_FULLY_VISIBLE_SOURCE } from "./snapshot-frame-containment";
 import { createFrameHandle } from "./snapshot-frame-handle";
 import { createFrameVisibility } from "./frame-visibility";
 import { PROGRAM_EVENT_INVOKE } from "./program-handles";
+import { scheduleDeadline } from "../deadline";
 
 const EVALUATION_CODEC_FACTORY = `(${createLogGraphCodec.toString()})({ verifyIntrinsics: true })`;
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type Command = (debuggee: Debuggee, method: string, params?: object) => Promise<any>;
-type RunContext = { signal?: AbortSignal; conversationId?: string; runId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
+type RunContext = { signal?: AbortSignal; deadlineAt?: number; conversationId?: string; runId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type Waiter = { resolve: (value: any) => void; reject: (error: Error) => void };
 type FileChooserRecord = { backendNodeId: number; debuggee: Debuggee; mode: string; frameId?: string };
 type FileChooserClaim = { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void };
@@ -107,6 +109,7 @@ export async function snapshotGeometry(layouts: Array<{ debuggee: Debuggee; snap
 export type FindOptions = { cursor?: string; limit?: number };
 type SearchSnapshot = {
   id: string; tabId: number; generation: number; session: Session; key: string;
+  frameId?: string;
   conversationId?: string; runId?: string; debuggee: Debuggee; total: number;
   candidates?: Candidate[]; arrayId?: string; group?: string;
 };
@@ -132,6 +135,8 @@ type ObservationRecord = {
   limitations?: string;
   visual?: true;
 };
+type IsolatedFrameRead = { objectId: string; executionContextId: number; frameId: string; guard: () => void };
+type AccessibilityRead = { world: IsolatedFrameRead; documentBackend: number; documentId: string; nodes: Map<string, any>; backends: Map<number, any[]> };
 type ObservationContext = { id: number; uniqueId: string; frameId: string; extension: boolean };
 type RootReadScope = { frameId: string; loaderId?: string; revision: number; context?: ObservationContext; signal?: AbortSignal };
 type Session = {
@@ -400,6 +405,7 @@ export const FILE_UPLOAD_FUNCTION = `function(files){
 }`;
 
 const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) {
+  if(rootDocument && rootDocument!==document && rootDocument.ownerDocument!==document)throw new Error("AutomationError[frame-unavailable]: Locator root does not belong to the isolated document");
   const normalize = value => String(value ?? "").replace(/\s+/g, " ").trim();
   const roleOf = el => el.getAttribute("role") || ({
     A: el.hasAttribute("href") ? "link" : "generic", BUTTON: "button", SELECT: "combobox", TEXTAREA: "textbox",
@@ -500,6 +506,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
 
 const SEARCH_META_SOURCE = String.raw`function(includeIdentity, readText) {
   const el = this;
+  if (el.ownerDocument !== document) return {connected:!!el.isConnected};
   const normalize = value => String(value ?? "").replace(/\s+/g, " ").trim();
   const role = el.getAttribute("role") || ({
     A: el.hasAttribute("href") ? "link" : "generic", BUTTON:"button", SELECT:"combobox", TEXTAREA:"textbox", OPTION:"option", IMG:"img", SUMMARY:"button", FORM:"form", TABLE:"table", TR:"row", TD:"cell", TH:"columnheader",
@@ -517,13 +524,14 @@ export class AutomationRuntime {
   private readonly sessions = new Map<number, Session>();
   private readonly activeActions = new Map<number, number>();
   private readonly objectDebuggees = new Map<string, Debuggee>();
+  private readonly objectContexts = new Map<string, number>();
   private context: RunContext = {};
   private readonly waiters = new Map<number, Map<string, Set<Waiter>>>();
   private lastWait?: { locator: LocatorSpec; state?: ElementState; matches?: number; candidates?: Candidate[]; documentId: number; reason: string; attempt: number };
   private lastAttemptLog?: { reason: string; at: number };
   private readonly observations = new Map<string, ObservationRecord>();
   private readonly inspectionSnapshots = new Map<string, InspectSnapshot>();
-  private readonly axRoots = new Map<string, number>();
+  private readonly frontendRoots = new Map<string, number>();
   private readonly fileChoosers = new Map<number, FileChooserRecord>();
   private readonly searches = new Map<string, SearchSnapshot>();
   private readonly frameLists = new Map<string, FrameListSnapshot>();
@@ -628,10 +636,20 @@ export class AutomationRuntime {
   }) {}
 
   setContext(context: RunContext): void { this.context = context; }
+  private readonly markerQueries = new Map<string, { debuggee: Debuggee; group: string }>();
   hasSession(tabId: number): boolean { return this.sessions.has(tabId); }
   sessionIdentity(tabId: number): object | undefined { return this.sessions.get(tabId); }
   async clearContext(): Promise<void> {
     this.context = {};
+    // An aborted read can leave its retained identity/observer alive until the
+    // executor clears its signal. Dispose before releasing remote references.
+    await Promise.all([...this.markerQueries].map(async ([objectId, { debuggee, group }]) => {
+      await this.options.command(debuggee, "Runtime.callFunctionOn", {
+        objectId, functionDeclaration: "function(){this.dispose()}", returnByValue: true,
+      }).catch(() => undefined);
+      await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined);
+      this.markerQueries.delete(objectId);
+    }));
     // Invalidate before releasing the group: in-flight evaluations can create
     // their object after the group has been released and must clean up late.
     this.clearFrameDocuments(undefined, undefined, false);
@@ -642,6 +660,7 @@ export class AutomationRuntime {
     }
     await Promise.all([...debuggees.values()].map((debuggee) => this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: "surf-wax-automation" }).catch(() => undefined)));
     this.objectDebuggees.clear();
+    this.objectContexts.clear();
   }
 
   async observationDebuggees(tabId: number): Promise<Debuggee[]> {
@@ -968,7 +987,7 @@ export class AutomationRuntime {
     session.refUsage.clear();
     session.lastSnapshot = undefined;
     this.objectDebuggees.clear();
-    this.axRoots.clear();
+    this.frontendRoots.clear();
     if (!preserveChooser) this.fileChoosers.delete(session.tabId);
   }
 
@@ -998,7 +1017,7 @@ export class AutomationRuntime {
     this.observations.clear();
     this.inspectionSnapshots.clear();
     this.fileChoosers.clear();
-    this.axRoots.clear();
+    this.frontendRoots.clear();
     for (const events of this.waiters.values()) for (const waiters of events.values()) for (const waiter of waiters) waiter.reject(abortError());
     this.waiters.clear();
     await Promise.all(sessions.map(async (session) => {
@@ -1677,15 +1696,20 @@ export class AutomationRuntime {
       }
       const session = await this.session(tabId);
       if (operation === "count") return (await this.resolveMetadata(session, spec)).length;
+      if (operation === "readElements") return this.readElements(session, spec, args[0] as { offset?: number; limit?: number; attributes?: string[] });
       if (operation === "readCondition") {
         const condition = args[0];
         if (!["text", "value", "visible", "enabled", "editable", "checked"].includes(String(condition))) throw automationError("invalid-condition", { condition });
         const objectId = await this.resolveConditionTarget(session, spec);
         if (!objectId) return { present: false, actual: null };
         const targetSession = this.objectSession(session, objectId);
-        if (condition === "text" || condition === "visible") {
+        let checkTextFrame: (() => Promise<boolean>) | undefined;
+        if (condition === "text") {
+          checkTextFrame = await this.textFramePaintGuard(session, targetSession, objectId, spec);
+          if (!await checkTextFrame()) return { present: true, actual: null };
+        } else if (condition === "visible") {
           const frameId = await this.actionFrameId(session, targetSession, objectId, spec);
-          if (!await this.frameOwnersVisible(session, frameId)) return { present: true, actual: condition === "text" ? null : false };
+          if (!await this.frameOwnersVisible(session, frameId)) return { present: true, actual: false };
         }
         const observation = await this.callOn(targetSession, objectId, `function(condition) {
           if (!this.isConnected) return { present: false, actual: null };
@@ -1706,9 +1730,10 @@ export class AutomationRuntime {
           }
           if (!this.isConnected) return { present: false, actual: null };
           return { present: true, actual, invalidChecked };
-        }`, [condition]);
+        }`, [condition], condition === "text");
         if (!observation || typeof observation.present !== "boolean" || !Object.hasOwn(observation, "actual"))
           throw automationError("state-unavailable", { reason: "invalid-condition-observation" });
+        if (checkTextFrame && !await checkTextFrame()) return { present: observation.present, actual: null };
         if (observation.invalidChecked) throw automationError("invalid-checked-state", { reason: "unsupported-or-indeterminate" });
         if (observation.present && condition === "editable" && typeof observation.actual !== "boolean")
           throw automationError("state-unavailable", { reason: "missing-editable-state" });
@@ -1733,9 +1758,10 @@ export class AutomationRuntime {
         const objectId = await this.resolveOne(session, spec);
         const targetSession = this.objectSession(session, objectId);
         if (operation === "innerText") {
-          const frameId = await this.actionFrameId(session, targetSession, objectId, spec);
-          if (!await this.frameOwnersVisible(session, frameId)) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
-          const text = await this.callOn(targetSession, objectId, `function(){return (${RENDERED_TEXT_SOURCE}).call(this)}`);
+          const checkFrame = await this.textFramePaintGuard(session, targetSession, objectId, spec);
+          if (!await checkFrame()) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
+          const text = await this.callOn(targetSession, objectId, `function(){return (${RENDERED_TEXT_SOURCE}).call(this)}`, [], true);
+          if (!await checkFrame()) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
           if (text === null) throw automationError("text-unavailable", { reason: "rendered-text-not-confirmed" });
           return text;
         }
@@ -2227,14 +2253,14 @@ export class AutomationRuntime {
             if (!item || item.generation !== generation) throw automationError("stale-ref", { ref: locator.spec.ref, reason: "expired-document" });
             debuggee = item.debuggee;
             snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total: 1,
-              candidates: [{ backendNodeId: item.backendNodeId, role: item.role, name: item.name, debuggee, ref: locator.spec.ref }], group };
+              frameId: item.frameId ?? session.rootFrameId, candidates: [{ backendNodeId: item.backendNodeId, role: item.role, name: item.name, debuggee, ref: locator.spec.ref }], group };
           } else {
             const scoped = await this.locatorScope(session, locator.spec);
             try {
             guard(); debuggee = scoped.debuggee;
             if ((!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) || this.hasSemanticQueries(scoped.spec)) {
               const matches: Candidate[] = !scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)
-                ? await this.resolveAccessibility(debuggee, scoped.spec, scoped.rootObjectId)
+                ? await this.resolveAccessibility(session, debuggee, scoped.spec, scoped.rootObjectId)
                 : await Promise.all((await this.resolveSemantic(session, debuggee, scoped.spec, scoped.rootObjectId, false)).map(async (node) => {
                   const identity = node.role !== undefined && node.name !== undefined ? { role: node.role, name: node.name } : await this.axIdentity(debuggee, node.backendNodeId);
                   return { backendNodeId: node.backendNodeId, debuggee, role: identity?.role ?? "", name: identity?.name ?? "", ...(!identity ? { identityUnavailable: true } : {}) };
@@ -2250,7 +2276,7 @@ export class AutomationRuntime {
                 remainingIdentityChars -= size;
                 return candidate;
               });
-              snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total: candidates.length, candidates, group };
+              snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, frameId: scoped.frameId, total: candidates.length, candidates, group };
             } else {
               const response = await this.resolveLocator(debuggee, scoped.spec, "nodes", scoped.rootObjectId, group, session);
               guard();
@@ -2261,7 +2287,7 @@ export class AutomationRuntime {
               guard();
               const total = size.result?.value;
               if (!Number.isSafeInteger(total) || total < 0) throw automationError("search-unavailable", { reason: "invalid-result-count" });
-              snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total, arrayId, group };
+              snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, frameId: scoped.frameId, total, arrayId, group };
             }
             } finally { scoped.dispose(); }
           }
@@ -2308,8 +2334,7 @@ export class AutomationRuntime {
             try {
               if (candidate.ref) nodeObject = (await this.resolveRef(session, candidate.ref)).objectId;
               else {
-                const resolved = await this.options.command(current.debuggee, "DOM.resolveNode", { backendNodeId: candidate.backendNodeId, objectGroup: current.group });
-                nodeObject = resolved.object?.objectId;
+                nodeObject = await this.resolveIsolatedNode(session, current.debuggee, candidate.backendNodeId, current.frameId, current.group);
               }
             } catch (error) { pageGuard(); if (isDetachedNodeError(error)) return { status: "detached" }; throw error; }
           }
@@ -2321,12 +2346,15 @@ export class AutomationRuntime {
         const metadataByObject = new Map<string, any>();
         if (nodes.length) {
           pageGuard();
+          if (!current.frameId || !await this.frameOwnersVisible(session, current.frameId))
+            throw automationError("text-unavailable", { reason: "frame-not-rendered" });
           // Describe the page in one task; paint evidence must not cross the
           // asynchronous identity/frame checks below or survive to another page.
-          const response = await this.options.command(current.debuggee, "Runtime.callFunctionOn", { objectId: nodes[0],
+          const response = await this.renderedCall(session, current.debuggee, { objectId: nodes[0],
             functionDeclaration: `function(includeIdentity,...nodes){const readText=${RENDERED_TEXT_READER_SOURCE};return nodes.map(node => (${SEARCH_META_SOURCE}).call(node,includeIdentity,readText))}`,
             arguments: [{ value: !current.candidates }, ...nodes.map(objectId => ({ objectId }))], returnByValue: true });
           pageGuard();
+          if (!await this.frameOwnersVisible(session, current.frameId)) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
           if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
           nodes.forEach((node, index) => metadataByObject.set(node, response.result?.value?.[index]));
         }
@@ -2534,8 +2562,7 @@ export class AutomationRuntime {
     signal?.addEventListener("abort", release, { once: true });
     session.lifetime.signal.addEventListener("abort", release, { once: true });
     try {
-      const response = await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId, objectGroup: "surf-wax-automation" });
-      objectId = response.object?.objectId;
+      objectId = await this.resolveIsolatedNode(session, ref.debuggee, ref.backendNodeId, ref.frameId);
       if (typeof objectId !== "string" || !objectId) throw automationError("ref-unavailable", { ref: refId, reason: "missing-object-id" });
       throwIfAborted(signal);
       if (session.lifetime.signal.aborted) throw abortError();
@@ -2589,21 +2616,25 @@ export class AutomationRuntime {
    * when it follows a CSS scope, a filter or an element reference. */
   private async resolveSemantic(session: Session, debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string, keepResults = true): Promise<LocatedNode[]> {
     const owned = new Set<string>();
-    let documentId = rootObjectId;
-    if (!documentId) {
-      const document = await this.options.command(debuggee, "Runtime.evaluate", { expression: "document", objectGroup: "surf-wax-automation" });
-      documentId = document.result?.objectId;
-      if (!documentId) throw automationError("frame-unavailable", { reason: "missing-document-root" });
-      owned.add(documentId);
-    }
+    const accessibilityReads = new Map<string, Promise<AccessibilityRead>>();
+    const rootContext = rootObjectId ? this.objectContexts.get(rootObjectId) : undefined;
+    const entry = rootObjectId ? [...this.frameDocuments.values()].find(entry => entry.session === session
+      && entry.frame.debuggee.sessionId === debuggee.sessionId && entry.executionContextId === rootContext) : undefined;
+    if (rootObjectId && !entry) throw automationError("frame-unavailable", { reason: "missing-semantic-isolated-world" });
+    const world = await this.isolatedFrame(session, debuggee, entry?.frame.frameId), guard = world.guard;
+    const documentId = rootObjectId ?? world.objectId;
+    if (this.objectContexts.get(documentId) !== world.executionContextId)
+      throw automationError("stale-frame", { reason: "semantic-world-mismatch" });
     const describe = async (objectId: string, executionContextId?: number): Promise<LocatedNode> => {
-      const result = await this.options.command(debuggee, "DOM.describeNode", { objectId });
+      const result = await this.options.command(debuggee, "DOM.describeNode", { objectId }); guard();
       const backendNodeId = result.node?.backendNodeId;
       if (!backendNodeId) throw automationError("detached", { reason: "missing-backend-node" });
       this.objectDebuggees.set(objectId, debuggee);
+      if (executionContextId !== undefined) this.objectContexts.set(objectId, executionContextId);
       return { objectId, backendNodeId, ...(executionContextId === undefined ? {} : { executionContextId }) };
     };
-    const executionContextId = rootObjectId ? [...this.frameDocuments.values()].find((frame) => frame.objectId === rootObjectId)?.executionContextId : undefined;
+    const executionContextId = this.objectContexts.get(documentId);
+    if (executionContextId === undefined) throw automationError("frame-unavailable", { reason: "missing-semantic-isolated-world" });
     const unique = (nodes: LocatedNode[]) => {
       const seen = new Set<number>();
       return nodes.filter((node) => !seen.has(node.backendNodeId) && Boolean(seen.add(node.backendNodeId)));
@@ -2617,6 +2648,7 @@ export class AutomationRuntime {
         throw error;
       })));
       if (failed) throw failure;
+      guard();
       return results.map((result) => (result as PromiseFulfilledResult<T>).value);
     };
     const domStep = async (root: LocatedNode, query: Query): Promise<LocatedNode[]> => {
@@ -2624,9 +2656,12 @@ export class AutomationRuntime {
       const arrayId = result?.objectId;
       if (!arrayId) throw automationError("state-unavailable", { reason: "missing-result-array" });
       try {
+        guard();
         const properties = await this.options.command(debuggee, "Runtime.getProperties", { objectId: arrayId, ownProperties: true });
         const entries = (properties.result ?? []).filter((property: any) => /^(0|[1-9]\d*)$/.test(property.name))
           .sort((a: any, b: any) => Number(a.name) - Number(b.name));
+        for (const property of entries) if (property.value?.objectId) owned.add(property.value.objectId);
+        guard();
         return await settleOwned(entries.map((property: any) => {
           if (!property.value?.objectId) throw automationError("state-unavailable", { reason: "missing-node-object" });
           owned.add(property.value.objectId);
@@ -2637,14 +2672,16 @@ export class AutomationRuntime {
       }
     };
     const semanticStep = async (root: LocatedNode, query: Query): Promise<LocatedNode[]> => {
-      const matches = await this.resolveAccessibility(debuggee, { queries: [query] }, root.objectId);
+      guard();
+      const matches = await this.resolveAccessibility(session, debuggee, { queries: [query] }, root.objectId, accessibilityReads); guard();
       return (await settleOwned(matches.filter((candidate) => candidate.backendNodeId && candidate.backendNodeId !== root.backendNodeId).map(async (candidate) => {
         const response = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: candidate.backendNodeId, objectGroup: "surf-wax-automation",
           ...(root.executionContextId === undefined ? {} : { executionContextId: root.executionContextId }) });
         const objectId = response.object?.objectId;
         if (!objectId) throw automationError("detached", { reason: "missing-node-object" });
-        owned.add(objectId);
+        owned.add(objectId); guard();
         this.objectDebuggees.set(objectId, debuggee);
+        if (root.executionContextId !== undefined) this.objectContexts.set(objectId, root.executionContextId);
         return { objectId, backendNodeId: candidate.backendNodeId!, role: candidate.role, name: candidate.name,
           ...(root.executionContextId === undefined ? {} : { executionContextId: root.executionContextId }) };
       })));
@@ -2653,7 +2690,7 @@ export class AutomationRuntime {
       let current = [base];
       if (locator.ref) {
         const resolved = await this.resolveRef(session, locator.ref);
-        owned.add(resolved.objectId);
+        owned.add(resolved.objectId); guard();
         if (resolved.ref.debuggee.tabId !== debuggee.tabId || resolved.ref.debuggee.sessionId !== debuggee.sessionId)
           throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: locator.ref });
         let refObjectId = resolved.objectId;
@@ -2668,6 +2705,7 @@ export class AutomationRuntime {
             throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: locator.ref });
           }
         }
+        guard();
         let contained: any;
         try {
           contained = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: base.objectId,
@@ -2678,30 +2716,38 @@ export class AutomationRuntime {
             throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: locator.ref });
           throw error;
         }
+        guard();
         if (contained.exceptionDetails) throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: locator.ref });
         current = contained.result?.value ? [{ objectId: refObjectId, backendNodeId: resolved.ref.backendNodeId, role: resolved.ref.role, name: resolved.ref.name,
           ...(base.executionContextId === undefined ? {} : { executionContextId: base.executionContextId }) }] : [];
       }
       const filter = async (hasText?: string, has?: LocatorSpec) => {
+        if (hasText !== undefined && current.length) {
+          const text = await this.renderedCall(session, debuggee, { objectId: current[0]!.objectId,
+            functionDeclaration: `function(expected,...nodes){const read=${RENDERED_TEXT_READER_SOURCE},normalize=value=>value.replace(/\\s+/g," ").trim().toLowerCase();return nodes.map(node=>{const value=read.call(node);return typeof value==="string"&&normalize(value).includes(normalize(expected))})}`,
+            arguments: [{ value: hasText }, ...current.map(node => ({ objectId: node.objectId }))], returnByValue: true });
+          guard();
+          if (text.exceptionDetails) throw new Error(text.exceptionDetails.exception?.description || text.exceptionDetails.text);
+          const mask = text.result?.value;
+          if (!Array.isArray(mask) || mask.length !== current.length || mask.some(value => typeof value !== "boolean"))
+            throw automationError("text-unavailable", { reason: "invalid-text-filter-observation" });
+          current = current.filter((_node, index) => mask[index]);
+        }
         const filtered: LocatedNode[] = [];
         for (const node of current) {
-          if (hasText !== undefined) {
-            const text = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: node.objectId,
-              functionDeclaration: `function(){return (${RENDERED_TEXT_SOURCE}).call(this)}`,
-              returnByValue: true });
-            if (text.exceptionDetails) throw new Error(text.exceptionDetails.exception?.description || text.exceptionDetails.text);
-            if (typeof text.result?.value !== "string" || !text.result.value.replace(/\s+/g, " ").trim().toLowerCase().includes(hasText.replace(/\s+/g, " ").trim().toLowerCase())) continue;
-          }
           if (has && !(await walk(node, has)).length) continue;
           filtered.push(node);
         }
+        guard();
         current = filtered;
       };
       let boundScope: LocatedNode | undefined;
       const guardScope = async () => {
+        guard();
         if (!boundScope) return;
         const result = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: boundScope.objectId,
           functionDeclaration: "function(){return this.isConnected}", returnByValue: true });
+        guard();
         if (result.exceptionDetails || result.result?.value !== true) throw automationError("invalid-scope", { reason: "scope-detached" });
       };
       for (const query of locator.queries) {
@@ -2730,12 +2776,14 @@ export class AutomationRuntime {
         const index = locator.index < 0 ? current.length + locator.index : locator.index;
         current = current[index] ? [current[index]!] : [];
       }
+      guard();
       return current;
     };
     let results: LocatedNode[] = [];
     try {
       const initial = await describe(documentId, executionContextId);
-      results = await walk(initial, spec);
+      const current = await walk(initial, spec); guard();
+      results = current;
       return results;
     } finally {
       const retained = new Set(keepResults ? results.map((node) => node.objectId) : []);
@@ -2757,7 +2805,7 @@ export class AutomationRuntime {
     }
     const scoped = await this.locatorScope(session, spec);
     try {
-      if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) return await this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
+      if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) return await this.resolveAccessibility(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
       if (this.hasSemanticQueries(scoped.spec)) return (await this.resolveSemantic(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, false))
         .map((node) => ({ role: node.role ?? "", name: node.name ?? "", backendNodeId: node.backendNodeId, debuggee: scoped.debuggee }));
       return (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId, undefined, session))?.value as Candidate[];
@@ -2790,13 +2838,12 @@ export class AutomationRuntime {
     try {
     const resolve = async (): Promise<string | undefined> => {
     if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
-      const matches = await this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
+      const matches = await this.resolveAccessibility(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
       this.assertStrict(spec, matches);
       const node = matches[0]?.backendNodeId;
       if (!node) return undefined;
       try {
-        const resolved = await this.options.command(scoped.debuggee, "DOM.resolveNode", { backendNodeId: node, objectGroup: "surf-wax-automation" });
-        const objectId = resolved.object?.objectId;
+        const objectId = await this.resolveIsolatedNode(session, scoped.debuggee, node, scoped.frameId);
         if (!objectId) throw automationError("state-unavailable", { reason: "missing-node-object" });
         this.objectDebuggees.set(objectId, scoped.debuggee);
         return objectId;
@@ -2837,7 +2884,7 @@ export class AutomationRuntime {
       const count = length.result?.value;
       if (!Number.isSafeInteger(count) || count < 0) throw automationError("state-unavailable", { reason: "invalid-result-count" });
       if (count > 1) {
-        const details = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
+        const details = await this.renderedCall(session, debuggee, { objectId: arrayId,
           functionDeclaration: `function(){const readText=${RENDERED_TEXT_READER_SOURCE};return this.slice(0,10).map(element => (${SEARCH_META_SOURCE}).call(element, false, readText))}`, returnByValue: true });
         if (details.exceptionDetails) throw new Error(details.exceptionDetails.exception?.description || details.exceptionDetails.text);
         throwIfAborted(this.context.signal);
@@ -2852,8 +2899,10 @@ export class AutomationRuntime {
       throwIfAborted(this.context.signal);
       if (!objectId) throw automationError("state-unavailable", { reason: "missing-node-object" });
       this.objectDebuggees.set(objectId, debuggee);
+      const context = this.objectContexts.get(arrayId);
+      if (context !== undefined) this.objectContexts.set(objectId, context);
       if (observe) {
-        const details = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId,
+        const details = await this.renderedCall(session, debuggee, { objectId,
           functionDeclaration: SEARCH_META_SOURCE, arguments: [{ value: false }], returnByValue: true });
         if (details.exceptionDetails) throw new Error(details.exceptionDetails.exception?.description || details.exceptionDetails.text);
         throwIfAborted(this.context.signal);
@@ -2883,16 +2932,13 @@ export class AutomationRuntime {
     try {
     const resolve = async (): Promise<string | undefined> => {
     if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
-      const matches = await this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
+      const matches = await this.resolveAccessibility(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
       observe?.(matches);
       this.assertStrict(spec, matches);
       const match = matches[0];
       if (!match?.backendNodeId) return undefined;
       try {
-        const response = await this.options.command(scoped.debuggee, "DOM.resolveNode", { backendNodeId: match.backendNodeId, objectGroup: "surf-wax-automation" });
-        if (!response.object?.objectId) return undefined;
-        this.objectDebuggees.set(response.object.objectId, scoped.debuggee);
-        return response.object.objectId;
+        return await this.resolveIsolatedNode(session, scoped.debuggee, match.backendNodeId, scoped.frameId);
       } catch (error) {
         if (error && typeof error === "object" && "name" in error && error.name === "AbortError") throw error;
         if (isDetachedNodeError(error) && !(error instanceof AutomationError)) return undefined;
@@ -2927,38 +2973,122 @@ export class AutomationRuntime {
     return !spec.has && !spec.hasText && spec.queries.length === 1 && spec.queries[0]!.kind === "role";
   }
 
-  private async resolveAccessibility(debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string): Promise<Candidate[]> {
-    const query = spec.queries[0]!;
-    let root: { objectId: string } | { nodeId: number };
-    if (rootObjectId) root = { objectId: rootObjectId };
-    else {
-      const key = JSON.stringify(debuggee);
-      let nodeId = this.axRoots.get(key);
-      if (nodeId === undefined) {
-        nodeId = (await this.options.command(debuggee, "DOM.getDocument", { depth: 0 })).root?.nodeId;
-        if (nodeId === undefined) throw automationError("detached", { reason: "missing-document-root" });
-        this.axRoots.set(key, nodeId);
+  /** DOM.getDocument resets Chrome frontend node IDs. Every real request
+   * updates this authority; font discovery reuses the existing frontend tree. */
+  private async frontendDocument(debuggee: Debuggee, params: { depth: number; pierce?: boolean }): Promise<any> {
+    const value = await this.options.command(debuggee, "DOM.getDocument", params);
+    const key = JSON.stringify(debuggee), id = value?.root?.nodeId;
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      this.frontendRoots.delete(key);
+      throw automationError("detached", { reason: "missing-document-root" });
+    }
+    this.frontendRoots.set(key, id); return value;
+  }
+
+  private async frontendRoot(debuggee: Debuggee): Promise<number> {
+    return this.frontendRoots.get(JSON.stringify(debuggee)) ?? (await this.frontendDocument(debuggee, { depth: 0 })).root.nodeId;
+  }
+
+  private async readAccessibilityTree(session: Session, debuggee: Debuggee, world: IsolatedFrameRead): Promise<AccessibilityRead> {
+    const entry = [...this.frameDocuments.values()].find(entry => entry.objectId === world.objectId && entry.session === session);
+    if (!entry) throw automationError("stale-frame", { reason: "accessibility-document-expired" });
+    if (entry.backendNodeId === undefined) {
+      const described = await this.options.command(debuggee, "DOM.describeNode", { objectId: world.objectId }); world.guard();
+      if (described.node?.nodeType !== 9 || !Number.isSafeInteger(described.node.backendNodeId) || described.node.backendNodeId <= 0)
+        throw automationError("frame-unavailable", { reason: "missing-accessibility-document-identity" });
+      entry.backendNodeId = described.node.backendNodeId;
+    }
+    // queryAXTree waits for a renderer lifecycle update and can stall for an
+    // offviewport OOPIF. Use a fresh native full-tree read for this query.
+    const tree = await this.options.command(debuggee, "Accessibility.getFullAXTree", { frameId: world.frameId }); world.guard();
+    if (!Array.isArray(tree?.nodes) || !tree.nodes.length)
+      throw automationError("state-unavailable", { reason: "accessibility-tree-unavailable" });
+    const nodes = new Map<string, any>();
+    const backends = new Map<number, any[]>();
+    for (const node of tree.nodes) {
+      if (typeof node.nodeId !== "string") throw automationError("state-unavailable", { reason: "invalid-accessibility-tree" });
+      const previous = nodes.get(node.nodeId);
+      if (previous) {
+        // Chrome can serialize the same virtual InlineTextBox twice. Only a
+        // byte-identical native fact is idempotent; conflicting IDs stay unknown.
+        if (JSON.stringify(previous) !== JSON.stringify(node)) throw automationError("state-unavailable", { reason: "conflicting-accessibility-node" });
+        continue;
       }
-      root = { nodeId };
+      nodes.set(node.nodeId, node);
+      if (Number.isSafeInteger(node.backendDOMNodeId) && node.backendDOMNodeId > 0) {
+        const list = backends.get(node.backendDOMNodeId) ?? []; list.push(node); backends.set(node.backendDOMNodeId, list);
+      }
     }
-    // CDP's accessibleName filter is case-sensitive and exact. Apply matching
-    // ourselves so substring, case and whitespace semantics remain consistent.
-    const tree = await this.options.command(debuggee, "Accessibility.queryAXTree", { ...root, role: query.value });
-    const normalize = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
-    const equal = (actual: string, expected: string) => query.exact ? actual === expected : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
-    let matches = (tree.nodes ?? []).flatMap((node: any): Candidate[] => {
-      if (node.ignored || !node.backendDOMNodeId) return [];
-      const role = axValue(node.role);
-      const name = normalize(axValue(node.name));
-      const expected = normalize(query.name ?? "");
-      if (role !== query.value || query.name !== undefined && !equal(name, expected)) return [];
-      return [{ role, name, backendNodeId: node.backendDOMNodeId, debuggee }];
+    const documents = (backends.get(entry.backendNodeId!) ?? []).filter(node => axValue(node.role) === "RootWebArea");
+    if (documents.length !== 1 || documents[0].frameId && documents[0].frameId !== world.frameId)
+      throw automationError("stale-frame", { reason: "accessibility-document-mismatch" });
+    return { world, documentBackend: entry.backendNodeId!, documentId: documents[0].nodeId, nodes, backends };
+  }
+
+  private async resolveAccessibility(session: Session, debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string,
+    reads?: Map<string, Promise<AccessibilityRead>>): Promise<Candidate[]> {
+    const contextId = rootObjectId ? this.objectContexts.get(rootObjectId) : undefined;
+    const scopedDocument = rootObjectId ? [...this.frameDocuments.values()].find(entry => entry.session === session
+      && entry.frame.debuggee.sessionId === debuggee.sessionId && entry.executionContextId === contextId) : undefined;
+    if (rootObjectId && !scopedDocument) throw automationError("frame-unavailable", { reason: "missing-accessibility-scope-world" });
+    const world = await this.isolatedFrame(session, debuggee, scopedDocument?.frame.frameId);
+    let scopeBackend: number | undefined;
+    if (rootObjectId && rootObjectId !== world.objectId) {
+      const described = await this.options.command(debuggee, "DOM.describeNode", { objectId: rootObjectId }); world.guard();
+      scopeBackend = described.node?.backendNodeId;
+      if (!Number.isSafeInteger(scopeBackend) || !scopeBackend || scopeBackend <= 0)
+        throw automationError("detached", { reason: "missing-accessibility-scope-identity" });
+    }
+    // All roots in one semantic query share this frame's current native graph.
+    // Nothing is retained for the next query, cursor page or operation.
+    let pending = reads?.get(world.frameId);
+    if (!pending) { pending = this.readAccessibilityTree(session, debuggee, world); reads?.set(world.frameId, pending); }
+    const read = await pending; world.guard(); read.world.guard();
+    if (read.world.executionContextId !== world.executionContextId || read.world.objectId !== world.objectId)
+      throw automationError("stale-frame", { reason: "accessibility-query-world-changed" });
+    scopeBackend ??= read.documentBackend;
+    const nodes = read.nodes, roots = read.backends.get(scopeBackend) ?? [];
+    let root: any;
+    if (roots.length === 1) root = roots[0];
+    else if (!roots.length && rootObjectId) {
+      // Only Chrome's exact ignored-scope/child links can supply an omitted
+      // scope. Do not treat the entire frame as an arbitrary element subtree.
+      const partial = await this.options.command(debuggee, "Accessibility.getPartialAXTree", { objectId: rootObjectId, fetchRelatives: false }); world.guard();
+      const exact = partial?.nodes?.filter((node: any) => node.backendDOMNodeId === scopeBackend);
+      if (exact?.length === 1 && exact[0].ignored === true && !nodes.has(exact[0].nodeId)) root = exact[0];
+    }
+    if (!root) throw automationError("state-unavailable", { reason: "accessibility-scope-unavailable" });
+    if (root.frameId && root.frameId !== world.frameId)
+      throw automationError("stale-frame", { reason: "accessibility-scope-frame-mismatch" });
+    const included = new Set<string>(), stack: Array<{ id: string; parent?: string }> = [{ id: root.nodeId }], ordered: any[] = [];
+    while (stack.length) {
+      const { id, parent } = stack.pop()!;
+      if (included.has(id)) throw automationError("state-unavailable", { reason: "cyclic-accessibility-scope" });
+      const node = id === root.nodeId ? root : nodes.get(id);
+      if (!node) throw automationError("state-unavailable", { reason: "incomplete-accessibility-scope" });
+      if (node.frameId && node.frameId !== world.frameId || axValue(node.role) === "RootWebArea" && node.nodeId !== read.documentId) continue;
+      if (parent !== undefined && node.parentId !== undefined && node.parentId !== parent)
+        throw automationError("state-unavailable", { reason: "conflicting-accessibility-parent" });
+      included.add(id); ordered.push(node);
+      if (["Iframe", "IframePresentational"].includes(axValue(node.role))) continue;
+      if (node.childIds !== undefined && (!Array.isArray(node.childIds) || node.childIds.some((id: unknown) => typeof id !== "string")))
+        throw automationError("state-unavailable", { reason: "invalid-accessibility-scope" });
+      // Native child pre-order preserves queryAXTree's nested index/first/last
+      // order; getFullAXTree's serialized array is breadth-first.
+      const children = [...new Set<string>(node.childIds ?? [])];
+      for (let index = children.length - 1; index >= 0; index--) stack.push({ id: children[index]!, parent: node.nodeId });
+    }
+    const query = spec.queries[0]!, expected = semanticName(query.name ?? "");
+    const equal = (actual: string) => query.exact ? actual === expected : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
+    const matches = ordered.flatMap((node: any): Candidate[] => {
+      if (node.ignored || !Number.isSafeInteger(node.backendDOMNodeId) || node.backendDOMNodeId <= 0) return [];
+      const role = axValue(node.role), name = semanticName(axValue(node.name));
+      return role === query.value && (query.name === undefined || equal(name)) ? [{ role, name, backendNodeId: node.backendDOMNodeId, debuggee }] : [];
     });
-    if (spec.index !== undefined) {
-      const index = spec.index < 0 ? matches.length + spec.index : spec.index;
-      matches = matches[index] ? [matches[index]!] : [];
-    }
-    return matches;
+    world.guard(); read.world.guard();
+    if (spec.index === undefined) return matches;
+    const index = spec.index < 0 ? matches.length + spec.index : spec.index;
+    return matches[index] ? [matches[index]!] : [];
   }
 
   private clearFrameDocuments(tabId?: number, source?: Debuggee, release = true): void {
@@ -2990,12 +3120,18 @@ export class AutomationRuntime {
       entry.promise = Promise.resolve().then(async () => {
         if (frame.debuggee.sessionId) await session.frameReady.get(frame.debuggee.sessionId);
         check();
-        const world = await this.options.command(frame.debuggee, "Page.createIsolatedWorld", { frameId: frame.frameId, worldName: "surf-wax-frame" });
+        let world: { executionContextId?: number };
+        if (frame.frameId === session.rootFrameId && !this.options.observationWorldName) {
+          await this.prepareObservationPrimitives(session);
+          await this.options.command(frame.debuggee, "Runtime.evaluate", { expression: "void 0", returnByValue: true });
+          world = { executionContextId: this.extensionObservationContext(session, frame.frameId)?.id };
+        } else world = await this.options.command(frame.debuggee, "Page.createIsolatedWorld", { frameId: frame.frameId, worldName: this.options.observationWorldName ?? "surf-wax-frame" });
         check();
         if (!Number.isSafeInteger(world?.executionContextId)) throw automationError("frame-unavailable", { reason: "missing-execution-context" });
         entry.executionContextId = world.executionContextId;
         const response = await this.options.command(frame.debuggee, "Runtime.evaluate", { expression: "document", contextId: world.executionContextId, returnByValue: false, objectGroup: "surf-wax-automation" });
         if (typeof response.result?.objectId === "string") entry.objectId = response.result.objectId;
+        if (entry.objectId) this.objectContexts.set(entry.objectId, world.executionContextId!);
         check();
         if (response.exceptionDetails || !entry.objectId) throw automationError("frame-unavailable", { reason: "missing-frame-document" });
         return entry.objectId;
@@ -3015,8 +3151,53 @@ export class AutomationRuntime {
     return objectId;
   }
 
-  private async locatorScope(session: Session, spec: LocatorSpec, immediate = false): Promise<{ debuggee: Debuggee; spec: LocatorSpec; rootObjectId?: string; rootIsElement?: boolean; dispose: (transferObjectId?: string) => void }> {
+  /** Reuse the existing document/world lifetime for browser-owned node IDs.
+   * No selector is re-run and no author-world getter establishes identity. */
+  private async isolatedFrame(session: Session, debuggee: Debuggee, frameId?: string): Promise<IsolatedFrameRead> {
+    if (!frameId) {
+      const roots = [...session.frames].filter(([id, source]) => source.sessionId === debuggee.sessionId
+        && (!session.frameParents.get(id) || session.frames.get(session.frameParents.get(id)!)?.sessionId !== debuggee.sessionId));
+      if (roots.length !== 1) throw automationError("frame-unavailable", { reason: "ambiguous-frame-world" });
+      frameId = roots[0]![0];
+    }
+    const source = session.frames.get(frameId), generation = session.generation, revision = session.frameRevision;
+    if (!source || source.tabId !== debuggee.tabId || source.sessionId !== debuggee.sessionId)
+      throw automationError("frame-unavailable", { reason: "frame-world-mismatch" });
+    const guard = () => {
+      throwIfAborted(this.context.signal); throwIfAborted(session.lifetime.signal);
+      if (this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== revision)
+        throw automationError("stale-frame", { reason: "frame-world-changed" });
+    };
+    const objectId = await this.frameDocument(session, { frameId, debuggee, generation, revision,
+      conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId ?? this.context.runId }, guard);
+    const executionContextId = this.objectContexts.get(objectId);
+    if (executionContextId === undefined) throw automationError("frame-unavailable", { reason: "missing-isolated-world" });
+    const key = JSON.stringify([session.tabId, frameId, debuggee.sessionId ?? null]), entry = this.frameDocuments.get(key);
+    const check = () => {
+      guard();
+      if (!entry || this.frameDocuments.get(key) !== entry || entry.objectId !== objectId || entry.executionContextId !== executionContextId
+        || this.objectContexts.get(objectId) !== executionContextId)
+        throw automationError("stale-frame", { reason: "isolated-world-expired" });
+    };
+    check(); return { objectId, executionContextId, frameId, guard: check };
+  }
+
+  private async resolveIsolatedNode(session: Session, debuggee: Debuggee, backendNodeId: number, frameId?: string, objectGroup = "surf-wax-automation"): Promise<string> {
+    const { executionContextId, guard } = await this.isolatedFrame(session, debuggee, frameId);
+    const response = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId, executionContextId, objectGroup });
+    const objectId = response.object?.objectId;
+    try { guard(); } catch (error) {
+      if (typeof objectId === "string") await this.options.command(debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+      throw error;
+    }
+    if (typeof objectId !== "string") throw automationError("frame-unavailable", { reason: "isolated-node-unavailable" });
+    this.objectDebuggees.set(objectId, debuggee); this.objectContexts.set(objectId, executionContextId);
+    return objectId;
+  }
+
+  private async locatorScope(session: Session, spec: LocatorSpec, immediate = false): Promise<{ debuggee: Debuggee; frameId?: string; spec: LocatorSpec; rootObjectId?: string; rootIsElement?: boolean; dispose: (transferObjectId?: string) => void }> {
     let debuggee = session.debuggee;
+    let frameId = session.rootFrameId;
     let scoped = spec;
     let rootObjectId: string | undefined;
     let rootIsElement = false;
@@ -3041,6 +3222,7 @@ export class AutomationRuntime {
     if (spec.ref) {
       const resolved = await this.resolveRef(session, spec.ref);
       debuggee = resolved.ref.debuggee;
+      frameId = resolved.ref.frameId ?? session.rootFrameId;
       rootObjectId = resolved.objectId;
       ownedRoot = { objectId: rootObjectId, debuggee };
       throwIfAborted(signal);
@@ -3061,6 +3243,7 @@ export class AutomationRuntime {
           throw automationError("stale-frame", { ref });
       };
       debuggee = frame.debuggee;
+      frameId = frame.frameId;
       try {
         rootObjectId = await this.frameDocument(session, frame, guard);
       } catch (error) {
@@ -3074,8 +3257,14 @@ export class AutomationRuntime {
     while (true) {
       const frameIndex = scoped.queries.findIndex((query, index) => index >= scanFrom && query.kind === "frame");
       if (frameIndex < 0) {
+        let readsText = false;
+        visitLocators(scoped, locator => {
+          if (locator.hasText !== undefined || locator.queries.some(query => query.kind === "text" || query.hasText !== undefined)) readsText = true;
+        });
+        if (readsText && (!frameId || !await this.frameOwnersVisible(session, frameId)))
+          throw automationError("text-unavailable", { reason: "frame-not-rendered" });
         transferred = true;
-        return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}), ...(rootIsElement ? { rootIsElement } : {}), dispose };
+        return { debuggee, frameId, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}), ...(rootIsElement ? { rootIsElement } : {}), dispose };
       }
       const frame = scoped.queries[frameIndex]!;
       const ownerSpec: LocatorSpec = { queries: [...scoped.queries.slice(0, frameIndex), { ...frame, kind: "css" }] };
@@ -3121,6 +3310,7 @@ export class AutomationRuntime {
         releaseOwner();
       }
       const child = owner?.frameId ? session.frames.get(owner.frameId) : undefined;
+      if (owner?.frameId) frameId = owner.frameId;
       if (owner?.frameId && (!child?.sessionId || child.sessionId === debuggee.sessionId)) {
           const revision = session.frameRevision, generation = session.generation;
           const frame: FrameRefRecord = { frameId: owner.frameId, debuggee, generation, revision,
@@ -3160,66 +3350,34 @@ export class AutomationRuntime {
   }
 
   private async resolveLocator(debuggee: Debuggee, spec: LocatorSpec, metadata: boolean | "nodes", rootObjectId?: string, objectGroup = "surf-wax-automation", session?: Session): Promise<any> {
-    const returnByValue = metadata === true;
+    if (!session) throw automationError("invalid-target", { reason: "missing-reference-session" });
+    const root = rootObjectId ? { objectId: rootObjectId, executionContextId: this.objectContexts.get(rootObjectId) }
+      : await this.isolatedFrame(session, debuggee);
+    if (root.executionContextId === undefined) throw automationError("frame-unavailable", { reason: "missing-locator-isolated-world" });
     const keys: string[] = [];
-    visitLocators(spec, (nested) => { if (nested !== spec && nested.ref && !keys.includes(nested.ref)) keys.push(nested.ref); });
-    if (keys.length) {
-      if (!session) throw automationError("invalid-target", { reason: "missing-reference-session" });
-      const executionContextId = rootObjectId ? [...this.frameDocuments.values()].find((frame) => frame.objectId === rootObjectId)?.executionContextId : undefined;
-      const objects = await Promise.all(keys.map(async (key) => {
-        const resolved = await this.resolveRef(session, key);
-        if (resolved.ref.debuggee.tabId !== debuggee.tabId || resolved.ref.debuggee.sessionId !== debuggee.sessionId)
-          throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: key });
-        if (executionContextId !== undefined) {
-          try {
-            const rebound = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: resolved.ref.backendNodeId,
-              executionContextId, objectGroup });
-            if (!rebound.object?.objectId) throw new Error("missing-node-object");
-            return rebound.object.objectId;
-          } catch {
-            throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: key });
-          }
-        }
-        return resolved.objectId;
-      }));
-      let temporaryRoot: string | undefined;
-      try {
-        if (!rootObjectId) {
-          const document = await this.options.command(debuggee, "Runtime.evaluate", { expression: "document", objectGroup });
-          temporaryRoot = document.result?.objectId;
-          if (!temporaryRoot) throw automationError("frame-unavailable", { reason: "missing-document-root" });
-        }
-        let response: any;
-        try {
-          response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: rootObjectId ?? temporaryRoot,
-            functionDeclaration: `function(spec, metadata, keys, ...nodes){return (${RESOLVER_SOURCE})(spec, metadata, this, Object.fromEntries(keys.map((key, i) => [key, nodes[i]])))}`,
-            arguments: [{ value: spec }, { value: metadata }, { value: keys }, ...objects.map((objectId) => ({ objectId }))], returnByValue, objectGroup });
-        } catch (error) {
-          if (/same.*(world|context)|different.*(world|context)|different JavaScript world/i.test(error instanceof Error ? error.message : String(error)))
-            throw automationError("unsupported-target", { reason: "cross-frame-reference-context" });
-          throw error;
-        }
-        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
-        return response.result;
-      } finally {
-        if (temporaryRoot) void this.options.command(debuggee, "Runtime.releaseObject", { objectId: temporaryRoot }).catch(() => undefined);
-      }
+    visitLocators(spec, nested => { if (nested !== spec && nested.ref && !keys.includes(nested.ref)) keys.push(nested.ref); });
+    const objects = await Promise.all(keys.map(async key => {
+      const resolved = await this.resolveRef(session, key);
+      if (resolved.ref.debuggee.tabId !== debuggee.tabId || resolved.ref.debuggee.sessionId !== debuggee.sessionId)
+        throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: key });
+      const rebound = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: resolved.ref.backendNodeId,
+        executionContextId: root.executionContextId, objectGroup });
+      if (!rebound.object?.objectId) throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: key });
+      this.objectContexts.set(rebound.object.objectId, root.executionContextId!);
+      return rebound.object.objectId;
+    }));
+    let response: any;
+    try {
+      response = await this.renderedCall(session, debuggee, { objectId: root.objectId,
+        functionDeclaration: `function(spec,metadata,keys,...nodes){return (${RESOLVER_SOURCE})(spec,metadata,this,Object.fromEntries(keys.map((key,index)=>[key,nodes[index]])))}`,
+        arguments: [{ value: spec }, { value: metadata }, { value: keys }, ...objects.map(objectId => ({ objectId }))], returnByValue: metadata === true, objectGroup });
+    } catch (error) {
+      if (/same.*(world|context)|different.*(world|context)|different JavaScript world/i.test(error instanceof Error ? error.message : String(error)))
+        throw automationError("unsupported-target", { reason: "cross-frame-reference-context" });
+      throw error;
     }
-    // The extension world supplies current closed-shadow topology to the
-    // shared paint reader. Never infer an empty composed subtree from tag names.
-    let contextId: number | undefined;
-    if (!rootObjectId && session && !debuggee.sessionId && !this.options.observationWorldName) {
-      await this.prepareObservationPrimitives(session);
-      await this.options.command(debuggee, "Runtime.evaluate", { expression: "void 0", returnByValue: true });
-      contextId = this.extensionObservationContext(session, session.rootFrameId!)?.id;
-      if (!contextId) throw automationError("text-unavailable", { reason: "missing-extension-observation-context" });
-    }
-    const response = rootObjectId
-      ? await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: rootObjectId,
-          functionDeclaration: `function(spec, metadata){return (${RESOLVER_SOURCE})(spec, metadata, this)}`,
-          arguments: [{ value: spec }, { value: metadata }], returnByValue, objectGroup })
-      : await this.options.command(debuggee, "Runtime.evaluate", { expression: `(${RESOLVER_SOURCE})(${JSON.stringify(spec)}, ${JSON.stringify(metadata)})`, ...(contextId === undefined ? {} : { contextId }), returnByValue, objectGroup });
     if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+    if (response.result?.objectId) this.objectContexts.set(response.result.objectId, root.executionContextId);
     return response.result;
   }
 
@@ -3247,11 +3405,164 @@ export class AutomationRuntime {
     return (await this.options.command(session.debuggee, "DOM.describeNode", { objectId })).node;
   }
 
-  private async callOn(session: Session, objectId: string, functionDeclaration: string, args: unknown[] = []): Promise<any> {
+  private async readElements(session: Session, spec: LocatorSpec, options: { offset?: number; limit?: number; attributes?: string[] } = {}): Promise<unknown> {
+    const offset = options.offset ?? 0, limit = options.limit ?? 25, attributes = options.attributes ?? [];
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100
+      || !Array.isArray(attributes) || attributes.length > 20 || attributes.some(name => typeof name !== "string" || !name))
+      throw automationError("invalid-input", { reason: "invalid-element-page" });
+    const scoped = await this.locatorScope(session, spec), group = `surf-wax-element-read:${crypto.randomUUID()}`;
+    const checkFrame = async () => {
+      if (!scoped.frameId || !await this.frameOwnersVisible(session, scoped.frameId))
+        throw automationError("text-unavailable", { reason: "frame-not-rendered" });
+    };
+    try {
+      await checkFrame();
+      let objectId: string, args: Array<{ value?: unknown; objectId?: string }>, total: number | undefined;
+      const declaration = `function(offset,limit,attributes,fromArray,total,...nodes){
+        const elements=fromArray?this:nodes;total=fromArray?elements.length:total;
+        const selected=fromArray?elements.slice(offset,offset+limit):elements,read=${RENDERED_TEXT_READER_SOURCE};
+        if(selected.some(element=>element.ownerDocument!==document))return {total,items:[]};
+        const items=selected.map((element,index)=>({index:offset+index,text:read.call(element),attributes:Object.fromEntries(attributes.map(name=>[name,element.getAttribute(name)]))}));
+        return {total,items,...(offset+items.length<total?{nextOffset:offset+items.length}:{})};
+      }`;
+      if ((!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) || this.hasSemanticQueries(scoped.spec)) {
+        const nodes = !scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)
+          ? await this.resolveAccessibility(session, scoped.debuggee, scoped.spec, scoped.rootObjectId)
+          : await this.resolveSemantic(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, false);
+        total = nodes.length;
+        const objects: string[] = [];
+        for (const node of nodes.slice(offset, offset + limit)) {
+          if (!node.backendNodeId) throw automationError("text-unavailable", { reason: "missing-element-identity" });
+          objects.push(await this.resolveIsolatedNode(session, scoped.debuggee, node.backendNodeId, scoped.frameId, group));
+        }
+        if (!objects.length) return { total, items: [] };
+        objectId = objects[0]!;
+        args = [{ value: offset }, { value: limit }, { value: attributes }, { value: false }, { value: total }, ...objects.map(objectId => ({ objectId }))];
+      } else {
+        const array = await this.resolveLocator(scoped.debuggee, scoped.spec, "nodes", scoped.rootObjectId, group, session);
+        if (!array?.objectId) throw automationError("text-unavailable", { reason: "missing-element-page" });
+        objectId = array.objectId;
+        args = [{ value: offset }, { value: limit }, { value: attributes }, { value: true }, { value: 0 }];
+      }
+      const response = await this.renderedCall(session, scoped.debuggee, {
+        objectId, functionDeclaration: declaration, arguments: args, returnByValue: true,
+      });
+      await checkFrame();
+      if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+      const value = response.result?.value;
+      if (!value || !Number.isSafeInteger(value.total) || value.total < 0 || !Array.isArray(value.items)
+        || value.items.length !== Math.min(limit, Math.max(0, value.total - offset))
+        || value.items.some((item: any, index: number) => item.index !== offset + index || typeof item.text !== "string")
+        || (offset + value.items.length < value.total ? value.nextOffset !== offset + value.items.length : value.nextOffset !== undefined))
+        throw automationError("text-unavailable", { reason: "rendered-element-text-not-confirmed" });
+      return value;
+    } finally {
+      scoped.dispose();
+      await this.options.command(scoped.debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined);
+    }
+  }
+
+  /** Only synchronous, side-effect-free text queries enter this path. An
+   * unsupported marker requests one native capture, never a replay of input. */
+  private async renderedCall(session: Session, debuggee: Debuggee, params: any): Promise<any> {
+    const token = crypto.randomUUID(), generation = session.generation, revision = session.frameRevision;
+    const guard = () => {
+      throwIfAborted(this.context.signal); throwIfAborted(session.lifetime.signal);
+      if (this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== revision)
+        throw automationError("text-unavailable", { reason: "document-changed-during-text-read" });
+    };
+    const wrap = (active: boolean) => {
+      const enter = `const key=Symbol.for("surf-wax.rendered-text-active-query.v1");globalThis[key]=${active ? JSON.stringify(token) : "undefined"};`;
+      return { ...params, objectGroup: params.objectGroup ?? "surf-wax-automation", functionDeclaration: `function(...args){${enter}try{return (${params.functionDeclaration}).apply(this,args)}finally{delete globalThis[key]}}` };
+    };
+    guard();
+    const first = await this.options.command(debuggee, "Runtime.callFunctionOn", wrap(true)); guard();
+    const exceptionId = first?.exceptionDetails?.exception?.objectId;
+    if (!exceptionId) return first;
+    const group = `surf-wax-marker-query:${token}`;
+    let stateId: string | undefined, consumedException = false;
+    try {
+      const prepared = await this.options.command(debuggee, "Runtime.callFunctionOn", {
+        objectId: exceptionId, functionDeclaration: `function(token,deadline){return (${prepareMarkerQuery.toString()}).call(this,token,deadline,${scheduleDeadline.toString()})}`,
+        arguments: [{ value: token }, { value: this.context.deadlineAt }], objectGroup: group,
+        serializationOptions: { serialization: "deep", maxDepth: 2, additionalParameters: { maxNodeDepth: 0 } },
+      });
+      const value = prepared?.result, entries = value?.deepSerializedValue;
+      if (entries?.type === "array" && Array.isArray(entries.value)) {
+        consumedException = true;
+        if (entries.value.length >= 2 && typeof value.objectId === "string") {
+          stateId = value.objectId; this.markerQueries.set(value.objectId, { debuggee, group });
+        }
+      }
+      guard();
+      if (prepared.exceptionDetails || entries?.type !== "array" || !Array.isArray(entries.value)) return first;
+      consumedException = true;
+      const unavailable = () => this.options.command(debuggee, "Runtime.callFunctionOn", wrap(false));
+      if (entries.value.length < 2) return unavailable();
+      stateId = value.objectId;
+      if (!stateId) return unavailable();
+      const nodes = entries.value.map((entry: any) => entry?.type === "node" ? entry.value : undefined);
+      const document = nodes[0], owners = nodes.slice(1);
+      const frame = [...session.frameLoaders].find(([, loader]) => loader && loader === document?.loaderId)?.[0];
+      if (!frame || !Number.isSafeInteger(document?.backendNodeId) || document.nodeType !== 9
+        || owners.some((owner: any) => owner?.nodeType !== 1 || owner.loaderId !== document.loaderId || !Number.isSafeInteger(owner.backendNodeId))) return unavailable();
+      const source = session.frames.get(frame);
+      if (!source || source.tabId !== debuggee.tabId || source.sessionId !== debuggee.sessionId) return unavailable();
+      if (!await this.frameOwnersVisible(session, frame)) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
+      guard();
+      const snapshot = await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...MARKER_STYLES] });
+      guard();
+      const records = markerCaptureEvidence(snapshot, { document: document.backendNodeId, loader: document.loaderId, owners: owners.map((node: any) => node.backendNodeId) });
+      if (!records) return unavailable();
+      await this.options.command(debuggee, "CSS.enable", {}); guard();
+      await this.frontendRoot(debuggee); guard();
+      const ids = [...new Set(records.map(record => record.marker))];
+      const pushed = await this.options.command(debuggee, "DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds: ids }); guard();
+      const fonts = new Map<number, any>();
+      // CDP exposes font usage per node. Deduplicate actual pseudo identities,
+      // bound concurrency, and stop issuing new requests on cancellation.
+      for (let offset = 0; offset < ids.length; offset += 8) {
+        guard();
+        const batch = await Promise.allSettled(ids.slice(offset, offset + 8).map(async (id, index) => {
+          guard();
+          const nodeId = pushed?.nodeIds?.[offset + index];
+          if (!Number.isSafeInteger(nodeId) || nodeId <= 0) return;
+          const result = await this.options.command(debuggee, "CSS.getPlatformFontsForNode", { nodeId }); guard();
+          if (Array.isArray(result.fonts) && result.fonts.length === 1) fonts.set(id, result.fonts[0]);
+        }));
+        guard();
+        const failure = batch.find(result => result.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
+      }
+      const installed = await this.options.command(debuggee, "Runtime.callFunctionOn", {
+        objectId: stateId, functionDeclaration: measureMarkerInk.toString(), arguments: [{ value: records.map(record => ({ ...record, font: fonts.get(record.marker) })) }], returnByValue: true, awaitPromise: true,
+      });
+      guard();
+      if (installed.exceptionDetails || installed.result?.value !== true) return unavailable();
+      const result = await this.options.command(debuggee, "Runtime.callFunctionOn", wrap(true)); guard();
+      if (!await this.frameOwnersVisible(session, frame)) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
+      guard();
+      return result;
+    } finally {
+      if (consumedException) await this.options.command(debuggee, "Runtime.releaseObject", { objectId: exceptionId }).catch(() => undefined);
+      if (stateId) {
+        try {
+          await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: stateId,
+            functionDeclaration: "function(){this.dispose()}", returnByValue: true });
+          this.markerQueries.delete(stateId);
+        } catch { /* clearContext disposes after the executor clears cancellation. */ }
+      }
+      if (!stateId || !this.markerQueries.has(stateId))
+        await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined);
+    }
+  }
+
+  private async callOn(session: Session, objectId: string, functionDeclaration: string, args: unknown[] = [], rendered = false): Promise<any> {
     const params = {
       objectId, functionDeclaration, arguments: args.map((value) => ({ value })), awaitPromise: true, returnByValue: true,
     };
-    const response = await this.options.command(session.debuggee, "Runtime.callFunctionOn", params);
+    const response = rendered ? await this.renderedCall(this.sessions.get(session.tabId)!, session.debuggee, params)
+      : await this.options.command(session.debuggee, "Runtime.callFunctionOn", params);
     if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
     return response.result?.value;
   }
@@ -3340,6 +3651,26 @@ export class AutomationRuntime {
     } finally { await this.options.command(source, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
   }
 
+  /** Text acceptance needs fresh parent paint on both sides of the read,
+   * including ordinary first-pass success without native marker evidence. */
+  private async textFramePaintGuard(session: Session, target: Session, objectId: string, spec: LocatorSpec): Promise<() => Promise<boolean>> {
+    const generation = session.generation, revision = session.frameRevision;
+    const frameId = await this.actionFrameId(session, target, objectId, spec);
+    const world = await this.isolatedFrame(session, target.debuggee, frameId);
+    const guard = () => {
+      world.guard();
+      if (session.generation !== generation || session.frameRevision !== revision)
+        throw automationError("stale-frame", { reason: "text-frame-changed" });
+    };
+    guard();
+    return async () => {
+      guard();
+      const painted = await this.frameOwnersVisible(session, frameId);
+      guard();
+      return painted;
+    };
+  }
+
   /** Check every iframe owner, including same-process and cross-origin frames. */
   private async frameOwnersVisible(session: Session, frameId: string): Promise<boolean> {
     const generation = session.generation, revision = session.frameRevision, root = session.rootFrameId;
@@ -3362,12 +3693,15 @@ export class AutomationRuntime {
         const owner = await this.options.command(parent, "DOM.getFrameOwner", { frameId: current });
         guard();
         if (!owner?.backendNodeId) throw automationError("frame-unavailable", { reason: "missing-frame-owner" });
-        const resolved = await this.options.command(parent, "DOM.resolveNode", { backendNodeId: owner.backendNodeId, objectGroup: group });
-        guard();
+        const world = await this.isolatedFrame(session, parent, parentId);
+        guard(); world.guard();
+        const executionContextId = world.executionContextId;
+        const resolved = await this.options.command(parent, "DOM.resolveNode", { backendNodeId: owner.backendNodeId, executionContextId, objectGroup: group });
+        guard(); world.guard();
         if (!resolved.object?.objectId) throw automationError("frame-unavailable", { reason: "missing-frame-owner-object" });
         const response = await this.options.command(parent, "Runtime.callFunctionOn", { objectId: resolved.object.objectId, returnByValue: true,
-          functionDeclaration: "function(){return this.isConnected && this.checkVisibility({opacityProperty:true,visibilityProperty:true})}" });
-        guard();
+          functionDeclaration: RENDERED_FRAME_PAINT_SOURCE });
+        guard(); world.guard();
         if (response.exceptionDetails || typeof response.result?.value !== "boolean") throw automationError("frame-unavailable", { reason: "missing-frame-visibility" });
         if (!response.result.value) return false;
       } finally { await this.options.command(parent, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
@@ -3922,7 +4256,8 @@ export class AutomationRuntime {
         // No chrome.dom API outside an extension. Fetch the shadow topology
         // once for this read, including closed roots; never read their old text.
         // DOM.getDocument also subscribes shadowRootPushed/Popped for these nodes.
-        const census = await command("DOM.getDocument", { depth: -1, pierce: true });
+        check();
+        const census = await this.frontendDocument(session.debuggee, { depth: -1, pierce: true }); check();
         if (census.root?.backendNodeId !== root.backendNodeId)
           throw automationError("stale-observation", { reason: "observation-document-changed-during-read" });
         rootIds = [];
@@ -3946,7 +4281,8 @@ export class AutomationRuntime {
         // current root fields rather than fetching another whole document.
         let nodeId = root.nodeId;
         if (!Number.isSafeInteger(nodeId) || nodeId <= 0) {
-          const current = await command("DOM.getDocument", { depth: 0 });
+          check();
+          const current = await this.frontendDocument(session.debuggee, { depth: 0 }); check();
           if (current?.root?.backendNodeId !== root.backendNodeId)
             throw automationError("stale-observation", { reason: "observation-document-changed-during-read" });
           nodeId = current.root.nodeId;
@@ -6333,6 +6669,7 @@ export class LocatorFacade {
   nth(index: number) { return new LocatorFacade(this.runtime, this.tabId, { ...flushLocator(this.spec), index }); }
   count() { return this.run("count"); }
   readCondition(condition: "text" | "value" | "visible" | "enabled" | "editable" | "checked") { return this.run("readCondition", condition); }
+  readElements(options: { offset?: number; limit?: number; attributes?: string[] } = {}) { return this.run("readElements", options); }
   waitFor(options: { state?: WaitState } = {}) { return this.run("waitFor", options); }
   click(options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.run("click", options); }
   dblclick(options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.run("dblclick", options); }

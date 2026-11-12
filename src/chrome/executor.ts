@@ -326,9 +326,8 @@ export class ChromeExecutor {
         this.activeSignal = combined; this.activeContext = context;
         this.automation.setContext({ ...context, signal: combined });
         try {
-          const state = await this.currentBrowserState();
           throwIfAborted(combined);
-          const page = input.tabId === undefined ? await this.pageFor(state) : await this.boundPage(input.tabId, state);
+          const page = input.tabId === undefined ? await this.pageFor(await this.currentBrowserState()) : await this.boundPage(input.tabId);
           throwIfAborted(combined);
           if (input.image) {
             if (!context.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
@@ -344,13 +343,12 @@ export class ChromeExecutor {
   listFrames(input: { tabId?: number; cursor?: string; limit?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     const signals = [signal, context.runSignal].filter((item): item is AbortSignal => item !== undefined);
     const effectiveSignal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
-    return this.enqueueAbortable(async (combined) => {
+    return this.enqueueAbortable(async (combined, deadlineAt) => {
       this.activeSignal = combined; this.activeContext = context;
-      this.automation.setContext({ ...context, signal: combined });
+      this.automation.setContext({ ...context, signal: combined, deadlineAt });
       try {
-        const state = await this.currentBrowserState();
         throwIfAborted(combined);
-        const page = input.tabId === undefined ? await this.pageFor(state) : await this.boundPage(input.tabId, state);
+        const page = input.tabId === undefined ? await this.pageFor(await this.currentBrowserState()) : await this.boundPage(input.tabId);
         throwIfAborted(combined);
         return await this.automation.listFrames(page.tabId, { cursor: input.cursor, limit: input.limit });
       } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
@@ -360,13 +358,12 @@ export class ChromeExecutor {
   findElements(input: { target: unknown; tabId?: number; cursor?: string; limit?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     const signals = [signal, context.runSignal].filter((item): item is AbortSignal => item !== undefined);
     const effectiveSignal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
-    return this.enqueueAbortable(async (combined) => {
+    return this.enqueueAbortable(async (combined, deadlineAt) => {
       this.activeSignal = combined; this.activeContext = context;
-      this.automation.setContext({ ...context, signal: combined });
+      this.automation.setContext({ ...context, signal: combined, deadlineAt });
       try {
-        const state = await this.currentBrowserState();
         throwIfAborted(combined);
-        const page = input.tabId === undefined ? await this.pageFor(state) : await this.boundPage(input.tabId, state);
+        const page = input.tabId === undefined ? await this.pageFor(await this.currentBrowserState()) : await this.boundPage(input.tabId);
         throwIfAborted(combined);
         const locator = await this.locatorFor(page, input.target);
         if (!locator?.spec) throw new Error("AutomationError[invalid-target]: Search requires a locator target");
@@ -408,7 +405,7 @@ export class ChromeExecutor {
     const blockerReady = new Promise<BlockerJob | undefined>((resolve) => { ready = resolve; });
     const timeoutMs = input.timeoutMs ?? input.defaultTimeoutMs ?? 40_000;
     const timeoutSource = input.timeoutMs !== undefined ? "explicit" : "default";
-    const id = await this.awaitAbort(this.jobs.start(jobContext, jobSignal, (combined, jobId, started) => this.enqueueAbortable(async (deadline) => {
+    const id = await this.awaitAbort(this.jobs.start(jobContext, jobSignal, (combined, jobId, started) => this.enqueueAbortable(async (deadline, deadlineAt) => {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
       if (input.background) this.runOwnerFor(context);
       await started();
@@ -424,7 +421,7 @@ export class ChromeExecutor {
       };
       programSignal.addEventListener("abort", recordTimeoutPhase, { once: true });
       this.activeSignal = programSignal; this.activeContext = context;
-      this.automation.setContext({ ...context, signal: programSignal }); this.diagnostics.bind(context);
+      this.automation.setContext({ ...context, signal: programSignal, deadlineAt }); this.diagnostics.bind(context);
       let owner: EventOwner | undefined;
       if (this.eventLease) {
         owner = this.eventOwnerFor(context, true);
@@ -457,7 +454,7 @@ export class ChromeExecutor {
       try {
         scope.guard();
         const state = await this.awaitAbort(this.currentBrowserState(true, programSignal), programSignal);
-        pages = this.programPages(scope, state);
+        pages = this.programPages(scope);
         const initial = { ...state };
         const page = new DeferredProgramPage(initial.tabId, async () => {
           if (!Number.isSafeInteger(initial.tabId)) throw new Error("CommandError[no-bound-tab]: Select a tab before interacting with a page");
@@ -555,7 +552,7 @@ export class ChromeExecutor {
     return result;
   }
 
-  async readArtifact(input: { artifactId: number; path?: (string | number)[]; offset?: number; limit?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+  async readArtifact(input: { artifactId: number; path?: (string | number)[]; offset?: number; limit?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}, pageSnapshotStatus?: Record<string, unknown>): Promise<unknown> {
     if (!this.logger || !context.conversationId) throw new Error("Artifacts require a conversation and canonical event log");
     const timeout = input.timeoutMs === undefined ? undefined : new AbortController();
     const deadline = input.timeoutMs === undefined ? undefined : Date.now() + input.timeoutMs;
@@ -571,7 +568,7 @@ export class ChromeExecutor {
     const combined = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
     try {
       throwIfAborted(combined);
-      const result = await this.awaitAbort(readArtifactPage(this.logger, input, context.conversationId, combined, context.logIdentity?.toolCallId ?? context.toolCallId), combined);
+      const result = await this.awaitAbort(readArtifactPage(this.logger, input, context.conversationId, combined, context.logIdentity?.toolCallId ?? context.toolCallId, pageSnapshotStatus), combined);
       return result;
     } finally { if (timer !== undefined) clearTimeout(timer); }
   }
@@ -657,11 +654,9 @@ export class ChromeExecutor {
     const epoch = this.eventEpoch;
     return this.enqueueAbortable(async (combined) => {
       const owner = this.eventOwnerFor(context);
-      const state = await this.currentBrowserState();
       throwIfAborted(combined);
-      const tabId = input.tabId ?? state.tabId;
-      if (!Number.isInteger(tabId)) throw new Error("CommandError[no-bound-tab]: Select a tab before subscribing");
-      if (input.tabId === undefined) await this.pageFor(state); else await this.boundPage(tabId!, state);
+      const page = input.tabId === undefined ? await this.pageFor(await this.currentBrowserState()) : await this.boundPage(input.tabId);
+      const tabId = page.tabId;
       throwIfAborted(combined);
       const tab = await this.chromeApi.tabs.get(tabId!).catch(() => undefined);
       throwIfAborted(combined);
@@ -941,7 +936,7 @@ export class ChromeExecutor {
     this.tabRemovedListener = undefined;
   }
 
-  private async boundPage(tabId: number, state: BrowserState): Promise<any> {
+  private async boundPage(tabId: number): Promise<any> {
     if (!Number.isSafeInteger(tabId)) throw new Error("CommandError[no-bound-tab]: Select a tab before interacting with a page");
     const tab = await this.chromeApi.tabs.get(tabId);
     if (!tab || !Number.isInteger(tab.windowId)) throw new Error("CommandError[invalid-tab-id]: Tab is unavailable");
@@ -949,7 +944,7 @@ export class ChromeExecutor {
   }
 
   /** Program page handles belong to a debugger-session incarnation, never just a tab ID. */
-  private programPages(scope: ProgramScope, state: BrowserState): ProgramPages {
+  private programPages(scope: ProgramScope): ProgramPages {
     type Entry = { live: boolean; session?: object; promise: Promise<any> };
     const entries = new Map<number, Entry>();
     let disposed = false;
@@ -979,7 +974,7 @@ export class ChromeExecutor {
       const entry: Entry = { live: true, promise: Promise.resolve(undefined) };
       entries.set(tabId, entry);
       entry.promise = (async () => {
-        const raw = initial ?? await this.boundPage(tabId, state);
+        const raw = initial ?? await this.boundPage(tabId);
         scope.guard();
         if (!entry.live || entries.get(tabId) !== entry) throw new Error("CommandError[stale-page]: Tab was closed while acquiring a page handle");
         const identity = this.automation.sessionIdentity(tabId);
@@ -1084,14 +1079,14 @@ export class ChromeExecutor {
       fetch: (input: { context: "page" | "extension"; url: string; tabId?: number; init?: RequestInit }) => call(`net.fetch.${input.context}`, true, async () => {
         if (input.context === "extension") { await scope.dispatched(); return fetchResult(await fetch(input.url, { ...input.init, signal: scope.signal })); }
         if (input.context !== "page") throw new Error("net.fetch requires explicit page or extension context");
-        const raw = await this.boundPage(input.tabId ?? page.tabId, state);
+        const raw = await this.boundPage(input.tabId ?? page.tabId);
         await scope.dispatched();
         return raw.evaluate(`async payload => { const response = await fetch(payload.url, payload.init); return { url:response.url,status:response.status,ok:response.ok,headers:Object.fromEntries(response.headers),body:await response.text() }; }`, { url: input.url, init: input.init });
       }, input.context === "page" ? sourceFor(input.tabId ?? page.tabId) : undefined),
-      requests: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.requests", false, async () => { await this.boundPage(tabId, state); return this.diagnostics.requests(tabId, options, scope.signal); }),
-      request: (ref: string, tabId = page.tabId) => call("net.request", false, async () => { await this.boundPage(tabId, state); return this.readRequest(tabId, ref, false, scope.signal); }),
-      responseBody: (ref: string, tabId = page.tabId) => call("net.responseBody", false, async () => { await this.boundPage(tabId, state); return this.readRequest(tabId, ref, true, scope.signal); }),
-      console: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.console", false, async () => { await this.boundPage(tabId, state); return this.diagnostics.console(tabId, options, scope.signal); }),
+      requests: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.requests", false, async () => { await this.boundPage(tabId); return this.diagnostics.requests(tabId, options, scope.signal); }),
+      request: (ref: string, tabId = page.tabId) => call("net.request", false, async () => { await this.boundPage(tabId); return this.readRequest(tabId, ref, false, scope.signal); }),
+      responseBody: (ref: string, tabId = page.tabId) => call("net.responseBody", false, async () => { await this.boundPage(tabId); return this.readRequest(tabId, ref, true, scope.signal); }),
+      console: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.console", false, async () => { await this.boundPage(tabId); return this.diagnostics.console(tabId, options, scope.signal); }),
     };
     const artifacts = {
       read: (id: number, selection = {}) => call("artifacts.read", false, () => this.logger!.result(id, selection, this.activeContext.conversationId)),
@@ -1109,7 +1104,7 @@ export class ChromeExecutor {
         return this.storeArtifact(filename, btoa(binary), response.headers.get("content-type") || "application/octet-stream");
       }),
       importLink: (tabId: number, target: unknown) => call("artifacts.importLink", true, async () => {
-        const raw = await this.boundPage(tabId, state);
+        const raw = await this.boundPage(tabId);
         const locator = await this.locatorFor(raw, target);
         const file = await locator.evaluateImmediate(`async element => {
           if (!(element instanceof HTMLAnchorElement) || !element.hasAttribute('href')) throw new Error('Target must be a link with an href');
@@ -1149,7 +1144,8 @@ export class ChromeExecutor {
     finally { cleanup.dispose(); }
   }
 
-  private async enqueueAbortable<T>(run: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal, timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS, mayHaveEffect = true): Promise<T> {
+  private async enqueueAbortable<T>(run: (signal?: AbortSignal, deadlineAt?: number) => Promise<T>, signal?: AbortSignal, timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS, mayHaveEffect = true): Promise<T> {
+    const deadlineAt = Date.now() + timeoutMs;
     const deadline = createDeadline(timeoutMs, signal);
     const previous = this.tail;
     let release!: () => void;
@@ -1161,7 +1157,7 @@ export class ChromeExecutor {
       catch (error) { if (deadline.signal.aborted) throw interruptionError(deadline.signal, false); throw error; }
       throwIfAborted(deadline.signal);
       if (this.quarantineError) throw this.quarantineError;
-      work = Promise.resolve().then(() => run(deadline.signal));
+      work = Promise.resolve().then(() => run(deadline.signal, deadlineAt));
       try { return await deadline.wait(work); }
       catch (error) {
         if (!deadline.signal.aborted) throw error;

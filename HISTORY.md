@@ -134,6 +134,8 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 2026-09-22 将默认浏览器操作范围收敛到当前 Chrome 窗口。后续工具可跨窗口发现标签页，使用稳定的 `tabId` 和 `windowId` 区分目标；选择标签页也不应强制抢占 Chrome 焦点。
 
+默认窗口关闭不使显式 `tabId` 的独立只读观察失效；目标仍通过 Chrome 的实际标签身份解析。显式观察不悄悄重绑默认页，默认读取继续诚实报告关闭，并指引先发现标签、再用 `switch_tab` 选择仍存在的目标。此恢复不解除旧资源的清理隔离。
+
 来源：[`8e3643e`](https://github.com/notCorwin/SurfWax/commit/8e3643e)、[`d970aec`](https://github.com/notCorwin/SurfWax/commit/d970aec)，当前提示词见 `src/agent/prompt.ts`。
 
 ### 删除页面交互拦截层
@@ -194,7 +196,9 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 自动快照中实际交付的 actionable 项也可携带同次 capture 的容器标签关联；与 find 共用按需建立的语义索引，不增加 DOM、AX 或快照采集。自动关联受 3072 字节子预算与 16384 字节快照 envelope 共同约束，分页、delta、遗漏及 unknown 保持明确，交付 lease 失效时关联一起失效。关联仅帮助模型核对已观察内容，不替代任务条件判断或后续动作前的身份校验。
 
-来源：`b309d11`，见 `src/chrome/candidate-context.ts`、`src/chrome/automation.ts`、`src/chrome/tool.ts`。
+浏览器工具交付给模型的结果明确是否包含新网页观察。管理、日志和 Artifact 读取不为补状态而等待或采集浏览器；未采集、待观察和失败均不保证旧快照仍新鲜。主动 inspect 的实际捕获与冻结续页分别标识，失败优先覆盖预取状态；这些观察状态与副作用是否未知相互独立。最终状态及错误参与原有一次交付预算，原始 Artifact 的类型与分页契约不变。
+
+来源：`b309d11`，见 `src/chrome/candidate-context.ts`、`src/chrome/automation.ts`；观察状态与最终预算见 `src/chrome/tool.ts`、`src/chrome/artifact-read.ts`。
 
 来源：`8a4407b`，见 `src/chrome/candidate-context.ts`、`src/chrome/automation.ts`、`src/chrome/tool.ts`。
 
@@ -275,6 +279,14 @@ ID 的可操作性来自唯一真实元素绑定，不来自名字匹配或包�
 同一次同步文字查询的所有候选共享一次整页绘制证明，候选 metadata 在同一次 `Runtime.callFunctionOn` 中批量读取；不为每个匹配项重新采集页面。复用只限该同步调用，不跨异步等待、DOM 变化、框架或文档代次。空自定义元素依据真实 closed-root 与未知绘制证据判断，不能仅因标签含连字符就拒绝其可见父文字；这些取舍不构成任意页面的延迟上界。
 
 来源：`128a59b`，见 `src/chrome/rendered-text.ts`、`src/chrome/automation.ts`。
+
+默认原生列表 marker 的潜在绘制与正文分别取证。需要时才按实际节点 backend ID、loader 与同一隔离世界获取原生 marker 几何和实际字体；支持的单个系统字体与简单排版通过离屏 SVG 图像栅格化取得保守墨迹范围，不把 advance 或 SVG layout box 当作墨迹。最终正文由新的同步绘制证明读取，仍检查文档、节点、样式、字体、counter、相关动画与裁剪；不支持的字体、效果或 CSP 解码限制保持 unknown，不改作者 DOM 或字体集合，也不把 marker 文字回填正文。普通视口外的已渲染文字仍可读取，作者对父 iframe 的明确裁切不能与普通视口边界混同。每层父文档还需以同次同步绘制引擎核对实际 frame owner 的裁剪和竞争绘制；父层遮挡或证明不足时，不把子文档自身可读误当作目标可见。普通文字初次读取与 native marker 重读均不能只依赖前置证明；实际读取后仍需在原 frame/world 守卫下重新证明父层绘制，失败不交付文字，文字验证保持未知。祖先普通背景的后景豁免不适用于未证明的负 stacking 后代；父框架资格对负值或未知 stacking 路径保持 unknown。
+
+批量正文读取和同次 hasText 过滤共用真实节点数组及同步 reader；条件原生证据仅在该查询内共享，不跨异步边界复用旧同步证明。原生 AX 与 CSS 解析后均在正确框架的既有隔离世界读取相同 backend 节点，不执行作者覆写的读取 getter，不改变公开 `Page.evaluate` 的执行语义。原生 AX 查询使用本次实际 frame 的 fresh full tree 与真实 scope 的原生 child 关系，按 child 预序保持嵌套索引顺序；同次查询的多个 root 共用该 frame 的读取及索引，不跨工具缓存。原生序列化中完全相同的重复节点事实可去重；冲突身份、父链、悬空关系与循环仍拒绝，不用 DOM 推断角色或名称。语义查询从入口保留原隔离世界与文档 entry 守卫，在后续异步绑定、描述、过滤及最终返回前复验；不能在失效后重新取得新 world 假装原查询仍有效，新取得的对象先登记所有权以便失败时释放。字体发现复用当前 frontend root，实际 `DOM.getDocument` 读取统一更新该权威。原生查询的临时对象、observer、图像与 URL 随查询收束，并以实际操作绝对 deadline 到期失效；timer 被节流也不能使证据继续有效。
+
+本机 Chrome debugger 的 `CallArgument.value:null` 在实际对照中未传入；新增批量读取使用显式布尔模式，并核对完整的 total、项序和续页结果。这项局部取舍不声称修复全项目的空值协议。以上边界不保证任意网页绘制完整、固定延迟上界或真实模型已正确完成任务。
+
+来源：`src/chrome/rendered-marker.ts`、`src/chrome/rendered-text.ts`、`src/chrome/snapshot-frame-paint.ts`、`src/chrome/automation.ts`、`src/chrome/executor.ts`、`e2e/snapshot-visibility.spec.ts`。
 
 ### 快照复用布局证据并保留语义边界
 

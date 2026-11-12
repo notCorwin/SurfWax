@@ -128,13 +128,22 @@ test('canonical session commits synchronize panels and the next request includes
 test('stored HTTP JSON extracts and joins exact text without refetch or model text copying', async () => {
   const { createServer } = await import('node:http');
   const { createHash } = await import('node:crypto');
+  const { fromLogValue } = await import('../src/logging');
   const { commandResponse } = await import('./fixtures');
   const pages = [
     ['雪', '', '雪', ' leading '],
     Array.from({ length: 173 }, (_, index) => `航-${index}-` + 'é'.repeat(91)).concat(['', 'end\n']),
   ];
-  let httpReads = 0;
+  let httpReads = 0, heldRequests = 0, heldClosed = 0;
+  let markHeldStarted!: () => void;
+  const heldStarted = new Promise<void>(resolve => { markHeldStarted = resolve; });
   const http = createServer((request, response) => {
+    if (request.url === '/held') {
+      heldRequests++;
+      markHeldStarted();
+      response.on('close', () => { heldClosed++; });
+      return;
+    }
     httpReads++;
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify({ records: pages[Number(request.url!.slice(1))]!.map(text => ({ text })), ...(request.url === "/1" ? { unselected: "x".repeat(290_000) } : {}) }));
@@ -151,16 +160,31 @@ test('stored HTTP JSON extracts and joins exact text without refetch or model te
     outputs.push(value);
     return value;
   };
-  let first: any, large: any, extracted: any, joined: any;
+  let first: any, large: any, extracted: any, joined: any, ownInspection: any, backgroundJob: string;
+  let cancellationObservations = 0;
+  const terminalAfterCancel = (request: any): any => {
+    const status = last(request);
+    expect(status.pageSnapshot || status.pageSnapshotStatus).toBeTruthy();
+    if (!status.terminal) {
+      responses.unshift(terminalAfterCancel);
+      return commandResponse('get_job', { jobId: backgroundJob, waitMs: 100 }, `observe-cancelled-${++cancellationObservations}`);
+    }
+    expect(status.pageSnapshotStatus?.state).not.toBe('pending');
+    return commandResponse('list_downloads', { limit: 1 }, 'stable-no-page');
+  };
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
-    await target.evaluate(() => { const field = document.createElement('textarea'); field.id = 'delivery'; document.body.append(field); });
+    await target.evaluate(() => {
+      const field = document.createElement('textarea'); field.id = 'delivery'; document.body.append(field);
+      for (let index = 0; index < 16; index++) { const button = document.createElement('button'); button.textContent = `Observation ${index}`; document.body.append(button); }
+    });
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     responses.push(
       commandResponse('send_extension_request', { url: `http://127.0.0.1:${address.port}/0` }, 'inline-http'),
       (request: any) => {
         first = last(request);
+        expect(first.pageSnapshot?.observationId).toEqual(expect.any(String));
         return commandResponse('send_extension_request', { url: `http://127.0.0.1:${address.port}/1` }, 'large-http');
       },
       (request: any) => {
@@ -184,7 +208,84 @@ test('stored HTTP JSON extracts and joins exact text without refetch or model te
         joined = last(request);
         return commandResponse('fill_from_artifact', { artifactId: joined.result.artifact.id, target: { by: 'css', value: '#delivery' } }, 'deliver');
       },
-      (request: any) => { last(request); return textResponse('TEXT_TRANSFORM_COMPLETE'); },
+      (request: any) => {
+        expect(last(request).pageSnapshot?.observationId).toEqual(expect.any(String));
+        return commandResponse('inspect_page', { full: true, budget: 600 }, 'own-observation');
+      },
+      (request: any) => {
+        ownInspection = last(request);
+        expect(ownInspection.pageSnapshot).toBeUndefined();
+        expect(ownInspection.pageSnapshotStatus).toMatchObject({ state: 'captured', freshness: 'at-capture' });
+        expect(ownInspection.nextCursor).toEqual(expect.any(String));
+        return commandResponse('inspect_page', { cursor: ownInspection.nextCursor, budget: 600 }, 'frozen-observation');
+      },
+      (request: any) => {
+        const continuation = last(request);
+        expect(continuation.observationId).toBe(ownInspection.observationId);
+        expect(continuation.pageSnapshot).toBeUndefined();
+        expect(continuation.pageSnapshotStatus).toMatchObject({ state: 'frozen', freshness: 'frozen' });
+        return commandResponse('send_extension_request', { url: `http://127.0.0.1:${address.port}/held`, background: true, timeoutMs: 20_000 }, 'held-background');
+      },
+      (request: any) => {
+        const handedOff = last(request);
+        backgroundJob = handedOff.jobId;
+        expect(handedOff.pageSnapshot).toBeUndefined();
+        expect(handedOff.pageSnapshotStatus).toMatchObject({ state: 'pending', freshness: 'unknown', reason: 'browser-job-unobserved-terminal' });
+        return delayedResponse(commandResponse('read_artifact', { artifactId: large.$ref, path: ['result', 'body'], offset: 0, limit: 9 }, 'pending-artifact'), 0, heldStarted);
+      },
+      (request: any) => {
+        const slice = last(request);
+        expect(slice.result).toBe(JSON.stringify({ records: pages[1]!.map(text => ({ text })), unselected: 'x'.repeat(290_000) }).slice(0, 9));
+        expect(slice.range).toEqual({ start: 0, endExclusive: 9 });
+        expect(slice.nextAccess.offset).toBe(9);
+        expect(slice.pageSnapshot).toBeUndefined();
+        expect(slice.pageSnapshotStatus).toMatchObject({ state: 'pending', freshness: 'unknown' });
+        expect(Buffer.byteLength(JSON.stringify(slice))).toBeLessThanOrEqual(8192);
+        return commandResponse('read_artifact', { artifactId: large.$ref, path: ['result'] }, 'pending-oversized-artifact');
+      },
+      (request: any) => {
+        const oversized = last(request);
+        expect(oversized.ok).toBe(false);
+        expect(oversized.error.code).toBe('artifact-selection-too-large');
+        expect(oversized.pageSnapshotStatus).toMatchObject({ state: 'unavailable', freshness: 'unknown', reason: 'tool-failed' });
+        expect(oversized.result).toBeUndefined();
+        expect(oversized.nextAccess).toBeUndefined();
+        expect(Buffer.byteLength(JSON.stringify(oversized))).toBeLessThanOrEqual(8192);
+        return commandResponse('list_jobs', { limit: 1 }, 'pending-jobs');
+      },
+      (request: any) => {
+        const jobs = last(request);
+        expect(jobs.pageSnapshot).toBeUndefined();
+        expect(jobs.pageSnapshotStatus).toMatchObject({ state: 'pending', freshness: 'unknown' });
+        expect(heldRequests).toBe(1);
+        expect(heldClosed).toBe(0);
+        return commandResponse('cancel_job', { jobId: backgroundJob }, 'cancel-held');
+      },
+      (request: any) => {
+        const cancelled = last(request);
+        expect(cancelled.pageSnapshot || cancelled.pageSnapshotStatus).toBeTruthy();
+        return commandResponse('get_job', { jobId: backgroundJob, waitMs: 100 }, `observe-cancelled-${++cancellationObservations}`);
+      },
+      terminalAfterCancel,
+      (request: any) => {
+        const stable = last(request);
+        expect(stable.pageSnapshot).toBeUndefined();
+        expect(stable.pageSnapshotStatus).toMatchObject({ state: 'not-captured', freshness: 'unknown' });
+        return commandResponse('read_artifact', { artifactId: large.$ref, path: ['result'] }, 'oversized-no-page');
+      },
+      (request: any) => {
+        const oversized = last(request);
+        expect(oversized.error.code).toBe('artifact-selection-too-large');
+        expect(oversized.pageSnapshotStatus).toMatchObject({ state: 'unavailable', freshness: 'unknown', reason: 'tool-failed' });
+        expect(Buffer.byteLength(JSON.stringify(oversized))).toBeLessThanOrEqual(8192);
+        return commandResponse('read_artifact', { artifactId: large.$ref, path: ['missing-observation-field'] }, 'failed-no-page');
+      },
+      (request: any) => {
+        const failed = last(request);
+        expect(failed.ok).toBe(false);
+        expect(failed.pageSnapshotStatus).toMatchObject({ state: 'unavailable', freshness: 'unknown', reason: 'tool-failed' });
+        return textResponse('TEXT_TRANSFORM_COMPLETE');
+      },
     );
     await opened.page.getByTestId('composer-input').fill('Process the stored data into a file and deliver it');
     await opened.page.getByTestId('composer-input').press('Enter');
@@ -202,9 +303,19 @@ test('stored HTTP JSON extracts and joins exact text without refetch or model te
       extracted: extracted.result, joined: joined.result,
       deliveredByteLength: Buffer.byteLength(await target.locator('#delivery').inputValue()),
       deliveredSha256: createHash('sha256').update(await target.locator('#delivery').inputValue()).digest('hex'),
+      observationDelivery: outputs.map(output => ({ evidenceId: output.evidenceId, pageSnapshotStatus: output.pageSnapshotStatus,
+        pageSnapshotId: output.pageSnapshot?.observationId, ownObservationId: output.observationId })),
+      heldRequests, heldClosed,
       model: 'scripted fake HTTP only; no real model or user key',
     }, null, 2)) });
     const events = await readEvents(opened.page);
+    for (const id of ['pending-artifact', 'pending-oversized-artifact', 'pending-jobs', 'stable-no-page', 'oversized-no-page', 'failed-no-page']) {
+      const result = events.find(event => ['tool.finished', 'tool.failed'].includes(event.type) && event.toolCallId === id)!;
+      expect((fromLogValue(result.output, result.valueEncoding) as any).pageSnapshotStatus).toMatchObject({ freshness: 'unknown' });
+      expect(events.filter(event => event.type === 'automation.action.started' && event.toolCallId === id && (fromLogValue(event.content, event.valueEncoding) as any)?.operation === 'inspect')).toHaveLength(0);
+      if (id.startsWith('pending-')) expect(result.latencyMs).toBeLessThan(2000);
+    }
+    expect(events.find(event => ['tool.finished', 'tool.failed'].includes(event.type) && event.toolCallId === 'cancel-held')!.latencyMs).toBeLessThan(4000);
     for (const id of ['extract', 'join', 'deliver']) {
       expect(events.filter(event => event.type === 'tool.finished' && event.toolCallId === id)).toHaveLength(1);
       expect(events.filter(event => event.type === 'tool.failed' && event.toolCallId === id)).toHaveLength(0);
@@ -244,7 +355,9 @@ test('stored HTTP JSON extracts and joins exact text without refetch or model te
     for (const call of calls.filter((call: any) => ['extract_json_text', 'join_text_artifacts', 'fill_from_artifact'].includes(call.function.name)))
       expect(call.function.arguments).not.toContain('航-');
   } finally {
+    markHeldStarted();
     await dispose(opened.context, opened.userDataDirectory, provider.server);
+    http.closeAllConnections();
     await new Promise<void>(resolve => http.close(() => resolve()));
   }
 });

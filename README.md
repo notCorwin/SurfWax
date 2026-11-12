@@ -9,7 +9,7 @@ Chrome 侧边栏智能体（Agent），让它替你浏览、点击、输入，�
 - 支持现代推理端点：OpenAI Response、Anthropic Messages、Google (v1) Interactions。
 ### Snapshot
 - 专为 LLM 定制的网页快照技术，节省令牌（Tokens）。
-- 只提取肉眼可见的内容，模拟真人浏览。
+- 以提取肉眼可见的内容为目标；无法确认的内容会标记为未知或不完整。
 ### Userscript
 - 根据用户需要，生成持久化网页 JavaScript 脚本。
 - 借助此项目的浏览器工具，智能体可以自主验证脚本可用性，也可以根据反馈改进脚本。

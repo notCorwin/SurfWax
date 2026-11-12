@@ -1,3 +1,16 @@
+import { sampleReadableSnapshot } from "./snapshot-readable-source.js";
+import { snapshotObservationPrimitives } from "./snapshot-observation-primitives.js";
+
+/** Rendered text may be outside the viewport. Reuse the same synchronous
+ * clipping and competing-paint engine without snapshot viewport containment.
+ * No evidence or reader survives this call; the caller guards each parent. */
+export const RENDERED_FRAME_PAINT_SOURCE = `function(){
+  (${snapshotObservationPrimitives.toString()})(true);
+  let painted=false;
+  (${sampleReadableSnapshot.toString()})(NaN,[],undefined,{frameOwner:this,acceptFrame:value=>painted=value});
+  return painted;
+}`;
+
 /**
  * Runs on an iframe/frame owner in its parent document, in an isolated world.
  * Returns a repeatable, conservative proof that the entire owner is painted
