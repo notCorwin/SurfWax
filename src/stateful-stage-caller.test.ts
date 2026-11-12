@@ -2,7 +2,6 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setImmediate as immediate } from 'node:timers/promises';
 import { collectCartStage } from '../e2e/stateful-web/stage';
 
 let root = '';
@@ -26,11 +25,11 @@ const file = async (name: string) => JSON.parse(await readFile(join(root, name),
 it.each(['reject', 'timeout'])('preserves first terminal and requests when lease %s', async mode => {
   vi.useFakeTimers();
   const { options, finished } = await fixture();
-  let entered = false;
-  options.lease = vi.fn(() => { entered = true; return mode === 'reject' ? Promise.reject(new Error('offline')) : new Promise<boolean>(() => {}); });
+  let signalLease!: () => void;
+  const leaseEntered = new Promise<void>(resolve => { signalLease = resolve; });
+  options.lease = vi.fn(() => { signalLease(); return mode === 'reject' ? Promise.reject(new Error('offline')) : new Promise<boolean>(() => {}); });
   const run = collectCartStage(options);
-  for (let i = 0; i < 100 && !entered; i++) await immediate();
-  expect(entered).toBe(true);
+  await leaseEntered;
   expect(await file('stage1-events.json')).toContainEqual(finished);
   expect(await file('stage1-observation.json')).toMatchObject({ terminal: { state: 'on_time' }, modelRequests: [{ responseStatus: 401 }] });
   if (mode === 'timeout') await vi.advanceTimersByTimeAsync(16000);
