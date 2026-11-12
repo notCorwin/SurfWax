@@ -121,17 +121,18 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
   // styles and children are read only now. ShadowRoot.mode is never read.
   const shadowRoots = new Map(), topLayers = [], unsupportedSlots = [];
   const nativeRootByHost = new Map(), conflictingNativeHosts = new Set();
-  for (const root of Array.isArray(nativeRoots) ? nativeRoots : []) {
+  const registerNativeRoot = (root) => {
     try {
       const host = root?.host;
       if (!(host instanceof HTMLElement) || !/^(?:input|textarea|select)$/.test(host.localName)
         || root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE || !root.isConnected || !host.isConnected
-        || root.ownerDocument !== document || host.ownerDocument !== document || root.getRootNode({ composed: true }) !== document) continue;
+        || root.ownerDocument !== document || host.ownerDocument !== document || root.getRootNode({ composed: true }) !== document) return;
       if (nativeRootByHost.has(host) && nativeRootByHost.get(host) !== root) {
         nativeRootByHost.delete(host); conflictingNativeHosts.add(host);
       } else if (!conflictingNativeHosts.has(host)) nativeRootByHost.set(host, root);
     } catch {}
-  }
+  };
+  for (const root of Array.isArray(nativeRoots) ? nativeRoots : []) registerNativeRoot(root);
   // CDP supplies live author roots when extension APIs are unavailable. Never
   // substitute element.shadowRoot: it would silently omit closed roots.
   const suppliedAuthorRoots = new Map();
@@ -150,6 +151,10 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     if (root.fullscreenElement) topLayers.push(root.fullscreenElement);
     for (const element of root.querySelectorAll("*")) {
       // Native field roots still use the shared local text and field proofs.
+      if (element instanceof HTMLElement && /^(?:input|textarea|select)$/.test(element.localName)
+        && typeof extensionShadowRoot === "function" && !nativeRootByHost.has(element) && !conflictingNativeHosts.has(element)) {
+        try { registerNativeRoot(extensionShadowRoot.call(globalThis.chrome.dom, element)); } catch { /* Missing roots remain unproven. */ }
+      }
       const authorHost = element instanceof HTMLElement && (element.localName.includes("-") || authorHosts.has(element.localName));
       const authorRoot = authorHost ? typeof extensionShadowRoot === "function"
         ? extensionShadowRoot.call(globalThis.chrome.dom, element) : suppliedAuthorRoots.get(element) : null;
@@ -334,7 +339,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
       ) &&
       effects.every((k) => !p.getPropertyValue(k) || p.getPropertyValue(k) === "none") &&
       (!p.getPropertyValue("-webkit-box-reflect") || p.getPropertyValue("-webkit-box-reflect") === "none"));
-  const unprovenMarkers = new Set();
+  const unprovenMarkers = new Set(), unprovenNativeFields = new Map();
   const markerPaint = (element, s) => {
     if (!s.display.split(/\s+/).includes("list-item")) return false;
     const content = getComputedStyle(element, "::marker").content;
@@ -1549,14 +1554,28 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     return ["auto","solid"].includes(s.outlineStyle) && Number.isFinite(width) && width>=0 && offset>=0
       && rects.every(r=>r.left>=box.left+inset && r.top>=box.top+inset && r.right<=box.right-inset && r.bottom<=box.bottom-inset);
   };
-  const foreignCover = (parent, rects, presence = false) =>
-    covers.some(
-      ({ element, rect, path, foregroundEffect, directText, outline, pseudoStyle }) =>
+  const foreignCover = (parent, rects, presence = false, textNode) => {
+    let missingNativeCover = false;
+    const covered = covers.some(({ element, rect, path, foregroundEffect, directText, outline, pseudoStyle }) => {
+      const matches = (
         !(presence && paintContains(parent, element)) &&
         (!paintContains(element, parent) || foregroundEffect || (directText && element !== parent)) &&
         rects.some((r) => overlaps(r, rect)) &&
-        !strictlyAbove(stack(parent), path) && !behindNativeBackdrop(parent, element, path, foregroundEffect, pseudoStyle) && !(outline && nativeOwnOutline(parent, element, rects)),
-    );
+        !strictlyAbove(stack(parent), path) && !behindNativeBackdrop(parent, element, path, foregroundEffect, pseudoStyle) && !(outline && nativeOwnOutline(parent, element, rects)));
+      if (!matches) return false;
+      if (outline && !nativeRootByHost.has(element)
+        && (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
+        if (textNode) {
+          const hosts = unprovenNativeFields.get(textNode) || new Set();
+          hosts.add(element); unprovenNativeFields.set(textNode, hosts);
+        }
+        missingNativeCover = true;
+        return false; // Collect all actually blocking missing native hosts.
+      }
+      return true;
+    });
+    return covered || missingNativeCover;
+  };
   for (const element of topLayers) {
     const p = getComputedStyle(element, "::backdrop");
     if (!clear(p.backgroundColor) || p.backgroundImage !== "none" || p.filter !== "none" || p.backdropFilter !== "none") {
@@ -1575,11 +1594,32 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     // stacking descendants: their paint can sit behind that same background.
     for (let path = stack(owner); painted && path; path = path.parent)
       if (path.level === null || path.level < 0) painted = false;
+    // A frame surface needs a paint bound, not glyph-shaping eligibility.
+    // Its native border AABB is exact under finite positive axis scales and
+    // translations; rotation, reflection and clipped scaled ancestors remain
+    // unproven here. This does not change ordinary text qualification.
+    let scaled = false;
+    const frameGeometry = (s, key) => {
+      if (noGeometryEffect(s, key)) return true;
+      if (s.transformStyle !== 'flat') return false;
+      if (key === 'transform') {
+        const match = /^matrix\(([^()]*)\)$/.exec(s.transform), values = match?.[1].split(',').map(Number);
+        if (!values || values.length !== 6 || !values.every(Number.isFinite)
+          || values[0] <= 0 || values[3] <= 0 || values[1] !== 0 || values[2] !== 0) return false;
+        scaled ||= values[0] !== 1 || values[3] !== 1; return true;
+      }
+      if (key === 'scale') {
+        const values = s.scale.split(/\s+/).map(Number);
+        if (!values.length || values.length > 2 || values.some(value => !Number.isFinite(value) || value <= 0)) return false;
+        scaled ||= values.some(value => value !== 1); return true;
+      }
+      return false;
+    };
     for (let current = owner; painted && current; current = parentOf(current)) {
       const s = style(current);
       painted = s.visibility === 'visible' && Number(s.opacity) === 1 && s.mixBlendMode === 'normal'
         && s.contentVisibility === 'visible' && s.contain === 'none'
-        && effects.every(key => key === 'clip-path' || key === 'mask-image' || noGeometryEffect(s, key))
+        && effects.every(key => key === 'clip-path' || key === 'mask-image' || frameGeometry(s, key))
         // Ancestor backgrounds are behind the owner, generated boxes need
         // their own ordering/geometry proof and cannot inherit that exemption.
         && ['::before','::after'].every(pseudo => {
@@ -1587,6 +1627,14 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
           return !p.content || p.content === 'none' || p.content === 'normal' || p.display === 'none'
             || p.visibility !== 'visible' || Number(p.opacity) === 0;
         });
+    }
+    if (painted && scaled) for (let current = owner; painted && current; current = parentOf(current)) {
+      const s = style(current);
+      // Do not apply unscaled CSS clip dimensions to transformed geometry.
+      painted = s.clip === 'auto' && s.clipPath === 'none' && s.maskImage === 'none'
+        && ['', 'none'].includes(s.getPropertyValue('-webkit-mask-box-image-source'))
+        && (current === owner || current === document.documentElement || current === document.body
+          || s.overflowX === 'visible' && s.overflowY === 'visible');
     }
     if (painted) painted = [style(owner).borderTopLeftRadius,style(owner).borderTopRightRadius,style(owner).borderBottomLeftRadius,style(owner).borderBottomRightRadius].every(value => value === '0px')
       && !clippedRects(owner, [rect], true) && !foreignCover(owner, [rect], true);
@@ -1745,7 +1793,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     }
     if (!ink.some((channel, index) => Math.abs(channel - ground[index]) >= 1)) continue;
     const text = renderedWhitespace(node, rawText, s);
-    if (text === null || foreignCover(parent, rects)) {
+    if (text === null || foreignCover(parent, rects, false, node)) {
       gap(text === null ? "text-whitespace" : "paint-occlusion", node, region);
       continue;
     }
@@ -1756,7 +1804,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     if (overlap) gap("text-overlap", item.node, item.region);
     return !overlap;
   });
-  if (textEvidence) { textEvidence.accept(new Set(accepted.map(item => item.node)), new Set([...uncertainLabels, ...shadowRoots.keys()]), accepted, unprovenMarkers); return null; }
+  if (textEvidence) { textEvidence.accept(new Set(accepted.map(item => item.node)), new Set([...uncertainLabels, ...shadowRoots.keys()]), accepted, unprovenMarkers, unprovenNativeFields); return null; }
   const interactiveRoles = new Set([
     "button",
     "checkbox",

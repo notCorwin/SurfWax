@@ -213,6 +213,135 @@ test("atomic targets fail promptly and file operations preserve dispatch certain
     await expect(page.frameLocator("iframe").locator("input")).toHaveValue(
       "frame value",
     );
+    // A plain, unclipped line isolates native focus-outline evidence. The
+    // original underlined link is not assumed readable by this regression.
+    await page.frameLocator("iframe").locator("body").evaluate((body) => {
+      const text = document.createElement("p");
+      text.id = "outline-distant";
+      text.textContent = "Outline clear";
+      text.style.cssText = "position:absolute;left:180px;top:90px;width:110px;margin:0;white-space:nowrap";
+      body.append(text);
+    });
+    const plainText = { by: "css", value: "#outline-distant", frame: { by: "css", value: "iframe" } };
+    const geometry = await page.frameLocator("iframe").locator("#outline-distant").evaluate((element) => {
+      const range = document.createRange(); range.selectNodeContents(element);
+      const rect = range.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: innerWidth, height: innerHeight };
+    });
+    expect(geometry.left).toBeGreaterThanOrEqual(0); expect(geometry.top).toBeGreaterThanOrEqual(0);
+    expect(geometry.right).toBeLessThanOrEqual(geometry.width); expect(geometry.bottom).toBeLessThanOrEqual(geometry.height);
+    expect(await page.frameLocator("iframe").locator("input").evaluate((input) => input === document.activeElement)).toBe(true);
+    expect(await call("read_text", { target: plainText })).toMatchObject({ ok: true, result: "Outline clear" });
+    // The extension-free host must supply real closed roots, not an empty
+    // compatibility array that would miss parent-document foreground paint.
+    await page.evaluate(() => {
+      const host = document.createElement("div"); host.id = "native-shadow-cover";
+      const root = host.attachShadow({ mode: "closed" }), cover = document.createElement("div"), rect = document.querySelector("iframe")!.getBoundingClientRect();
+      cover.style.cssText = `position:fixed;background:white;z-index:2147483647;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px`;
+      root.append(cover); document.body.append(host);
+    });
+    expect(await call("read_text", { target: plainText })).toMatchObject({ ok: false, error: { code: "text-unavailable" } });
+    await page.locator("#native-shadow-cover").evaluate((element) => element.remove());
+    expect(await call("read_text", { target: plainText })).toMatchObject({ ok: true, result: "Outline clear" });
+    expect(await page.frameLocator("iframe").locator("input").evaluate((input) => input === document.activeElement)).toBe(true);
+    const identity = runtime.events.find((event) => event.type === "tool.started")!;
+    const runProgram = (code: string, toolCallId: string, signal?: AbortSignal, timeoutMs?: number) => runtime.executor.runProgram({ code, ...(timeoutMs === undefined ? {} : { timeoutMs }) }, signal, {
+      conversationId: identity.conversationId!, toolCallId,
+      logIdentity: runtime.logger.toolIdentity(identity.conversationId!, toolCallId),
+    });
+    // The same reference is rebound under a native semantic parent, then read
+    // through hasText in the API-less isolated world (real census required).
+    await page.frameLocator("iframe").locator("body").evaluate((body) => {
+      const list = document.createElement("div"); list.id = "nested-proof"; list.setAttribute("role", "list");
+      list.style.cssText = "position:absolute;left:180px;top:60px;width:110px";
+      const item = document.createElement("div"); item.id = "nested-proof-item"; item.setAttribute("role", "listitem"); item.textContent = "Proof row";
+      list.append(item); body.append(list);
+    });
+    const nested = await call("find_elements", { target: { by: "css", value: "#nested-proof-item", frame: { by: "css", value: "iframe" } } });
+    const nestedId = nested.elements[0].id;
+    expect(await runProgram(`return await page.frameLocator('iframe').getByRole('list').filter({has:page.ref(${JSON.stringify(nestedId)}).filter({hasText:'Proof row'})}).count();`, "nested-native-ref-text")).toMatchObject({ ok: true, result: 1 });
+    await page.frameLocator("iframe").locator("#nested-proof").evaluate((element) => element.remove());
+
+    // A real marker dependency cannot certify an animated font. Its ordinary
+    // fallback returns an unproved empty set, not evidence of absent text.
+    // Even that terminal number still needs the original world/deadline guard.
+    await page.evaluate(() => {
+      const host = document.createElement("section"); host.id = "fallback-proof";
+      host.style.cssText = "position:absolute;left:500px;top:300px";
+      host.innerHTML = '<ol><li>Animated marker</li></ol>'; document.body.append(host);
+      host.querySelector("li")!.animate([{ fontSize: "16px" }, { fontSize: "17px" }], { duration: 1000, iterations: Infinity });
+    });
+    const proofCode = "return await page.locator('#fallback-proof li').filter({hasText:'Animated marker'}).count();";
+    const proofSend = CdpConnection.prototype.send, proofChecks: any[] = [], proofOriginalUrl = page.url();
+    let proofPhase: "fresh" | "navigate" | "deadline" | undefined;
+    let capturedDeadline = 0, fallbackSeen = false, gateFinished = false, lateReads = 0, timerFired = false;
+    let proofTimer: ReturnType<typeof setTimeout> | undefined;
+    CdpConnection.prototype.send = async function (method, params: any = {}, sessionId) {
+      const source = String(params.functionDeclaration ?? "");
+      if (gateFinished && (method.startsWith("DOM.") || method === "Runtime.callFunctionOn" && (source.includes("createRenderedTextReader") || source.includes("{frameOwner:this,acceptFrame:")))) lateReads++;
+      const result = await proofSend.call(this, method, params, sessionId);
+      if (source.includes("prepareMarkerQuery")) capturedDeadline = params.arguments[1].value;
+      const fallback = method === "Runtime.callFunctionOn" && source.includes("createRenderedTextReader") && source.includes("globalThis[key]=undefined");
+      if (fallback) fallbackSeen = true;
+      if (!proofPhase || !fallback) return result;
+      const phase = proofPhase; proofPhase = undefined;
+      const check: any = { phase, fallbackSeen, nativeValue: result.result?.value, capturedDeadline };
+      if (phase === "navigate") {
+        let resolve!: () => void, resolveRestored!: () => void, navigationTimer: ReturnType<typeof setTimeout> | undefined;
+        const navigated = new Promise<void>((done) => { resolve = done; }), restored = new Promise<void>((done) => { resolveRestored = done; });
+        const expired = new Promise((_, reject) => { navigationTimer = setTimeout(() => reject(new Error("Expected native same-document events")), 2000); });
+        const listener = (message: any) => {
+          if (message.sessionId !== sessionId || message.method !== "Page.navigatedWithinDocument") return;
+          if (message.params.url === proofOriginalUrl) { check.nativeRestoration = true; resolveRestored(); }
+          else { check.nativeNavigation = true; resolve(); }
+        };
+        this.listeners.add(listener);
+        try {
+          await proofSend.call(this, "Runtime.evaluate", { expression: "history.pushState(null,'','#fallback-guard')", returnByValue: true }, sessionId);
+          await Promise.race([navigated, expired]);
+          // URL equality does not undo the original world's invalidation.
+          await proofSend.call(this, "Runtime.evaluate", { expression: `history.replaceState(null,'',${JSON.stringify(proofOriginalUrl)})`, returnByValue: true }, sessionId);
+          await Promise.race([restored, expired]);
+        } finally { clearTimeout(navigationTimer); this.listeners.delete(listener); }
+      }
+      if (phase === "deadline") {
+        if (!Number.isSafeInteger(capturedDeadline) || capturedDeadline < Date.now() || capturedDeadline - Date.now() > 2000) throw new Error("Native deadline gate was not reached in time");
+        // Delay this process's timer phase, not Chrome or the operation clock.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, capturedDeadline - Date.now() + 25);
+        check.deliveredAt = Date.now(); check.timerFiredAtDelivery = timerFired;
+      }
+      proofChecks.push(check); gateFinished = phase !== "fresh"; return result;
+    };
+    try {
+      for (const phase of ["fresh", "navigate", "deadline"] as const) {
+        proofPhase = phase; capturedDeadline = 0; fallbackSeen = false; gateFinished = false; lateReads = 0; timerFired = false;
+        if (phase === "deadline") proofTimer = setTimeout(() => { timerFired = true; }, 1500);
+        const eventsBefore = runtime.events.length;
+        let result: any;
+        try { result = await runProgram(proofCode, `native-proof-${phase}`, undefined, 1500); }
+        catch (error) { result = { thrown: { name: (error as Error).name } }; }
+        finally { clearTimeout(proofTimer); }
+        const check = proofChecks.at(-1);
+        const actions = runtime.events.slice(eventsBefore).filter(event => event.type.startsWith("automation.action.") && (event.content as any)?.operation === "count");
+        if (check) { check.output = result; check.lateReads = lateReads; check.actions = actions; }
+        await test.info().attach(`native-proof-${phase}`, { contentType: "application/json", body: Buffer.from(JSON.stringify({ check, result })) });
+        expect(check?.phase).toBe(phase);
+        expect(check.fallbackSeen).toBe(true); expect(check.nativeValue).toEqual([]);
+        if (phase === "fresh") expect(result).toMatchObject({ ok: true, result: 0 });
+        else {
+          if (phase === "deadline" && result.thrown) expect(result.thrown).toEqual({ name: "TimeoutError" });
+          else expect(result).toMatchObject({ ok: false });
+          expect(actions.some(event => event.type === "automation.action.finished")).toBe(false);
+          expect(lateReads).toBe(0);
+        }
+        if (phase === "navigate") { expect(check.nativeNavigation).toBe(true); expect(check.nativeRestoration).toBe(true); }
+        if (phase === "deadline") { expect(check.deliveredAt).toBeGreaterThanOrEqual(check.capturedDeadline); expect(check.timerFiredAtDelivery).toBe(false); }
+      }
+    } finally {
+      clearTimeout(proofTimer); CdpConnection.prototype.send = proofSend;
+      await page.locator("#fallback-proof").evaluate((element) => element.remove());
+      expect(await page.evaluate(() => location.href)).toBe(proofOriginalUrl);
+    }
     expect(
       await call("import_file_from_link", {
         target: link("Download manifest", { by: "css", value: "iframe" }),
@@ -438,11 +567,6 @@ test("atomic targets fail promptly and file operations preserve dispatch certain
     expect(await page.locator("#single").evaluate((element: HTMLInputElement) => element.files!.length)).toBe(0);
     await expect(page.locator("body")).toHaveAttribute("data-upload-events", "upload:input;upload:change;");
 
-    const identity = runtime.events.find((event) => event.type === "tool.started")!;
-    const runProgram = (code: string, toolCallId: string) => runtime.executor.runProgram({ code }, undefined, {
-      conversationId: identity.conversationId!, toolCallId,
-      logIdentity: runtime.logger.toolIdentity(identity.conversationId!, toolCallId),
-    });
     // Internal file URLs must not be fetched for a known invalid target/count.
     const beforeRequests = hits;
     expect(await runProgram(`return await page.locator('iframe').setInputFiles({name:'unused.txt',url:${JSON.stringify(`${origin}/file`)}});`, "upload-url-invalid-target")).toMatchObject({ ok: false, result: { error: { effectUnknown: false } } });

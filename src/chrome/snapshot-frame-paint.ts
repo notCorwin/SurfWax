@@ -1,13 +1,40 @@
 import { sampleReadableSnapshot } from "./snapshot-readable-source.js";
 import { snapshotObservationPrimitives } from "./snapshot-observation-primitives.js";
 
+/** Structural action visibility is independent of text/font paint eligibility.
+ * Native pointer hit-testing still proves an actual input point separately. */
+export const FRAME_OWNER_VISIBILITY_SOURCE = `function(){
+  if(!this.isConnected || !this.checkVisibility({opacityProperty:true,visibilityProperty:true}))return false;
+  const own=this.getBoundingClientRect();
+  let nonTranslation=false,hasOverflowClip=false;
+  for(let element=this;element;element=element.parentElement){
+    const style=getComputedStyle(element),matrix=/^matrix\\(([^()]*)\\)$/.exec(style.transform),values=matrix?.[1].split(',').map(Number);
+    nonTranslation ||= style.transform!=='none' && !(values?.length===6 && values.every(Number.isFinite) && values[0]===1 && values[1]===0 && values[2]===0 && values[3]===1)
+      || !['none','1','1 1'].includes(style.scale) || !['none','0deg'].includes(style.rotate)
+      || style.perspective!=='none' || !['1','normal'].includes(style.zoom);
+    if(style.clip!=='auto' || style.clipPath!=='none' || style.maskImage!=='none'
+      || !['','none'].includes(style.getPropertyValue('-webkit-mask-box-image-source'))
+      || style.filter!=='none' || style.backdropFilter!=='none')return false;
+    if(element!==this && element!==document.documentElement && element!==document.body
+      && ['hidden','clip','scroll','auto'].some(value=>style.overflowX===value || style.overflowY===value)){
+      hasOverflowClip=true;
+      const r=element.getBoundingClientRect(),left=r.left+element.clientLeft,top=r.top+element.clientTop;
+      if(style.overflowX!=='visible' && (own.left<left || own.right>left+element.clientWidth)
+        || style.overflowY!=='visible' && (own.top<top || own.bottom>top+element.clientHeight))return false;
+    }
+  }
+  return !(nonTranslation && hasOverflowClip);
+}`;
+
 /** Rendered text may be outside the viewport. Reuse the same synchronous
  * clipping and competing-paint engine without snapshot viewport containment.
  * No evidence or reader survives this call; the caller guards each parent. */
-export const RENDERED_FRAME_PAINT_SOURCE = `function(){
+export const RENDERED_FRAME_PAINT_SOURCE = `function(nativeProofSupplied,...roots){
+  if(document.readyState!=="complete" || document.fonts.status!=="loaded")return false;
+  if(typeof globalThis.chrome?.dom?.openOrClosedShadowRoot!=="function" && nativeProofSupplied!==true)return "native-shadow-roots-required";
   (${snapshotObservationPrimitives.toString()})(true);
   let painted=false;
-  (${sampleReadableSnapshot.toString()})(NaN,[],undefined,{frameOwner:this,acceptFrame:value=>painted=value});
+  (${sampleReadableSnapshot.toString()})(NaN,roots,nativeProofSupplied===true?{shadowRoots:roots}:undefined,{frameOwner:this,acceptFrame:value=>painted=value});
   return painted;
 }`;
 

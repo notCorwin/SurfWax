@@ -8,6 +8,7 @@ export function createRenderedTextReader(
   sample: typeof sampleReadableSnapshot,
   install: typeof snapshotObservationPrimitives,
   nativeMarkers: typeof markerInkRects,
+  nativeEvidence?: { roots: readonly ShadowRoot[]; complete: boolean },
 ) {
   const results = new WeakMap<Element, string | null>();
   const styles = new WeakMap<Element, CSSStyleDeclaration>();
@@ -18,24 +19,33 @@ export function createRenderedTextReader(
   let sampled = false;
   let accepted = new Set<Text>();
   let unknown = new Set<Element>();
-  let unprovenMarkers = new Set<Element>();
+  let unprovenMarkers = new Set<Element>(), unprovenNativeFields = new Map<Text, Set<Element>>();
   const queryToken = (globalThis as any)[Symbol.for("surf-wax.rendered-text-active-query.v1")];
   const nativeState = (globalThis as any)[Symbol.for("surf-wax.rendered-marker-query.v1")];
   const attemptedNativeProof = typeof queryToken === "string" && nativeState?.token === queryToken;
   const ensureProof = () => {
     if (sampled) return;
+    if (document.readyState !== "complete" || document.fonts.status !== "loaded") { sampled = true; return; }
+    const dom = (globalThis as any).chrome?.dom;
+    if (typeof dom?.openOrClosedShadowRoot !== "function" && nativeEvidence?.complete !== true) {
+      if (queryToken) throw Object.assign(new Error("Native shadow topology is required"), {
+        name: "NativeRootsRequired", nativeTextQuery: queryToken, completeShadowCensus: true, nativeHosts: [],
+      });
+      sampled = true; return; // No complete topology means no accepted text.
+    }
     sampled = true;
     install(true);
-    sample(NaN, [], { shadowRoots: [], placeholder: () => null, controls: () => null,
+    sample(NaN, nativeEvidence?.roots ?? [], { ...(nativeEvidence?.complete ? { shadowRoots: nativeEvidence.roots } : {}), placeholder: () => null, controls: () => null,
       ...(attemptedNativeProof ? { markerRects: nativeMarkers(nativeState) } : {}) },
-      { scope: document.documentElement, accept: (nodes, unsafe, _painted, markers) => { accepted = nodes; unknown = unsafe; unprovenMarkers = markers; } });
+      { scope: document.documentElement, accept: (nodes, unsafe, _painted, markers, fields) => { accepted = nodes; unknown = unsafe; unprovenMarkers = markers; unprovenNativeFields = fields; } });
   };
   const composedUnknown = (el: Element) => {
     if (el.localName === "slot" || el.shadowRoot) return true;
     if (!el.localName.includes("-")) return false;
-    // Only the extension API can prove absence of closed author roots.
+    // Absence needs either the extension API or the complete native census.
     const dom = (globalThis as any).chrome?.dom;
-    return typeof dom?.openOrClosedShadowRoot !== "function" || !!dom.openOrClosedShadowRoot(el) || unknown.has(el);
+    return typeof dom?.openOrClosedShadowRoot === "function" ? !!dom.openOrClosedShadowRoot(el) || unknown.has(el)
+      : nativeEvidence?.complete !== true || nativeEvidence.roots.some(root => root.host === el) || unknown.has(el);
   };
   const style = (el: Element) => {
     let value = styles.get(el);
@@ -67,6 +77,14 @@ export function createRenderedTextReader(
       proven.set(el, complete); return complete;
     };
     const valid = summarize(root);
+    if (!valid && queryToken && !nativeEvidence && [...unprovenNativeFields.keys()].some(node => root.contains(node))) {
+      // One needed dependency prepares the same sample's deduplicated field
+      // identities for all candidates; unrelated failure alone triggers none.
+      const hosts = new Set([...unprovenNativeFields.values()].flatMap(fields => [...fields]));
+      throw Object.assign(new Error("Native field roots are required"), {
+        name: "NativeRootsRequired", nativeTextQuery: queryToken, completeShadowCensus: false, nativeHosts: [...hosts],
+      });
+    }
     if (!valid && queryToken && !attemptedNativeProof && unprovenMarkers.size) {
       const error = Object.assign(new Error("Native marker paint evidence is required"), {
         name: "NativeTextProofRequired", nativeMarkerQuery: queryToken, markerOwners: [...unprovenMarkers],
@@ -77,5 +95,5 @@ export function createRenderedTextReader(
     results.set(root, value); return value;
   };
 }
-export const RENDERED_TEXT_READER_SOURCE = `(${createRenderedTextReader.toString()})(${sampleReadableSnapshot.toString()}, ${snapshotObservationPrimitives.toString()}, ${markerInkRects.toString()})`;
+export const RENDERED_TEXT_READER_SOURCE = `(${createRenderedTextReader.toString()})(${sampleReadableSnapshot.toString()}, ${snapshotObservationPrimitives.toString()}, ${markerInkRects.toString()}, typeof surfWaxNativeRoots === "undefined" ? undefined : surfWaxNativeRoots)`;
 export const RENDERED_TEXT_SOURCE = `function(){return (${RENDERED_TEXT_READER_SOURCE}).call(this)}`;

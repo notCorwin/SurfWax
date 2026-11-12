@@ -378,6 +378,8 @@ test("text tools require rendered evidence rather than hidden source", async () 
         <div style="opacity:0"><p id="transparent">Ready</p></div>
         <div style="visibility:hidden"><p id="invisible">Ready</p></div>
         <p id="mixed">Visible<span style="display:none">Ready</span></p>
+        <input id="outline-field" style="position:absolute;left:1050px;top:500px" aria-label="Native outline evidence">
+        <p id="outline-distant" style="position:absolute;left:1000px;top:650px">Distant focused-field text</p>
         <p id="uncertain">Visible<span style="opacity:0">Ready</span></p>
         <div id="inline">Hello <span style="display:none">secret</span> world</div>
         <pre id="pre"> A <span style="display:none">secret</span> B </pre>
@@ -399,6 +401,7 @@ test("text tools require rendered evidence rather than hidden source", async () 
       const generated = document.createElement('button'); generated.id = 'show-generated'; generated.textContent = 'Show generated';
       generated.onclick = () => { const style = document.createElement('style'); style.textContent = 'x-empty::before{content:"additional"}'; document.head.append(style); };
       document.body.append(generated);
+      (document.querySelector('#outline-field') as HTMLInputElement).focus({ preventScroll: true });
       document.querySelector('#start')!.addEventListener('click', () => {
         setTimeout(() => { document.querySelector('#status')!.textContent = 'Ready'; }, 500);
       });
@@ -457,9 +460,19 @@ test("text tools require rendered evidence rather than hidden source", async () 
         if (state.enabled && args[1] === 'Accessibility.getFullAXTree') state.reads++;
         const [source, method, params] = args;
         const paint = state.pendingPaint >= 0 && method === 'Runtime.callFunctionOn' && String(params.functionDeclaration).includes('createRenderedTextReader') ? state.paintChecks[state.pendingPaint] : undefined;
-        if (paint) paint.phases.push('child-read-dispatched');
+        const dispatchedAt = paint ? Date.now() : undefined;
         const result = await (native as any)(...args);
-        if (paint) { paint.phases.push('child-read-finished'); paint.childException = Boolean(result.exceptionDetails); paint.childLocalText = typeof result.result?.value === 'string' ? result.result.value : result.result?.value?.actual; state.pendingPaint = -1; }
+        if (paint) {
+          const attempt = { dispatchedAt, finishedAt: Date.now(), exception: result.exceptionDetails, value: result.result?.value };
+          (paint.attempts ??= []).push(attempt);
+          // Dependency discovery precedes the actual synchronous text read.
+          // Preserve every attempt and require the final plain read below.
+          if (!result.exceptionDetails) {
+            paint.phases.push('child-read-dispatched', 'child-read-finished'); paint.childException = false;
+            paint.childLocalText = typeof result.result?.value === 'string' ? result.result.value : result.result?.value?.actual;
+            state.pendingPaint = -1;
+          }
+        }
         if (method === 'DOM.describeNode' && result.node?.nodeName === 'IFRAME') {
           const attributes = result.node.attributes ?? [], index = attributes.indexOf('id');
           if (index >= 0 && attributes[index + 1] === 'child') state.paintBackend = result.node.backendNodeId;
@@ -501,6 +514,7 @@ test("text tools require rendered evidence rather than hidden source", async () 
         { name: "verify_state", input: { target: css(value), state: "hidden" }, expected: { ok: true, result: { verified: true, actual: false } } },
       ]),
       { name: "read_text", input: { target: css("#source") }, expected: { ok: false, error: { code: "text-unavailable" } } },
+      { name: "read_text", input: { target: css("#outline-distant") }, expected: { ok: true, result: "Distant focused-field text" } },
       { name: "read_text", input: { target: css("#mixed") }, expected: { ok: true, result: "Visible" } },
       { name: "read_elements", input: { target: css("#mixed") }, expected: { ok: true, result: { items: [{ text: "Visible" }] } } },
       { name: "read_text", input: { target: native(css('ol li:first-child')) }, expected: { ok: false, error: { code: 'text-unavailable' } } },
@@ -573,6 +587,10 @@ test("text tools require rendered evidence rather than hidden source", async () 
     expect(paintChecks).toHaveLength(2);
     for (const paint of paintChecks) {
       expect(paint).toMatchObject({ precheck: true, mutation: { before: false, id: 'child' }, childException: false, childLocalText: 'Frame ready', phases: ['parent-precheck-complete', 'opaque-cover-created', 'child-read-dispatched', 'child-read-finished'] });
+      expect(paint.attempts.at(-1)).toMatchObject({ value: expect.anything() });
+      expect(paint.attempts.at(-1).exception).toBeUndefined();
+      for (const attempt of paint.attempts.slice(0, -1))
+        expect(attempt.exception?.exception?.description).toMatch(/^NativeRootsRequired:/);
     }
     expect(await target.locator("#status").innerText()).toBe("Ready");
     await expect.poll(() => opened.page.evaluate(async () => Boolean((await chrome.runtime.sendMessage({ type: 'surf-wax:run-status' })).identity))).toBe(false);

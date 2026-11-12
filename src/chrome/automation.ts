@@ -29,7 +29,7 @@ import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotClip, type S
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
 import { axEllipsisCandidate, confirmAxEllipsis, type AxEllipsisCandidate } from "./snapshot-ax-ellipsis";
 import { AX_ELLIPSIS_GEOMETRY_SOURCE } from "./snapshot-ellipsis-geometry";
-import { SNAPSHOT_FRAME_PAINT_SOURCE, RENDERED_FRAME_PAINT_SOURCE } from "./snapshot-frame-paint";
+import { SNAPSHOT_FRAME_PAINT_SOURCE, RENDERED_FRAME_PAINT_SOURCE, FRAME_OWNER_VISIBILITY_SOURCE } from "./snapshot-frame-paint";
 import { SNAPSHOT_CONTROL_PAINT_SOURCE } from "./snapshot-control-paint";
 import { PLACEHOLDER_EVIDENCE_SOURCE, samePlaceholderEvidence, type PlaceholderEvidence } from "./snapshot-placeholder";
 import { FRAME_OWNER_FULLY_VISIBLE_SOURCE } from "./snapshot-frame-containment";
@@ -64,7 +64,7 @@ type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "e
 type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number; identitySource: "ax" | "dom"; conversationId?: string; runId?: string; aliases?: Set<string> };
 type FrameRefRecord = { frameId: string; debuggee: Debuggee; generation: number; revision: number; conversationId?: string; runId?: string };
 type FrameDocument = { session: Session; frame: FrameRefRecord; promise: Promise<string>; objectId?: string; executionContextId?: number;
-  paintCacheToken: string; paintCacheWarm?: boolean; paintCacheTail?: Promise<void>; backendNodeId?: number };
+  shadowRevision?: number; paintCacheToken: string; paintCacheWarm?: boolean; paintCacheTail?: Promise<void>; backendNodeId?: number };
 type FrameListSnapshot = { id: string; session: Session; generation: number; revision: number; conversationId?: string; runId?: string; frames: Array<Record<string, unknown>> };
 type InspectSnapshot = {
   id: string; session: Session; generation: number; frameRevision: number; conversationId?: string; runId?: string;
@@ -809,6 +809,14 @@ export class AutomationRuntime {
       // subtree (only childNodeInserted). Both invalidate a closed-root census
       // before its sample can expose light DOM hidden by an uncollected root.
       session.rootDocumentRevision++;
+    }
+    if (session && (method === "DOM.shadowRootPushed" || method === "DOM.shadowRootPopped"
+      || method === "DOM.childNodeRemoved" || method === "DOM.childNodeInserted" && params?.node?.nodeType === 1)) {
+      // Native topology evidence is scoped to its original document entry.
+      // Same-process frames share a source; conservatively invalidate those
+      // entries without replacing their worlds or unrelated AX/paint state.
+      for (const entry of this.frameDocuments.values()) if (entry.session === session
+        && entry.frame.debuggee.sessionId === source.sessionId) entry.shadowRevision = (entry.shadowRevision ?? 0) + 1;
     }
     const chooser = this.fileChoosers.get(tabId!);
     const preserveChooser = !chooser || !this.chooserAffected(source, method, params, { frameId: chooser.frameId, source: chooser.debuggee });
@@ -1709,7 +1717,7 @@ export class AutomationRuntime {
           if (!await checkTextFrame()) return { present: true, actual: null };
         } else if (condition === "visible") {
           const frameId = await this.actionFrameId(session, targetSession, objectId, spec);
-          if (!await this.frameOwnersVisible(session, frameId)) return { present: true, actual: false };
+          if (!await this.frameOwnersVisible(session, frameId, "visibility")) return { present: true, actual: false };
         }
         const observation = await this.callOn(targetSession, objectId, `function(condition) {
           if (!this.isConnected) return { present: false, actual: null };
@@ -2320,10 +2328,13 @@ export class AutomationRuntime {
           const sliceId = slice.result?.objectId;
           if (!sliceId) throw automationError("search-unavailable", { reason: "missing-page-array" });
           temporary.add(sliceId);
+          const context = this.objectContexts.get(current.arrayId!);
+          if (context !== undefined) this.objectContexts.set(sliceId, context);
           const properties = await this.options.command(current.debuggee, "Runtime.getProperties", { objectId: sliceId, ownProperties: true });
           pageGuard();
           const byIndex = new Map((properties.result ?? []).filter((property: any) => /^(0|[1-9]\d*)$/.test(property.name)).map((property: any) => [Number(property.name), property.value?.objectId]));
           objects = Array.from({ length: end - offset }, (_, index) => ({ objectId: byIndex.get(index) as string | undefined }));
+          for (const { objectId } of objects) if (objectId && context !== undefined) this.objectContexts.set(objectId, context);
         }
         const resolvedObjects = await Promise.allSettled(objects.map(async ({ objectId, candidate }) => {
           pageGuard();
@@ -2346,7 +2357,7 @@ export class AutomationRuntime {
         const metadataByObject = new Map<string, any>();
         if (nodes.length) {
           pageGuard();
-          if (!current.frameId || !await this.frameOwnersVisible(session, current.frameId))
+          if (!current.frameId || !await this.frameOwnersVisible(session, current.frameId, "text-paint"))
             throw automationError("text-unavailable", { reason: "frame-not-rendered" });
           // Describe the page in one task; paint evidence must not cross the
           // asynchronous identity/frame checks below or survive to another page.
@@ -2354,7 +2365,7 @@ export class AutomationRuntime {
             functionDeclaration: `function(includeIdentity,...nodes){const readText=${RENDERED_TEXT_READER_SOURCE};return nodes.map(node => (${SEARCH_META_SOURCE}).call(node,includeIdentity,readText))}`,
             arguments: [{ value: !current.candidates }, ...nodes.map(objectId => ({ objectId }))], returnByValue: true });
           pageGuard();
-          if (!await this.frameOwnersVisible(session, current.frameId)) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
+          if (!await this.frameOwnersVisible(session, current.frameId, "text-paint")) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
           if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
           nodes.forEach((node, index) => metadataByObject.set(node, response.result?.value?.[index]));
         }
@@ -2701,6 +2712,7 @@ export class AutomationRuntime {
             refObjectId = rebound.object?.objectId;
             if (!refObjectId) throw new Error("missing-node-object");
             owned.add(refObjectId);
+            this.objectContexts.set(refObjectId, base.executionContextId);
           } catch {
             throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: locator.ref });
           }
@@ -3096,10 +3108,10 @@ export class AutomationRuntime {
       if (tabId !== undefined && document.session.tabId !== tabId) continue;
       if (source && document.frame.debuggee.sessionId !== source.sessionId) continue;
       this.frameDocuments.delete(key);
-      if (release && document.objectId) {
-        void this.options.command(document.frame.debuggee, "Runtime.releaseObject", { objectId: document.objectId }).catch(() => undefined);
-        document.objectId = undefined;
-      }
+      const objectId = document.objectId;
+      document.objectId = undefined;
+      if (release && objectId)
+        void Promise.resolve().then(() => this.options.command(document.frame.debuggee, "Runtime.releaseObject", { objectId })).catch(() => undefined);
     }
   }
 
@@ -3138,8 +3150,9 @@ export class AutomationRuntime {
       }).catch((error) => {
         if (this.frameDocuments.get(key) === entry) this.frameDocuments.delete(key);
         // The evaluation can complete after invalidation or group release.
-        if (entry.objectId) void this.options.command(frame.debuggee, "Runtime.releaseObject", { objectId: entry.objectId }).catch(() => undefined);
+        const objectId = entry.objectId;
         entry.objectId = undefined;
+        if (objectId) void Promise.resolve().then(() => this.options.command(frame.debuggee, "Runtime.releaseObject", { objectId })).catch(() => undefined);
         throw error;
       });
       this.frameDocuments.set(key, entry);
@@ -3261,7 +3274,7 @@ export class AutomationRuntime {
         visitLocators(scoped, locator => {
           if (locator.hasText !== undefined || locator.queries.some(query => query.kind === "text" || query.hasText !== undefined)) readsText = true;
         });
-        if (readsText && (!frameId || !await this.frameOwnersVisible(session, frameId)))
+        if (readsText && (!frameId || !await this.frameOwnersVisible(session, frameId, "text-paint")))
           throw automationError("text-unavailable", { reason: "frame-not-rendered" });
         transferred = true;
         return { debuggee, frameId, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}), ...(rootIsElement ? { rootIsElement } : {}), dispose };
@@ -3412,7 +3425,7 @@ export class AutomationRuntime {
       throw automationError("invalid-input", { reason: "invalid-element-page" });
     const scoped = await this.locatorScope(session, spec), group = `surf-wax-element-read:${crypto.randomUUID()}`;
     const checkFrame = async () => {
-      if (!scoped.frameId || !await this.frameOwnersVisible(session, scoped.frameId))
+      if (!scoped.frameId || !await this.frameOwnersVisible(session, scoped.frameId, "text-paint"))
         throw automationError("text-unavailable", { reason: "frame-not-rendered" });
     };
     try {
@@ -3462,98 +3475,158 @@ export class AutomationRuntime {
     }
   }
 
-  /** Only synchronous, side-effect-free text queries enter this path. An
-   * unsupported marker requests one native capture, never a replay of input. */
+  /** Only synchronous, side-effect-free text queries enter this path. Missing
+   * native roots/marker evidence requests real dependencies, never input replay. */
   private async renderedCall(session: Session, debuggee: Debuggee, params: any): Promise<any> {
     const token = crypto.randomUUID(), generation = session.generation, revision = session.frameRevision;
+    const { signal, deadlineAt } = this.context;
+    const contextId = this.objectContexts.get(params.objectId);
+    const entry = [...this.frameDocuments.values()].find(entry => entry.session === session
+      && entry.frame.debuggee.sessionId === debuggee.sessionId && entry.executionContextId === contextId);
+    const entryObjectId = entry?.objectId;
+    let shadowRevision: number | undefined;
+    let nativeRoots: Array<{ objectId: string }> | undefined, completeRoots = false, nativeGroupUsed = false;
+    const nativeGroup = `surf-wax-text-roots:${token}`;
     const guard = () => {
-      throwIfAborted(this.context.signal); throwIfAborted(session.lifetime.signal);
+      throwIfAborted(signal); throwIfAborted(session.lifetime.signal);
+      if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new DOMException("Operation timed out", "TimeoutError");
       if (this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== revision)
         throw automationError("text-unavailable", { reason: "document-changed-during-text-read" });
+      if (shadowRevision !== undefined && (!entry || !entryObjectId || contextId === undefined
+        || ![...this.frameDocuments.values()].includes(entry) || entry.objectId !== entryObjectId || entry.executionContextId !== contextId
+        || (entry.shadowRevision ?? 0) !== shadowRevision))
+        throw automationError("stale-observation", { reason: "native-text-topology-changed-during-read" });
     };
     const wrap = (active: boolean) => {
       const enter = `const key=Symbol.for("surf-wax.rendered-text-active-query.v1");globalThis[key]=${active ? JSON.stringify(token) : "undefined"};`;
-      return { ...params, objectGroup: params.objectGroup ?? "surf-wax-automation", functionDeclaration: `function(...args){${enter}try{return (${params.functionDeclaration}).apply(this,args)}finally{delete globalThis[key]}}` };
+      return { ...params, objectGroup: params.objectGroup ?? "surf-wax-automation",
+        arguments: [{ value: nativeRoots?.length ?? -1 }, { value: completeRoots }, ...nativeRoots ?? [], ...params.arguments ?? []],
+        functionDeclaration: `function(rootCount,complete,...args){const surfWaxNativeRoots=rootCount<0?undefined:{roots:args.splice(0,rootCount),complete:complete===true};${enter}try{return (${params.functionDeclaration}).apply(this,args)}finally{delete globalThis[key]}}` };
     };
-    guard();
-    const first = await this.options.command(debuggee, "Runtime.callFunctionOn", wrap(true)); guard();
-    const exceptionId = first?.exceptionDetails?.exception?.objectId;
-    if (!exceptionId) return first;
-    const group = `surf-wax-marker-query:${token}`;
-    let stateId: string | undefined, consumedException = false;
     try {
-      const prepared = await this.options.command(debuggee, "Runtime.callFunctionOn", {
-        objectId: exceptionId, functionDeclaration: `function(token,deadline){return (${prepareMarkerQuery.toString()}).call(this,token,deadline,${scheduleDeadline.toString()})}`,
-        arguments: [{ value: token }, { value: this.context.deadlineAt }], objectGroup: group,
-        serializationOptions: { serialization: "deep", maxDepth: 2, additionalParameters: { maxNodeDepth: 0 } },
-      });
-      const value = prepared?.result, entries = value?.deepSerializedValue;
-      if (entries?.type === "array" && Array.isArray(entries.value)) {
-        consumedException = true;
-        if (entries.value.length >= 2 && typeof value.objectId === "string") {
-          stateId = value.objectId; this.markerQueries.set(value.objectId, { debuggee, group });
+      guard();
+      let first = await this.options.command(debuggee, "Runtime.callFunctionOn", wrap(true)); guard();
+      const rootException = first?.exceptionDetails?.exception?.objectId;
+      if (rootException) {
+        nativeGroupUsed = true;
+        const requested = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: rootException,
+          functionDeclaration: "function(token){if(this.name!=='NativeRootsRequired'||this.nativeTextQuery!==token||!Array.isArray(this.nativeHosts))return null;return [this.completeShadowCensus===true,document,...this.nativeHosts]}",
+          arguments: [{ value: token }], objectGroup: nativeGroup,
+          serializationOptions: { serialization: "deep", maxDepth: 2, additionalParameters: { maxNodeDepth: 0 } },
+        });
+        guard();
+        const values = requested.result?.deepSerializedValue;
+        if (!requested.exceptionDetails && values?.type === "array" && Array.isArray(values.value)) {
+          try {
+            if (!entry || !entryObjectId || contextId === undefined) throw automationError("text-unavailable", { reason: "native-text-world-unavailable" });
+            shadowRevision = entry.shadowRevision ?? 0; guard();
+            const [flag, nativeDocument, ...nativeHosts] = values.value;
+            const document = nativeDocument?.type === "node" ? nativeDocument.value : undefined;
+            const loader = session.frameLoaders.get(entry.frame.frameId);
+            if (flag?.type !== "boolean" || !loader || document?.nodeType !== 9 || document.loaderId !== loader
+              || !Number.isSafeInteger(document.backendNodeId) || document.backendNodeId <= 0)
+              throw automationError("stale-observation", { reason: "native-text-document-mismatch" });
+            const described = await this.options.command(debuggee, "DOM.describeNode", { objectId: entryObjectId }); guard();
+            if (described.node?.nodeType !== 9 || described.node.backendNodeId !== document.backendNodeId)
+              throw automationError("stale-observation", { reason: "native-text-document-mismatch" });
+            completeRoots = flag.value === true;
+            const hosts = nativeHosts.map((value: any) => value?.type === "node" ? value.value : undefined);
+            if (!completeRoots && !hosts.length || hosts.some((host: any) => host?.nodeType !== 1 || host.loaderId !== loader
+              || !Number.isSafeInteger(host.backendNodeId) || host.backendNodeId <= 0))
+              throw automationError("stale-observation", { reason: "native-field-host-mismatch" });
+            nativeRoots = await this.nativeShadowRoots(debuggee, document.backendNodeId, contextId, nativeGroup, guard,
+              completeRoots ? undefined : [...new Set<number>(hosts.map((host: any) => host.backendNodeId))]);
+            guard();
+            first = await this.options.command(debuggee, "Runtime.callFunctionOn", wrap(true)); guard();
+          } finally {
+            await this.options.command(debuggee, "Runtime.releaseObject", { objectId: rootException }).catch(() => undefined);
+          }
         }
       }
-      guard();
-      if (prepared.exceptionDetails || entries?.type !== "array" || !Array.isArray(entries.value)) return first;
-      consumedException = true;
-      const unavailable = () => this.options.command(debuggee, "Runtime.callFunctionOn", wrap(false));
-      if (entries.value.length < 2) return unavailable();
-      stateId = value.objectId;
-      if (!stateId) return unavailable();
-      const nodes = entries.value.map((entry: any) => entry?.type === "node" ? entry.value : undefined);
-      const document = nodes[0], owners = nodes.slice(1);
-      const frame = [...session.frameLoaders].find(([, loader]) => loader && loader === document?.loaderId)?.[0];
-      if (!frame || !Number.isSafeInteger(document?.backendNodeId) || document.nodeType !== 9
-        || owners.some((owner: any) => owner?.nodeType !== 1 || owner.loaderId !== document.loaderId || !Number.isSafeInteger(owner.backendNodeId))) return unavailable();
-      const source = session.frames.get(frame);
-      if (!source || source.tabId !== debuggee.tabId || source.sessionId !== debuggee.sessionId) return unavailable();
-      if (!await this.frameOwnersVisible(session, frame)) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
-      guard();
-      const snapshot = await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...MARKER_STYLES] });
-      guard();
-      const records = markerCaptureEvidence(snapshot, { document: document.backendNodeId, loader: document.loaderId, owners: owners.map((node: any) => node.backendNodeId) });
-      if (!records) return unavailable();
-      await this.options.command(debuggee, "CSS.enable", {}); guard();
-      await this.frontendRoot(debuggee); guard();
-      const ids = [...new Set(records.map(record => record.marker))];
-      const pushed = await this.options.command(debuggee, "DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds: ids }); guard();
-      const fonts = new Map<number, any>();
-      // CDP exposes font usage per node. Deduplicate actual pseudo identities,
-      // bound concurrency, and stop issuing new requests on cancellation.
-      for (let offset = 0; offset < ids.length; offset += 8) {
+      const exceptionId = first?.exceptionDetails?.exception?.objectId;
+      if (!exceptionId) return first;
+      const group = `surf-wax-marker-query:${token}`;
+      let stateId: string | undefined, consumedException = false;
+      try {
+        const prepared = await this.options.command(debuggee, "Runtime.callFunctionOn", {
+          objectId: exceptionId, functionDeclaration: `function(token,deadline){return (${prepareMarkerQuery.toString()}).call(this,token,deadline,${scheduleDeadline.toString()})}`,
+          arguments: [{ value: token }, { value: deadlineAt }], objectGroup: group,
+          serializationOptions: { serialization: "deep", maxDepth: 2, additionalParameters: { maxNodeDepth: 0 } },
+        });
+        const value = prepared?.result, entries = value?.deepSerializedValue;
+        if (entries?.type === "array" && Array.isArray(entries.value)) {
+          consumedException = true;
+          if (entries.value.length >= 2 && typeof value.objectId === "string") {
+            stateId = value.objectId; this.markerQueries.set(value.objectId, { debuggee, group });
+          }
+        }
         guard();
-        const batch = await Promise.allSettled(ids.slice(offset, offset + 8).map(async (id, index) => {
+        if (prepared.exceptionDetails || entries?.type !== "array" || !Array.isArray(entries.value)) return first;
+        consumedException = true;
+        const unavailable = async () => {
           guard();
-          const nodeId = pushed?.nodeIds?.[offset + index];
-          if (!Number.isSafeInteger(nodeId) || nodeId <= 0) return;
-          const result = await this.options.command(debuggee, "CSS.getPlatformFontsForNode", { nodeId }); guard();
-          if (Array.isArray(result.fonts) && result.fonts.length === 1) fonts.set(id, result.fonts[0]);
-        }));
+          const result = await this.options.command(debuggee, "Runtime.callFunctionOn", wrap(false));
+          guard(); return result;
+        };
+        if (entries.value.length < 2) return await unavailable();
+        stateId = value.objectId;
+        if (!stateId) return await unavailable();
+        const nodes = entries.value.map((entry: any) => entry?.type === "node" ? entry.value : undefined);
+        const document = nodes[0], owners = nodes.slice(1);
+        const frame = [...session.frameLoaders].find(([, loader]) => loader && loader === document?.loaderId)?.[0];
+        if (!frame || !Number.isSafeInteger(document?.backendNodeId) || document.nodeType !== 9
+          || owners.some((owner: any) => owner?.nodeType !== 1 || owner.loaderId !== document.loaderId || !Number.isSafeInteger(owner.backendNodeId))) return await unavailable();
+        const source = session.frames.get(frame);
+        if (!source || source.tabId !== debuggee.tabId || source.sessionId !== debuggee.sessionId) return await unavailable();
+        if (!await this.frameOwnersVisible(session, frame, "text-paint")) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
         guard();
-        const failure = batch.find(result => result.status === "rejected");
-        if (failure?.status === "rejected") throw failure.reason;
+        const snapshot = await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...MARKER_STYLES] });
+        guard();
+        const records = markerCaptureEvidence(snapshot, { document: document.backendNodeId, loader: document.loaderId, owners: owners.map((node: any) => node.backendNodeId) });
+        if (!records) return await unavailable();
+        await this.options.command(debuggee, "CSS.enable", {}); guard();
+        await this.frontendRoot(debuggee); guard();
+        const ids = [...new Set(records.map(record => record.marker))];
+        const pushed = await this.options.command(debuggee, "DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds: ids }); guard();
+        const fonts = new Map<number, any>();
+        // CDP exposes font usage per node. Deduplicate actual pseudo identities,
+        // bound concurrency, and stop issuing new requests on cancellation.
+        for (let offset = 0; offset < ids.length; offset += 8) {
+          guard();
+          const batch = await Promise.allSettled(ids.slice(offset, offset + 8).map(async (id, index) => {
+            guard();
+            const nodeId = pushed?.nodeIds?.[offset + index];
+            if (!Number.isSafeInteger(nodeId) || nodeId <= 0) return;
+            const result = await this.options.command(debuggee, "CSS.getPlatformFontsForNode", { nodeId }); guard();
+            if (Array.isArray(result.fonts) && result.fonts.length === 1) fonts.set(id, result.fonts[0]);
+          }));
+          guard();
+          const failure = batch.find(result => result.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
+        }
+        const installed = await this.options.command(debuggee, "Runtime.callFunctionOn", {
+          objectId: stateId, functionDeclaration: measureMarkerInk.toString(), arguments: [{ value: records.map(record => ({ ...record, font: fonts.get(record.marker) })) }], returnByValue: true, awaitPromise: true,
+        });
+        guard();
+        if (installed.exceptionDetails || installed.result?.value !== true) return await unavailable();
+        const result = await this.options.command(debuggee, "Runtime.callFunctionOn", wrap(true)); guard();
+        if (!await this.frameOwnersVisible(session, frame, "text-paint")) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
+        guard();
+        return result;
+      } finally {
+        if (consumedException) await this.options.command(debuggee, "Runtime.releaseObject", { objectId: exceptionId }).catch(() => undefined);
+        if (stateId) {
+          try {
+            await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: stateId,
+              functionDeclaration: "function(){this.dispose()}", returnByValue: true });
+            this.markerQueries.delete(stateId);
+          } catch { /* clearContext disposes after the executor clears cancellation. */ }
+        }
+        if (!stateId || !this.markerQueries.has(stateId))
+          await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined);
       }
-      const installed = await this.options.command(debuggee, "Runtime.callFunctionOn", {
-        objectId: stateId, functionDeclaration: measureMarkerInk.toString(), arguments: [{ value: records.map(record => ({ ...record, font: fonts.get(record.marker) })) }], returnByValue: true, awaitPromise: true,
-      });
-      guard();
-      if (installed.exceptionDetails || installed.result?.value !== true) return unavailable();
-      const result = await this.options.command(debuggee, "Runtime.callFunctionOn", wrap(true)); guard();
-      if (!await this.frameOwnersVisible(session, frame)) throw automationError("text-unavailable", { reason: "frame-not-rendered" });
-      guard();
-      return result;
     } finally {
-      if (consumedException) await this.options.command(debuggee, "Runtime.releaseObject", { objectId: exceptionId }).catch(() => undefined);
-      if (stateId) {
-        try {
-          await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: stateId,
-            functionDeclaration: "function(){this.dispose()}", returnByValue: true });
-          this.markerQueries.delete(stateId);
-        } catch { /* clearContext disposes after the executor clears cancellation. */ }
-      }
-      if (!stateId || !this.markerQueries.has(stateId))
-        await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined);
+      if (nativeGroupUsed) await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: nativeGroup }).catch(() => undefined);
     }
   }
 
@@ -3665,18 +3738,20 @@ export class AutomationRuntime {
     guard();
     return async () => {
       guard();
-      const painted = await this.frameOwnersVisible(session, frameId);
+      const painted = await this.frameOwnersVisible(session, frameId, "text-paint");
       guard();
       return painted;
     };
   }
 
   /** Check every iframe owner, including same-process and cross-origin frames. */
-  private async frameOwnersVisible(session: Session, frameId: string): Promise<boolean> {
+  private async frameOwnersVisible(session: Session, frameId: string, mode: "visibility" | "text-paint"): Promise<boolean> {
     const generation = session.generation, revision = session.frameRevision, root = session.rootFrameId;
+    const { signal, deadlineAt } = this.context;
     if (!root) throw automationError("frame-unavailable", { reason: "missing-root-frame" });
     const guard = () => {
-      throwIfAborted(this.context.signal);
+      throwIfAborted(signal);
+      if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw new DOMException("Operation timed out", "TimeoutError");
       if (this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== revision)
         throw automationError("stale-frame", { reason: "frame-tree-changed" });
     };
@@ -3699,9 +3774,26 @@ export class AutomationRuntime {
         const resolved = await this.options.command(parent, "DOM.resolveNode", { backendNodeId: owner.backendNodeId, executionContextId, objectGroup: group });
         guard(); world.guard();
         if (!resolved.object?.objectId) throw automationError("frame-unavailable", { reason: "missing-frame-owner-object" });
-        const response = await this.options.command(parent, "Runtime.callFunctionOn", { objectId: resolved.object.objectId, returnByValue: true,
-          functionDeclaration: RENDERED_FRAME_PAINT_SOURCE });
+        let response = await this.options.command(parent, "Runtime.callFunctionOn", { objectId: resolved.object.objectId, returnByValue: true,
+          functionDeclaration: mode === "text-paint" ? RENDERED_FRAME_PAINT_SOURCE : FRAME_OWNER_VISIBILITY_SOURCE });
         guard(); world.guard();
+        if (mode === "text-paint" && response.result?.value === "native-shadow-roots-required") {
+          const entry = [...this.frameDocuments.values()].find(entry => entry.objectId === world.objectId && entry.session === session);
+          if (!entry) throw automationError("stale-frame", { reason: "frame-paint-document-expired" });
+          const shadowRevision = entry.shadowRevision ?? 0;
+          const check = () => {
+            guard(); world.guard();
+            if ((entry.shadowRevision ?? 0) !== shadowRevision)
+              throw automationError("stale-observation", { reason: "frame-shadow-topology-changed-during-read" });
+          };
+          const described = await this.options.command(parent, "DOM.describeNode", { objectId: world.objectId }); check();
+          if (described.node?.nodeType !== 9 || !Number.isSafeInteger(described.node.backendNodeId))
+            throw automationError("frame-unavailable", { reason: "frame-paint-document-unavailable" });
+          const roots = await this.nativeShadowRoots(parent, described.node.backendNodeId, executionContextId, group, check);
+          response = await this.options.command(parent, "Runtime.callFunctionOn", { objectId: resolved.object.objectId, returnByValue: true,
+            functionDeclaration: RENDERED_FRAME_PAINT_SOURCE, arguments: [{ value: true }, ...roots] });
+          check();
+        }
         if (response.exceptionDetails || typeof response.result?.value !== "boolean") throw automationError("frame-unavailable", { reason: "missing-frame-visibility" });
         if (!response.result.value) return false;
       } finally { await this.options.command(parent, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
@@ -3777,7 +3869,7 @@ export class AutomationRuntime {
         const current = await this.elementState(targetSession, objectId, pointer, true);
         if (current?.connected && current.visible) {
           current.frameId = await this.actionFrameId(session, targetSession, objectId, spec);
-          current.visible = await this.frameOwnersVisible(session, current.frameId);
+          current.visible = await this.frameOwnersVisible(session, current.frameId, "visibility");
         }
         if (current?.connected && current.visible && current.receivesEvents && pointer)
           await this.selectPointerPoint(session, targetSession, objectId, current);
@@ -3816,7 +3908,7 @@ export class AutomationRuntime {
       if (!state.connected) throw automationError("detached", { reason: "bound-target-removed" });
       if (state.visible && target.state.frameId) {
         state.frameId = target.state.frameId;
-        state.visible = await this.frameOwnersVisible(session, state.frameId);
+        state.visible = await this.frameOwnersVisible(session, state.frameId, "visibility");
       }
       if (state.visible && state.receivesEvents) await this.selectPointerPoint(session, target.targetSession, target.objectId, state);
       if (state.visible && state.stable && (!enabled || state.enabled) && state.receivesEvents) return { ...target, state };
@@ -4215,6 +4307,66 @@ export class AutomationRuntime {
     return ready;
   }
 
+  /** A real native census supplies current root identities, never UI text.
+   * DOM.getDocument is source-rooted: select the exact requested Document,
+   * including a same-process embedded parent, before walking its own roots. */
+  private async nativeShadowRoots(debuggee: Debuggee, documentBackend: number, contextId: number, objectGroup: string, guard: () => void, hosts?: readonly number[]): Promise<Array<{ objectId: string }>> {
+    const ids = new Set<number>();
+    if (hosts) {
+      for (let offset = 0; offset < hosts.length; offset += 32) {
+        guard();
+        const described = await Promise.allSettled(hosts.slice(offset, offset + 32).map(async backendNodeId => {
+          const value = await this.options.command(debuggee, "DOM.describeNode", { backendNodeId, depth: 1, pierce: true });
+          const node = value.node, roots = node?.shadowRoots?.filter((root: any) => root.shadowRootType === "user-agent") ?? [];
+          if (node?.backendNodeId !== backendNodeId || node.nodeType !== 1 || !/^(?:input|textarea|select)$/i.test(node.nodeName ?? "")
+            || roots.length !== 1 || !Number.isSafeInteger(roots[0].backendNodeId) || roots[0].backendNodeId <= 0)
+            throw automationError("text-unavailable", { reason: "native-field-root-unavailable" });
+          return roots[0].backendNodeId as number;
+        }));
+        guard();
+        const failure = described.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        if (failure) throw failure.reason;
+        for (const result of described) if (result.status === "fulfilled") ids.add(result.value);
+      }
+    } else {
+      guard();
+      const census = await this.frontendDocument(debuggee, { depth: -1, pierce: true }); guard();
+      const documents: any[] = [], pending = [census.root];
+      while (pending.length) {
+        const node = pending.pop();
+        if (!node) throw automationError("stale-observation", { reason: "invalid-shadow-census" });
+        if (node.nodeType === 9 && node.backendNodeId === documentBackend) documents.push(node);
+        pending.push(...node.children ?? [], ...node.shadowRoots ?? []);
+        if (node.contentDocument) pending.push(node.contentDocument);
+      }
+      if (documents.length !== 1) throw automationError("stale-observation", { reason: "shadow-census-document-mismatch" });
+      const own = [documents[0]];
+      while (own.length) {
+        const node = own.pop();
+        for (const shadow of node.shadowRoots ?? []) {
+          if (!Number.isSafeInteger(shadow.backendNodeId) || shadow.backendNodeId <= 0 || ids.has(shadow.backendNodeId))
+            throw automationError("stale-observation", { reason: "invalid-shadow-root-identity" });
+          ids.add(shadow.backendNodeId); own.push(shadow);
+        }
+        own.push(...node.children ?? []); // Embedded documents are separate scopes.
+      }
+    }
+    const roots: Array<{ objectId: string }> = [], backendIds = [...ids];
+    for (let offset = 0; offset < backendIds.length; offset += 32) {
+      guard();
+      const resolved = await Promise.allSettled(backendIds.slice(offset, offset + 32).map(async backendNodeId => {
+        const response = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId, executionContextId: contextId, objectGroup });
+        if (typeof response.object?.objectId !== "string") throw automationError("stale-observation", { reason: "observation-shadow-root-unavailable" });
+        return { objectId: response.object.objectId as string };
+      }));
+      guard();
+      const failure = resolved.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failure) throw failure.reason;
+      for (const result of resolved) if (result.status === "fulfilled") roots.push(result.value);
+    }
+    return roots;
+  }
+
   /** Resolve only native roots asynchronously; all UI evidence is read together. */
   private async sampleNativeObservation(session: Session, pageZoom: number, guard: () => void): Promise<ReturnType<typeof sampleReadableSnapshot>> {
     const frameId = session.rootFrameId;
@@ -4251,29 +4403,11 @@ export class AutomationRuntime {
       const root = described?.node;
       if (root?.nodeType !== 9 || !Number.isSafeInteger(root.backendNodeId) || root.backendNodeId <= 0)
         throw automationError("snapshot-unavailable", { reason: "invalid-observation-document" });
-      let rootIds: number[] | undefined;
-      if (this.options.observationWorldName) {
-        // No chrome.dom API outside an extension. Fetch the shadow topology
-        // once for this read, including closed roots; never read their old text.
-        // DOM.getDocument also subscribes shadowRootPushed/Popped for these nodes.
-        check();
-        const census = await this.frontendDocument(session.debuggee, { depth: -1, pierce: true }); check();
-        if (census.root?.backendNodeId !== root.backendNodeId)
-          throw automationError("stale-observation", { reason: "observation-document-changed-during-read" });
-        rootIds = [];
-        const pending = [census.root];
-        while (pending.length) {
-          const node = pending.pop();
-          for (const shadow of node.shadowRoots ?? []) {
-            rootIds.push(shadow.backendNodeId); pending.push(shadow);
-          }
-          pending.push(...node.children ?? []);
-          // Embedded documents have their own evidence scope, not this census.
-        }
-      }
+      const nativeRoots = this.options.observationWorldName
+        ? await this.nativeShadowRoots(session.debuggee, root.backendNodeId, context.id, objectGroup, check) : undefined;
       const cached = session.nativeControlCandidates;
       let hosts: Array<{ backendNodeId: number } | { nodeId: number }>;
-      if (rootIds) hosts = [];
+      if (nativeRoots) hosts = [];
       else if (cached?.frameId === frameId && cached.loaderId === session.frameLoaders.get(frameId)
         && cached.documentBackendNodeId === root.backendNodeId) hosts = cached.hosts.map((backendNodeId) => ({ backendNodeId }));
       else {
@@ -4294,18 +4428,7 @@ export class AutomationRuntime {
           throw automationError("snapshot-unavailable", { reason: "native-discovery-unavailable" });
         hosts = selected.nodeIds.map((nodeId: number) => ({ nodeId }));
       }
-      const roots: Array<{ objectId: string }> = [], seen = new Set<number>();
-      for (let offset = 0; rootIds && offset < rootIds.length; offset += 32) {
-        const resolved = await Promise.allSettled(rootIds.slice(offset, offset + 32).map(async backendNodeId => {
-          const response = await command("DOM.resolveNode", { backendNodeId, executionContextId: context.id, objectGroup });
-          if (typeof response?.object?.objectId !== "string")
-            throw automationError("stale-observation", { reason: "observation-shadow-root-unavailable" });
-          return { objectId: response.object.objectId as string };
-        }));
-        const failure = resolved.find((result): result is PromiseRejectedResult => result.status === "rejected");
-        if (failure) throw failure.reason;
-        for (const result of resolved) if (result.status === "fulfilled") roots.push(result.value);
-      }
+      const roots = nativeRoots ?? [], seen = new Set<number>();
       for (let offset = 0; offset < hosts.length; offset += 32) {
         const resolved = await Promise.allSettled(hosts.slice(offset, offset + 32).map(async (host) => {
           try {

@@ -182,6 +182,10 @@ SDK 目录检查与设置页预设共用模型资格：必须声明工具调用�
 
 来源：`60e53eb`，见 `src/chrome/executor.ts`、`src/chrome/program.ts`、`src/chrome/tool.ts`。
 
+文档句柄清理先同步撤销 entry 并取出、清空 objectId，再尽力释放远端引用；调用本身同步抛错与异步拒绝都不能覆盖原操作错误或累计未知效果。取消时 individual release 可能未执行，仍由既有 `surf-wax-automation` 对象组清理收束；不因此放宽命令取消、debugger detach 或资源隔离。
+
+来源：`src/chrome/automation.ts`、`src/chrome/executor.ts`、`e2e/click-timeout.spec.ts`。
+
 ### 元素引用绑定观察、文档和框架
 
 2026-10-29 至 31 日持续收敛目标身份：观察返回的元素引用需校验原角色和身份，框架引用绑定文档；导航、框架替换或后续观察可能使引用失效。DOM 节点未变也不能证明业务数据未变，因此操作前仍需核对相关行与页面状态。
@@ -282,7 +286,11 @@ ID 的可操作性来自唯一真实元素绑定，不来自名字匹配或包�
 
 默认原生列表 marker 的潜在绘制与正文分别取证。需要时才按实际节点 backend ID、loader 与同一隔离世界获取原生 marker 几何和实际字体；支持的单个系统字体与简单排版通过离屏 SVG 图像栅格化取得保守墨迹范围，不把 advance 或 SVG layout box 当作墨迹。最终正文由新的同步绘制证明读取，仍检查文档、节点、样式、字体、counter、相关动画与裁剪；不支持的字体、效果或 CSP 解码限制保持 unknown，不改作者 DOM 或字体集合，也不把 marker 文字回填正文。普通视口外的已渲染文字仍可读取，作者对父 iframe 的明确裁切不能与普通视口边界混同。每层父文档还需以同次同步绘制引擎核对实际 frame owner 的裁剪和竞争绘制；父层遮挡或证明不足时，不把子文档自身可读误当作目标可见。普通文字初次读取与 native marker 重读均不能只依赖前置证明；实际读取后仍需在原 frame/world 守卫下重新证明父层绘制，失败不交付文字，文字验证保持未知。祖先普通背景的后景豁免不适用于未证明的负 stacking 后代；父框架资格对负值或未知 stacking 路径保持 unknown。
 
-批量正文读取和同次 hasText 过滤共用真实节点数组及同步 reader；条件原生证据仅在该查询内共享，不跨异步边界复用旧同步证明。原生 AX 与 CSS 解析后均在正确框架的既有隔离世界读取相同 backend 节点，不执行作者覆写的读取 getter，不改变公开 `Page.evaluate` 的执行语义。原生 AX 查询使用本次实际 frame 的 fresh full tree 与真实 scope 的原生 child 关系，按 child 预序保持嵌套索引顺序；同次查询的多个 root 共用该 frame 的读取及索引，不跨工具缓存。原生序列化中完全相同的重复节点事实可去重；冲突身份、父链、悬空关系与循环仍拒绝，不用 DOM 推断角色或名称。语义查询从入口保留原隔离世界与文档 entry 守卫，在后续异步绑定、描述、过滤及最终返回前复验；不能在失效后重新取得新 world 假装原查询仍有效，新取得的对象先登记所有权以便失败时释放。字体发现复用当前 frontend root，实际 `DOM.getDocument` 读取统一更新该权威。原生查询的临时对象、observer、图像与 URL 随查询收束，并以实际操作绝对 deadline 到期失效；timer 被节流也不能使证据继续有效。
+frame owner 的祖先遍历显式区分动作结构可见性与文字绘制证明：动作保留结构裁剪和原生 hit-test，文字继续检查父层竞争绘制及读取前后新证明。frame owner 只接纳已证明的有限正轴向缩放和平移，不把该资格用于放宽正文的旋转、复杂裁切或未知绘制。
+
+原生 focus outline 的有限界需要真实 UA root。能够同步取得根时直接使用；否则仅在确有缺失依赖时，按原文档 backend、loader、world 与实际 host 获取根。缺少扩展 API 的开发宿主必须取得完整的真实 author/UA 拓扑，不能用空表代替闭合根证明；异步获取后重新同步读取当前绘制，拓扑变化与绝对 deadline 到期均失效。
+
+批量正文读取和同次 hasText 过滤共用真实节点数组及同步 reader；条件原生证据仅在该查询内共享，不跨异步边界复用旧同步证明。原生 AX 与 CSS 解析后均在正确框架的既有隔离世界读取相同 backend 节点，不执行作者覆写的读取 getter，不改变公开 `Page.evaluate` 的执行语义。原生 AX 查询使用本次实际 frame 的 fresh full tree 与真实 scope 的原生 child 关系，按 child 预序保持嵌套索引顺序；同次查询的多个 root 共用该 frame 的读取及索引，不跨工具缓存。原生序列化中完全相同的重复节点事实可去重；冲突身份、父链、悬空关系与循环仍拒绝，不用 DOM 推断角色或名称。数组解包及嵌套 has 引用的派生句柄继承已知来源的 execution context，不按对象字符串猜测或重新找 world；原生依赖不可用后的普通降级回执同样在 await 后复验原守卫。语义查询从入口保留原隔离世界与文档 entry 守卫，在后续异步绑定、描述、过滤及最终返回前复验；不能在失效后重新取得新 world 假装原查询仍有效，新取得的对象先登记所有权以便失败时释放。字体发现复用当前 frontend root，实际 `DOM.getDocument` 读取统一更新该权威。原生查询的临时对象、observer、图像与 URL 随查询收束，并以实际操作绝对 deadline 到期失效；timer 被节流也不能使证据继续有效。
 
 本机 Chrome debugger 的 `CallArgument.value:null` 在实际对照中未传入；新增批量读取使用显式布尔模式，并核对完整的 total、项序和续页结果。这项局部取舍不声称修复全项目的空值协议。以上边界不保证任意网页绘制完整、固定延迟上界或真实模型已正确完成任务。
 
@@ -408,6 +416,8 @@ HTML 祖先的 overflow 裁剪须按实际定位包含块判断，不能因 DOM 
 
 这份 primary metric 证明使用同文档匹配的 FontDescription 和实际空串 top/bottom 度量，不以整个 family list 的 `document.fonts.check` 作为资格。Chrome 156 的 check 会遍历后续 family，即使实际 PrimaryFont 查找已在前方可用字体停止，unused fallback 未加载也可能使其返回 false。度量后及同步采样返回前仍须确认 `document.fonts.status` 为 loaded；若查找触发 cold primary 加载而同步进入 loading，本轮采样返回 null，待后续 task 重新确认，不能混合旧布局与新字体。
 
+装饰条带的有限上界仅用于判断潜在外来绘制，不等于下划线正文已经可读。普通 underline 的自身文字证明仍可能 unknown；单个系统字体的离屏墨迹实验未证明原生 baseline、栅格相位与完整条带严格分离，不据此放行或宣称任意链接已支持。
+
 异步 IntersectionObserver v2 的结果未纳入同步采样：真实 CSSOM 竞态与目标自身遮挡反例不能由旧回调证明当前文字可见。同 z-index 的 DOM 顺序不用于一般绘制顺序推断。客户端水合在采集中替换控件时，严格采集共享现有的一次稳定重采预算；普通读取错误继续明确失败，不引入站点专用回退。局部采样的范围与完整性限制继续生效，不能把偶尔取得主要文字视为动态网站已完整验收。
 
 来源：`src/chrome/snapshot-readable-source.js`、`src/chrome/automation.ts`；Chrome `156.0.8078.80` 的 [ShadowData](https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/third_party/blink/renderer/core/style/shadow_data.cc)、[ShadowList](https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/third_party/blink/renderer/core/style/shadow_list.cc)、[Skia 绘制辅助代码](https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/third_party/blink/renderer/platform/graphics/skia/skia_utils.cc)及 [BoxPainterBase](https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/third_party/blink/renderer/core/paint/box_painter_base.cc)。
@@ -463,6 +473,10 @@ HTML 祖先的 overflow 裁剪须按实际定位包含块判断，不能因 DOM 
 2026-11-04 将开发 Profile 与测试证据集中到仓库内管理，并引入按运行回执清理生成物的机制。每类测试至少保留最近一次已结束运行；未结束或回执无效的目录保留供检查。浏览器缓存清理需要确认 Profile 未使用，拒绝符号链接路径，避免误删活跃数据。
 
 来源：[`af48f1e`](https://github.com/notCorwin/SurfWax/commit/af48f1e)、[`7a4ca61`](https://github.com/notCorwin/SurfWax/commit/7a4ca61)，见 `scripts/dev-storage.mjs`。
+
+Profile 清理锁记录当前 PID、进程起始时间及唯一 owner；释放只删除自己创建的 owner 文件并移除空锁目录，不递归删除可能已被替换或仍有其他记录的锁。
+
+来源：本地提交 `74d3642`，见 `scripts/dev-storage.mjs`。
 
 ### 能力评估区分工具验证与真实模型验证
 
