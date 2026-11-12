@@ -51,7 +51,7 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
   const currentWorlds = await api.getWorldConfigurations?.() ?? [];
   for (const world of worlds ?? []) {
     const current = currentWorlds.find((item) => item.worldId === world.worldId);
-    if (JSON.stringify(current) !== JSON.stringify(world)) await api.configureWorld?.(world);
+    if (!jsonValueEqual(current, world)) await api.configureWorld?.(world);
   }
   for (const script of registered) {
     if (disabledIds.has(script.id)) await api.unregister({ ids: [script.id] });
@@ -70,7 +70,7 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
     if (disabledIds.has(script.id)) continue;
     const current = byId.get(script.id);
     if (!current) await registerScript(api, script);
-    else if (JSON.stringify(current) !== JSON.stringify(script)) {
+    else if (!jsonValueEqual(current, script)) {
       // update() merges properties, so omitted optional fields would survive.
       // Re-register the declaration exactly, restoring the prior projection if
       // registration fails; storage remains authoritative for a later retry.

@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { callUserScripts, USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY } from "./persistence";
+import { callUserScripts, USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_WORLDS_KEY, restoreUserScripts } from "./persistence";
 
 it("protects stale replacements and preserves native projection through failures", async () => {
   let tail = Promise.resolve();
@@ -59,4 +59,23 @@ it("protects stale replacements and preserves native projection through failures
     await call("replace", script, await call("readForEdit", "one"));
     expect(native.find(s => s.id === "one")?.js).toEqual(script.js);
   } finally { vi.unstubAllGlobals(); }
+});
+
+
+it("restores only declarations and worlds whose values differ", async () => {
+  const script = { id: "one", matches: ["https://example.com/*"], js: [{ code: "1" }] };
+  const world = { worldId: "w", csp: "script-src 'self'", messaging: true };
+  const data: Record<string, unknown> = { [USER_SCRIPTS_STORAGE_KEY]: [script], [USER_SCRIPTS_DISABLED_KEY]: [], [USER_SCRIPTS_WORLDS_KEY]: [world] };
+  let currentScript = { js: [{ code: "1" }], matches: ["https://example.com/*"], id: "one" };
+  let currentWorld = { messaging: true, csp: "script-src 'self'", worldId: "w" };
+  const register = vi.fn(async () => {}), unregister = vi.fn(async () => {}), configureWorld = vi.fn(async () => {});
+  const chromeApi = { storage: { local: { get: async () => structuredClone(data), set: async () => {} } }, userScripts: {
+    getScripts: async () => [currentScript], getWorldConfigurations: async () => [currentWorld], register, unregister, configureWorld,
+  } } as unknown as NonNullable<Parameters<typeof restoreUserScripts>[0]>["chromeApi"];
+  await restoreUserScripts({ chromeApi });
+  expect(register).not.toHaveBeenCalled(); expect(unregister).not.toHaveBeenCalled(); expect(configureWorld).not.toHaveBeenCalled();
+  currentScript = { ...currentScript, js: [{ code: "changed" }] };
+  currentWorld = { ...currentWorld, messaging: false };
+  await restoreUserScripts({ chromeApi });
+  expect(unregister).toHaveBeenCalledOnce(); expect(register).toHaveBeenCalledOnce(); expect(configureWorld).toHaveBeenCalledWith(world);
 });

@@ -36,3 +36,20 @@ it("compares raw storage values independently of object key order", async () => 
   value = { ...original, unknown: { first: 1, second: ["b", "a"] } };
   await expect(saveModelConfig(config, storage, { value: original })).rejects.toBeInstanceOf(ModelConfigConflictError);
 });
+
+
+it("migrates reordered raw configuration but rejects a concurrent value change", async () => {
+  vi.stubGlobal("navigator", { locks: { request: (_name: string, operation: () => Promise<void>) => operation() } });
+  const profile = { providerId: "example", sdk: "@ai-sdk/openai-compatible", providerSettings: {}, baseURL: "https://example.test", model: "model", imageInput: "auto" };
+  const original = { selectedProviderId: "example", profiles: { example: profile }, unknown: [1, 2] };
+  const reordered = { unknown: [1, 2], profiles: { example: profile }, selectedProviderId: "example" };
+  const changed = { ...reordered, unknown: [2, 1] };
+  let value: unknown = original;
+  const storage = { get: async () => ({ [MODEL_CONFIG_STORAGE_KEY]: structuredClone(value) }), set: async (data: Record<string, unknown>) => { value = structuredClone(data[MODEL_CONFIG_STORAGE_KEY]); } } as unknown as chrome.storage.StorageArea;
+  const catalog = { example: { npm: "@ai-sdk/openai-compatible", models: { model: { id: "model", family: "family" } } } };
+  await loadModelConfig(undefined, storage, { loadCatalog: async () => { value = reordered; return catalog; } });
+  expect(value).toMatchObject({ profiles: { example: { modelFamily: "family" } } });
+  value = original;
+  await expect(loadModelConfig(undefined, storage, { loadCatalog: async () => { value = changed; return catalog; } })).rejects.toMatchObject({ name: "AbortError" });
+  expect(value).toEqual(changed);
+});
