@@ -20,7 +20,8 @@
     "catalog:update": "node scripts/update-model-catalog.mjs",
     "catalog:check": "node scripts/update-model-catalog.mjs --check",
     "verify:local": "node scripts/verify-local.mjs",
-    "tools": "node scripts/tools.mjs"
+    "tools": "node scripts/tools.mjs",
+    "eval:public-web": "node scripts/public-web.mjs"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^5.0.90",
