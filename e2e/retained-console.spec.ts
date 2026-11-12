@@ -9,6 +9,7 @@ test('retained console reads owned canonical captures after close and navigation
   suffixes.splice(0, 6, '  \uFEFF雪🌊\t ', '', 'duplicate', 'duplicate', 'CR stays\r', 'é');
   let generations = 0;
   const server = createServer((req, res) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
     if (req.url === '/generate') { generations++; res.end('<!doctype html><title>generated</title><p>ready</p>'); }
     else if (req.url === '/delivery') res.end('<!doctype html><title>delivery</title><textarea id="delivery" aria-label="Delivery"></textarea>');
     else if (req.url === '/next') res.end('<!doctype html><title>next</title><button onclick="console.log(\'NEXT\')">Next log</button>');
