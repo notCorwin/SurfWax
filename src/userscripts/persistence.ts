@@ -1,3 +1,4 @@
+import { jsonValueEqual } from "../json-value-equal";
 import { registerScript } from "./diagnostic";
 import type { EventLogger } from "../logging";
 import { safeDiagnosticError } from "../diagnostic-error";
@@ -180,7 +181,7 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       if (!declared) throw new Error(method === "edit" ? "找不到该脚本。" : "脚本已更改或删除，请复制草稿后刷新并重新编辑。");
       if (method === "replace") {
         const baseline = args[1] as { script?: unknown; enabled?: unknown; revision?: unknown } | undefined;
-        if (!baseline || JSON.stringify(baseline.script) !== JSON.stringify(declared)
+        if (!baseline || !jsonValueEqual(baseline.script, declared)
           || baseline.enabled !== !disabledScript || baseline.revision !== previousRevision) {
           throw new Error("脚本已更改或删除，请复制草稿后刷新并重新编辑。");
         }
@@ -205,7 +206,7 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
 
     // Only reconcile this declaration. Unrelated saved scripts may still be
     // awaiting startup recovery; never replace them with a registry snapshot.
-    const nativeMatches = enabled && previous && JSON.stringify(previous) === JSON.stringify(next);
+    const nativeMatches = enabled && previous && jsonValueEqual(previous, next);
     const replaceNative = Boolean(previous && !nativeMatches);
     const registerNative = Boolean(enabled && next && !nativeMatches);
     options.beforeExecute?.();
@@ -223,9 +224,9 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       const activeNext = update(saved, enabled ? next : undefined);
       const disabledNext = update(disabled, !enabled ? next : undefined);
       const changes: Record<string, unknown> = {};
-      if (JSON.stringify(saved) !== JSON.stringify(activeNext)) changes[USER_SCRIPTS_STORAGE_KEY] = activeNext;
-      if (JSON.stringify(disabled) !== JSON.stringify(disabledNext)) changes[USER_SCRIPTS_DISABLED_KEY] = disabledNext;
-      const changed = JSON.stringify(declared) !== JSON.stringify(next) || (declared && enabled !== !disabledScript);
+      if (!jsonValueEqual(saved, activeNext)) changes[USER_SCRIPTS_STORAGE_KEY] = activeNext;
+      if (!jsonValueEqual(disabled, disabledNext)) changes[USER_SCRIPTS_DISABLED_KEY] = disabledNext;
+      const changed = !jsonValueEqual(declared, next) || (declared && enabled !== !disabledScript);
       let revision = previousRevision;
       if (changed) {
         if (next) {

@@ -21,6 +21,12 @@ it("protects stale replacements and preserves native projection through failures
     expect(created.baseline.script).toEqual(script);
     expect(created.baseline.enabled).toBe(true);
     expect(created.baseline.revision).toBeTruthy();
+    // Chrome may return the same declaration in a different property order.
+    data[USER_SCRIPTS_STORAGE_KEY] = [{ js: [{ code: "1" }], matches: ["https://example.com/*"], id: "one" }];
+    register.mockClear();
+    await call("replace", script, created.baseline);
+    expect((await call("readForEdit", "one") as { revision: string }).revision).toBe(created.baseline.revision);
+    expect(register).not.toHaveBeenCalled();
     const other = { ...script, id: "other" };
     await call("create", other);
     await call("edit", { id: "other", changes: { js: [{ code: "other change" }] } });

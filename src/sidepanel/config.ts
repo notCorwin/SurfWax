@@ -1,3 +1,4 @@
+import { jsonValueEqual } from "../json-value-equal";
 import { isModelSdk, MODEL_ENDPOINT_TYPES, type ModelConfig, type ModelSdk } from "../types";
 import { modelConfigErrors } from "../agent/model-sdks";
 import { isAbortError, retryModelOperation } from "../agent/model";
@@ -132,7 +133,7 @@ export async function loadModelConfig(
         await withModelConfigLock(async () => {
           const current = await storage.get(MODEL_CONFIG_STORAGE_KEY);
           signal.throwIfAborted();
-          if (JSON.stringify(current[MODEL_CONFIG_STORAGE_KEY]) !== JSON.stringify(value)) {
+          if (!jsonValueEqual(current[MODEL_CONFIG_STORAGE_KEY], value)) {
             throw new DOMException("Model configuration changed during migration", "AbortError");
           }
           await storage.set({ [MODEL_CONFIG_STORAGE_KEY]: result });
@@ -178,7 +179,7 @@ export async function saveModelConfig(
   await withModelConfigLock(async () => {
     if (baseline) {
       const current = await storage.get(MODEL_CONFIG_STORAGE_KEY);
-      if (JSON.stringify(current[MODEL_CONFIG_STORAGE_KEY]) !== JSON.stringify(baseline.value)) throw new ModelConfigConflictError();
+      if (!jsonValueEqual(current[MODEL_CONFIG_STORAGE_KEY], baseline.value)) throw new ModelConfigConflictError();
     }
     await storage.set(data);
   });

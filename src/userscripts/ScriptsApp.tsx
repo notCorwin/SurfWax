@@ -1,3 +1,4 @@
+import { jsonValueEqual } from "../json-value-equal";
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeftIcon, CodeXmlIcon, DownloadIcon, LoaderCircleIcon, PlusIcon, UploadIcon } from "lucide-react";
 import { Alert, AlertDescription } from "../components/ui/alert";
@@ -392,7 +393,7 @@ export function ScriptsApp() {
         const existing = scripts.find((script) => script.id === item.id);
         if (!existing) continue;
         const baseline = await call("readForEdit", item.id);
-        if (JSON.stringify(baseline.script) !== JSON.stringify(existing) || baseline.enabled !== !disabledIds.includes(item.id)) {
+        if (!jsonValueEqual(baseline.script, existing) || baseline.enabled !== !disabledIds.includes(item.id)) {
           throw new Error("脚本已更改或删除，请复制草稿后刷新并重新编辑。");
         }
         baselines[item.id] = baseline;

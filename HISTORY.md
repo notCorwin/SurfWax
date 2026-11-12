@@ -643,3 +643,7 @@ Excalidraw 的编辑、文件导出与恢复尚未完成准入，其初步 oracl
 来源：`src/logging.ts`、`src/sidepanel/conversation-store.ts`、`src/agent/transport.ts`。
 
 排队消息的发送未被运行入口接受时保留队列项，停止自动重试并显示可恢复错误；用户可主动再次发送。消息通知在提交前使用已有基底生成完整投影，持久化仍使用增量 patch；提交后无需读取存储，事件和提交通知在与清空共用的写入锁内同步发布并隔离异常。迟到的清空前跨页面提交通知按已观察到的清空游标丢弃，已确认提交不因通知异常而失败。
+
+设置与用户脚本的并发基线比较保留原始 JSON 值及未知字段，对象属性顺序不影响相等性，数组顺序仍有意义。相同声明的字段重排不应改变脚本修订或触发原生重注册；真实声明或启停变化仍拒绝过期草稿。
+
+来源：`src/json-value-equal.ts`、`src/sidepanel/config.ts`、`src/userscripts/persistence.ts`。

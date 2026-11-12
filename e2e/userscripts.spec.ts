@@ -191,6 +191,11 @@ test("stale script drafts cannot undo another page's delete or disable", { tag: 
       await page.locator("#script-code .cm-content").fill(code);
       await page.getByRole("button", { name: "保存", exact: true }).click();
       await expect(page.getByRole("status")).toContainText("脚本已保存");
+      if (id === "shared" && code.includes("original")) {
+        await page.locator("#script-code .cm-content").fill("document.documentElement.dataset.concurrentScript = 'second_save'");
+        await page.getByRole("button", { name: "保存", exact: true }).click();
+        await expect.poll(() => page.evaluate(async () => JSON.stringify((await chrome.storage.local.get("side-agent:user-scripts"))["side-agent:user-scripts"]))).toContain("second_save");
+      }
       await page.getByRole("button", { name: "返回列表" }).click();
     };
     await create(b, "shared", "document.documentElement.dataset.concurrentScript = 'original'");
