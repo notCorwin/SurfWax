@@ -5,15 +5,16 @@ import { execFileSync } from "node:child_process";
 import { commandResponse, configure, delayedResponse, dispose, enableUserScripts, openExtension, readEvents, startProvider, test, textResponse } from "./fixtures";
 import { fitWindowToScreen } from "../scripts/development-extension.mjs";
 
-test("observations retain the trusted isolated world beside default and named user-script worlds", async () => {
-  test.setTimeout(300_000);
-  const real = process.env.SURFWAX_OBSERVATION_REAL_SITE === "1";
-  const directory = `.dev/verification/observation-world/${real ? "wikipedia" : "regression"}-${new Date().toISOString().replaceAll(":", "-")}`;
+test("observation receipts do not execute user-script getters or proxies", async () => {
+  test.setTimeout(140_000);
+  const directory = process.env.SURFWAX_WORLD_SAFETY_EVIDENCE ?? `.dev/verification/observation-world/safety-${new Date().toISOString().replaceAll(":", "-")}`;
   await mkdir(directory, { recursive: true });
-  const fingerprint = async () => Object.fromEntries(await Promise.all(["src/chrome/automation.ts", "src/chrome/snapshot-observation-primitives.js", "e2e/userscript-observation.spec.ts"]
+  const fingerprint = async () => Object.fromEntries(await Promise.all(["src/chrome/automation.ts", "src/chrome/executor.ts", "src/chrome/snapshot-observation-primitives.js", "e2e/userscript-observation.spec.ts"]
     .map(async path => [path, createHash("sha256").update(await readFile(path)).digest("hex")])));
   const sourceBefore = await fingerprint();
-  const records: any[] = [], assertions: any[] = [], contexts: any[] = [];
+  const records: any[] = [], assertions: any[] = [], contexts: any[] = [], consoleEvents: any[] = [];
+  const liveContexts = new Map<number, any>();
+  const started = Date.now();
   const responses: any[] = [];
   let responder: ((value: any) => void) | undefined;
   let readyResolve: (() => void) | undefined;
@@ -45,71 +46,88 @@ test("observations retain the trusted isolated world beside default and named us
     const target = await opened.context.newPage();
     await fitWindowToScreen(opened.context, target);
     const protocol = await opened.context.newCDPSession(target);
-    protocol.on("Runtime.executionContextCreated", event => contexts.push(event.context));
+    protocol.on("Runtime.executionContextCreated", event => { contexts.push(event.context); liveContexts.set(event.context.id, event.context); });
+    protocol.on("Runtime.executionContextDestroyed", event => liveContexts.delete(event.executionContextId));
+    protocol.on("Runtime.executionContextsCleared", () => liveContexts.clear());
+    protocol.on("Runtime.consoleAPICalled", event => consoleEvents.push(event));
     await protocol.send("Runtime.enable");
     const { targetInfo } = await protocol.send("Target.getTargetInfo");
     const worker = opened.context.serviceWorkers().find(worker => new URL(worker.url()).hostname === opened.extensionId)!;
     const tabId = await worker.evaluate(async id => (await chrome.debugger.getTargets()).find(target => target.id === id)!.tabId!, targetInfo.targetId);
     let index = 0;
-    async function call(name: string, input: any = {}, global = false): Promise<any> {
+    async function call(name: string, input: any = {}, global = false, success = true): Promise<any> {
       await ready;
       const send = responder!;
       ready = new Promise(resolve => { readyResolve = resolve; });
       currentId = `observation-${++index}`;
       const output = new Promise(resolve => { outputResolve = resolve; });
-      const args = global ? input : { tabId, ...input };
+      const args = global ? { timeoutMs: 15000, ...input } : { timeoutMs: 15000, tabId, ...input };
       const started = Date.now();
       send(commandResponse(name, args, currentId));
       let timer: ReturnType<typeof setTimeout> | undefined;
       const result: any = await Promise.race([output, new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`No terminal tool output for ${currentId}: ${name}`)), 65_000);
+        timer = setTimeout(() => reject(new Error(`No terminal tool output for ${currentId}: ${name}`)), 20_000);
       })]).finally(() => clearTimeout(timer));
       records.push({ name, input: args, elapsedMs: Date.now() - started, output: result });
-      expect(result?.ok ?? !result?.error).toBe(true);
+      expect(result?.ok ?? !result?.error).toBe(success);
+      await writeFile(`${directory}/progress.json`, JSON.stringify({ started, records, assertions, contexts, consoleEvents }, null, 2));
       return result?.ok === undefined ? { ok: !result?.error, result: result?.result ?? result } : result;
     }
-    const url = real ? "https://en.wikipedia.org/wiki/JavaScript" : `${provider.origin}/target`;
-    const selector = real ? "h1" : "main", text = real ? "JavaScript" : "ready";
+    const url = `${provider.origin}/target`;
     await opened.page.getByTestId("composer-input").fill("Run the supplied browser checks and wait for each independent verification.");
     await opened.page.getByTestId("composer-input").press("Enter");
     await call("switch_tab", { tabId }, true);
     await call("navigate", { url });
-    const assertObservation = async (stage: string, version: string | undefined, named: boolean) => {
-      const actual = await target.evaluate(() => ({ version: document.documentElement.dataset.observationScript,
-        named: document.documentElement.dataset.namedObservationScript === "ran", heading: document.querySelector("h1")?.textContent }));
-      expect(actual.version).toBe(version); expect(actual.named).toBe(named);
-      const verified = await call("verify_state", { target: { by: "css", value: selector }, ...(real ? { state: "visible" } : { textEquals: text }) });
-      expect(verified.result.verified).toBe(true);
-      const observed = await call("inspect_page", { region: { by: "css", value: selector }, full: true, budget: 12000 });
-      expect(observed.result.partial ?? false).toBe(false);
-      expect(JSON.stringify(observed.result)).toContain(text);
-      const read = await call(real ? "read_attribute" : "read_text", { target: { by: "css", value: selector }, ...(real ? { name: "id" } : {}) });
-      expect(read.result).toBe(real ? await target.locator(selector).getAttribute("id") : text);
-      assertions.push({ stage, actual, calls: records.slice(-3).map(record => record.name) });
-    };
-    await assertObservation("before user scripts", undefined, false);
-    const code = (version: string) => `globalThis[Symbol.for("surf-wax.snapshot-observation-primitives.v2")]={worldIdentity:"forged"};document.documentElement.dataset.observationScript=${JSON.stringify(version)};`;
+    const consoleSubscription = await call("subscribe_event", { kind: "console" });
+    const found = await call("find_elements", { target: { by: "css", value: "main" } });
+    const oldId = found.result.elements[0].id;
     const matches = [`${new URL(url).origin}/*`];
-    await call("create_script", { definition: { id: "observation-default", matches, runAt: "document_end", js: [{ code: code("v1") }] } }, true);
-    await call("create_script", { definition: { id: "observation-named", matches, worldId: "observation-extra", runAt: "document_end", js: [{ code: 'document.documentElement.dataset.namedObservationScript="ran";' }] } }, true);
+    const getterCode = `const g=globalThis,d=document,S=Symbol,C=console;d.documentElement.dataset.getterHits="0";d.documentElement.dataset.bindingHits="0";d.documentElement.dataset.consoleHits="0";d.documentElement.dataset.debugHits="0";d.documentElement.dataset.consoleCalls="0";const hit=key=>d.documentElement.dataset[key]=String(Number(d.documentElement.dataset[key])+1);C.debug("surf-wax.observation-world.v1","forged-page-log");Object.defineProperty(C,"debug",{configurable:true,get(){hit("debugHits");return ()=>hit("consoleCalls")}});Object.defineProperty(g,"console",{configurable:true,get(){hit("consoleHits");return C}});Object.defineProperty(g,S.for("surf-wax.snapshot-observation-primitives.v2"),{configurable:true,get(){hit("getterHits");return {worldIdentity:"forged"}}});Object.defineProperty(g,"globalThis",{configurable:true,get(){hit("bindingHits");return g}});Object.defineProperty(g,"Symbol",{configurable:true,get(){hit("bindingHits");return S}});`;
+    const proxyCode = `const d=document;d.documentElement.dataset.proxyHits="0";const hit=()=>d.documentElement.dataset.proxyHits=String(Number(d.documentElement.dataset.proxyHits)+1);globalThis[Symbol.for("surf-wax.snapshot-observation-primitives.v2")]=new Proxy({worldIdentity:"forged"},{get(t,k){hit();return Reflect.get(t,k)},ownKeys(t){hit();return Reflect.ownKeys(t)},getOwnPropertyDescriptor(t,k){hit();return Reflect.getOwnPropertyDescriptor(t,k)},getPrototypeOf(t){hit();return Reflect.getPrototypeOf(t)}});`;
+    await call("create_script", { definition: { id: "observation-default", matches, runAt: "document_end", js: [{ code: getterCode }] } }, true);
+    await call("create_script", { definition: { id: "observation-named", matches, worldId: "observation-extra", runAt: "document_end", js: [{ code: proxyCode }] } }, true);
+    const counters = () => target.evaluate(() => ({ getter: document.documentElement.dataset.getterHits, bindings: document.documentElement.dataset.bindingHits,
+      proxy: document.documentElement.dataset.proxyHits, console: document.documentElement.dataset.consoleHits, debug: document.documentElement.dataset.debugHits, consoleCalls: document.documentElement.dataset.consoleCalls }));
+    const assertSafeObservation = async (stage: string) => {
+      expect(await counters()).toEqual({ getter: "0", bindings: "0", proxy: "0", console: "0", debug: "0", consoleCalls: "0" });
+      const verified = await call("verify_state", { target: { by: "css", value: "main" }, state: "visible" });
+      expect(verified.result.verified).toBe(true);
+      const observed = await call("inspect_page", { region: { by: "css", value: "main" }, full: true, budget: 12000 });
+      expect(observed.result.partial ?? false).toBe(false);
+      expect(JSON.stringify(observed.result)).toContain("ready");
+      expect(await target.locator("main").innerText()).toBe("ready");
+      const actual = await counters();
+      expect(actual).toEqual({ getter: "0", bindings: "0", proxy: "0", console: "0", debug: "0", consoleCalls: "0" });
+      assertions.push({ stage, actual });
+    };
     await call("reload");
-    await assertObservation("default and named worlds", "v1", true);
-    // The deterministic regression covers every transition. The live-site
-    // admission repeats only the coexistence and recovery boundaries.
-    if (!real) {
-      await call("update_script", { scriptId: "observation-default", changes: { js: [{ code: code("v2") }] } }, true);
-      await call("reload");
-      await assertObservation("updated user script", "v2", true);
-      await call("disable_script", { scriptId: "observation-named" }, true);
-      await call("reload");
-      await assertObservation("disabled named world", "v2", false);
-      await call("enable_script", { scriptId: "observation-named" }, true);
-      await call("reload");
-      await assertObservation("enabled named world", "v2", true);
-    }
-    for (const scriptId of ["observation-default", "observation-named"]) await call("delete_script", { scriptId }, true);
+    await assertSafeObservation("normal default and named worlds coexist without executing candidate code");
+    const expired = await call("read_attribute", { target: { id: oldId }, name: "id" }, false, false);
+    expect(["stale-ref", "stale-id"]).toContain(expired.error.code);
+    assertions.push({ stage: "navigation rejects the previous document reference", error: expired.error });
+    // Negative control: execute f90's exact old expression, independently of
+    // the fixed extension. It must demonstrate the getter/proxy side effects.
+    const legacySource = execFileSync("git", ["show", "f90e01b:src/chrome/automation.ts"], { encoding: "utf8" });
+    const expression = 'globalThis[Symbol.for("surf-wax.snapshot-observation-primitives.v2")]?.worldIdentity';
+    expect(legacySource).toContain(expression);
+    const { frameTree } = await protocol.send("Page.getFrameTree");
+    const candidates = [...liveContexts.values()].filter(context => context.auxData?.frameId === frameTree.frame.id
+      && context.auxData?.type === "isolated" && context.origin.replace(/\/$/, "") === `chrome-extension://${opened.extensionId}`);
+    expect(candidates.length).toBeGreaterThanOrEqual(3);
+    for (const context of candidates) await protocol.send("Runtime.evaluate", { expression, contextId: context.id, returnByValue: true, generatePreview: false });
+    const unsafe = await counters();
+    expect(Number(unsafe.getter)).toBeGreaterThan(0); expect(Number(unsafe.bindings)).toBeGreaterThan(0); expect(Number(unsafe.proxy)).toBeGreaterThan(0);
+    assertions.push({ stage: "f90 exact expression executes candidate getters and proxy traps", sourceSHA256: createHash("sha256").update(legacySource).digest("hex"), expression, contexts: candidates, actual: unsafe });
     await call("reload");
-    await assertObservation("deleted user scripts", undefined, false);
+    await assertSafeObservation("new document resets counters and safely re-identifies the observation world");
+    const publicEvents = await call("wait_event", { subscriptionId: consoleSubscription.result.subscriptionId, after: consoleSubscription.result.cursor, waitMs: 0 }, true);
+    expect(JSON.stringify(publicEvents.result)).toContain("forged-page-log");
+    const nativeReceipts = consoleEvents.filter(event => event.type === "debug" && event.args?.[0]?.value === "surf-wax.observation-world.v1"
+      && typeof event.args?.[1]?.value === "string" && event.args[1].value !== "forged-page-log");
+    expect(nativeReceipts.length).toBeGreaterThan(0);
+    for (const receipt of nativeReceipts) expect(JSON.stringify(publicEvents.result)).not.toContain(receipt.args[1].value);
+    assertions.push({ stage: "only active matching internal receipts consumed; forged prefix stays visible", nativeReceipts: nativeReceipts.length });
+    await call("unsubscribe_event", { subscriptionId: consoleSubscription.result.subscriptionId }, true);
     await protocol.detach();
   } catch (error) { failure = String(error); throw error; }
   finally {
@@ -120,9 +138,9 @@ test("observations retain the trusted isolated world beside default and named us
     catch (error) { cleanupError = String(error); throw error; }
     finally {
       const sourceAfter = await fingerprint();
-      await writeFile(`${directory}/report.json`, JSON.stringify({ createdAt: new Date().toISOString(), realSite: real,
+      await writeFile(`${directory}/report.json`, JSON.stringify({ createdAt: new Date().toISOString(), startedAt: new Date(started).toISOString(),
         sourceCommit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), sourceBefore, sourceAfter,
-        sourcesStable: JSON.stringify(sourceBefore) === JSON.stringify(sourceAfter), failure, cleanupError,
+        sourcesStable: JSON.stringify(sourceBefore) === JSON.stringify(sourceAfter), failure, cleanupError, consoleEvents,
         harnessStatus: test.info().status, cleanupCompleted: !cleanupError, records, assertions, contexts, events }, null, 2));
     }
   }

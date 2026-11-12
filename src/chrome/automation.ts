@@ -169,6 +169,7 @@ type Session = {
   snapshotStyleProfile?: { generation: number; computedStyles: readonly string[] };
   rootDocumentRevision: number;
   observationPrimitives?: RootReadScope & { ready: Promise<void> };
+  observationReceipt?: { identity: string; scope: RootReadScope; matches: Set<ObservationContext> };
   observationContexts: Map<number, ObservationContext>;
   nativeControlCandidates?: NativeControlCandidates & { frameId: string; loaderId?: string };
 };
@@ -765,13 +766,28 @@ export class AutomationRuntime {
     return false;
   }
 
-  handleEvent(source: Debuggee, method: string, params: any): void {
+  handleEvent(source: Debuggee, method: string, params: any): true | void {
     const tabId = source.tabId;
     if (!Number.isInteger(tabId)) return;
     const session = this.sessions.get(tabId!);
     // Events already queued by a retired target must not restore stale frames,
     // overwrite their ancestry, or detach a replacement target.
     if (source.sessionId && session?.retiredTargetSessions?.has(source.sessionId)) return;
+    const receipt = session?.observationReceipt;
+    if (session && !source.sessionId && receipt && method === "Runtime.consoleAPICalled"
+      && params?.type === "debug" && params.args?.length === 2
+      && params.args[0]?.type === "string" && params.args[0].value === "surf-wax.observation-world.v1"
+      && params.args[1]?.type === "string" && params.args[1].value === receipt.identity) {
+      const { scope } = receipt, context = session.observationContexts.get(params.executionContextId);
+      if (!scope.signal?.aborted && !session.lifetime.signal.aborted
+        && session.rootFrameId === scope.frameId && session.rootDocumentRevision === scope.revision
+        && session.frameLoaders.get(scope.frameId) === scope.loaderId
+        && (!scope.context || session.observationContexts.get(scope.context.id) === scope.context)
+        && context?.candidate && context.frameId === scope.frameId) {
+        receipt.matches.add(context);
+        return true;
+      }
+    }
     if (session && !source.sessionId && method === "Runtime.executionContextCreated") {
       const context = params?.context, auxiliary = context?.auxData, extensionId = this.options.chromeApi.runtime?.id;
       if (typeof auxiliary?.frameId === "string" && Number.isSafeInteger(context?.id) && typeof context.uniqueId === "string") {
@@ -2947,6 +2963,7 @@ export class AutomationRuntime {
     if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
       const matches = await this.resolveAccessibility(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, undefined, includeUnbound);
       observe?.(matches);
+      if (includeUnbound && matches.some(match => !Number.isSafeInteger(match.backendNodeId) || match.backendNodeId! <= 0)) return undefined;
       this.assertStrict(spec, matches);
       const match = matches[0];
       if (!match?.backendNodeId) return undefined;
@@ -3099,7 +3116,7 @@ export class AutomationRuntime {
       return role === query.value && (query.name === undefined || equal(name)) ? [{ role, name, backendNodeId: node.backendDOMNodeId, debuggee }] : [];
     });
     world.guard(); read.world.guard();
-    if (spec.index === undefined) return matches;
+    if (spec.index === undefined || includeUnbound && matches.some(match => !Number.isSafeInteger(match.backendNodeId) || match.backendNodeId! <= 0)) return matches;
     const index = spec.index < 0 ? matches.length + spec.index : spec.index;
     return matches[index] ? [matches[index]!] : [];
   }
@@ -4295,30 +4312,29 @@ export class AutomationRuntime {
     const scope = this.rootReadScope(session), previous = session.observationPrimitives;
     if (previous && previous.frameId === scope.frameId && previous.loaderId === scope.loaderId && previous.revision === scope.revision)
       return previous.ready;
-    const identity = crypto.randomUUID();
-    const ready = this.options.chromeApi.scripting.executeScript({
-      target: { tabId: session.tabId, frameIds: [0] }, world: "ISOLATED", func: snapshotObservationPrimitives as (install: true, worldIdentity: string) => 2, args: [true, identity],
+    const receipt = { identity: crypto.randomUUID(), scope, matches: new Set<ObservationContext>() };
+    session.observationReceipt = receipt;
+    const ready = Promise.resolve().then(() => {
+      this.assertRootReadScope(session, scope);
+      return this.options.chromeApi.scripting.executeScript({
+        target: { tabId: session.tabId, frameIds: [0] }, world: "ISOLATED",
+        func: snapshotObservationPrimitives as (install: true, observationReceipt: string) => 2, args: [true, receipt.identity],
+      });
     }).then(async (results) => {
       if (results.length !== 1 || results[0]?.frameId !== 0 || results[0].result !== 2)
         throw automationError("snapshot-unavailable", { reason: "observation-primitives-unavailable" });
-      // Origin/name only identifies candidates: Chrome gives USER_SCRIPT
-      // worlds the same extension origin. Identify the world of this trusted
-      // ISOLATED injection using a fresh value never sent to other worlds.
-      await this.options.command(session.debuggee, "Runtime.evaluate", { expression: "void 0", returnByValue: true });
+      // Only the trusted ISOLATED injection receives the fresh challenge.
+      // Its native console receipt identifies that context without executing
+      // or inspecting properties in any candidate world. This metadata-only
+      // command settles the preceding native events without evaluating JS.
+      await this.options.command(session.debuggee, "Page.getFrameTree", {});
       this.assertRootReadScope(session, scope);
-      const candidates = [...session.observationContexts.values()].filter((context) => context.candidate && context.frameId === scope.frameId);
-      const reads = await Promise.allSettled(candidates.map(async (context) => {
-        const response = await this.options.command(session.debuggee, "Runtime.evaluate", {
-          expression: 'globalThis[Symbol.for("surf-wax.snapshot-observation-primitives.v2")]?.worldIdentity',
-          contextId: context.id, returnByValue: true,
-        });
-        return !response.exceptionDetails && response.result?.value === identity ? context : undefined;
-      }));
-      this.assertRootReadScope(session, scope);
-      const matches = reads.flatMap((read) => read.status === "fulfilled" && read.value
-        && session.observationContexts.get(read.value.id) === read.value ? [read.value] : []);
+      const matches = [...receipt.matches].filter(context => session.observationContexts.get(context.id) === context);
+      if (session.observationReceipt !== receipt) throw automationError("stale-observation", { reason: "observation-context-changed-during-read" });
       if (matches.length !== 1) throw automationError("snapshot-unavailable", { reason: "observation-context-identity-unavailable" });
       cached.context = matches[0];
+    }).finally(() => {
+      if (session.observationReceipt === receipt) delete session.observationReceipt;
     });
     const cached: RootReadScope & { ready: Promise<void> } = { frameId: scope.frameId, loaderId: scope.loaderId, revision: scope.revision, ready };
     session.observationPrimitives = cached;
