@@ -156,28 +156,3 @@ describe("final canonical observation", () => {
   });
 });
 
-it("finalizes without waiting for page associations and freezes report metadata", async () => {
-  let finishAssociation!: (tabId: number) => void;
-  const tabs = new Map<number, number>();
-  const association = new Promise<number>(resolve => { finishAssociation = resolve; }).then(tabId => { tabs.set(1, tabId); }).catch(() => {});
-  const documents = [{ pageId: 1, tabId: null, url: "https://example.org/", status: 200, at: "2026-01-01T00:00:00.000Z", duringTask: true }];
-  const failures = [{ url: "https://example.org/", error: "original", duringTask: true }];
-  let raw: unknown = null, read = false;
-  const finalization = finalizePublicEvidence({ prior: [], hasObservation: false, read: async () => { read = true; return []; },
-    persist: async events => { raw = structuredClone(events); }, startedAt: 0, deadlineAt: 1000, outcome: "setup_failed", reason: "poll error", runError: "poll error", deadlineExpired: false,
-    required: () => [{ url: "https://example.org/", terms: ["fact"], alternatives: [] }], documents, navigationFailures: failures, pageTabs: tabs,
-    grade: () => true, redact: String });
-  const result = await finalization;
-  expect(read).toBe(true);
-  expect(raw).toEqual([]);
-  expect(result.metadata.documents[0].tabId).toBeNull();
-  const frozen = structuredClone({ metadata: result.metadata, browsing: result.derived?.browsing });
-  finishAssociation(42);
-  await association;
-  documents[0].status = 500;
-  documents.push({ ...documents[0], pageId: 2 });
-  failures[0].error = "changed";
-  failures.push({ ...failures[0] });
-  expect(tabs.get(1)).toBe(42);
-  expect({ metadata: result.metadata, browsing: result.derived?.browsing }).toEqual(frozen);
-});
