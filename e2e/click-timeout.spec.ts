@@ -133,7 +133,7 @@ test("atomic targets fail promptly and file operations preserve dispatch certain
       );
     else
       res.end(
-        `<a href="/file" download>Duplicate</a><a href="/file" download>Duplicate</a><a href="/file" download="bound.txt">Bound</a><a href="/slow" download="slow.txt">Slow</a><label>Repeated<input></label><label>Repeated<input></label><input aria-label="Disabled" disabled><iframe src="http://localhost:${(server.address() as { port: number }).port}/frame"></iframe>`,
+        `<title>Native tab title</title><a href="/file" download>Duplicate</a><a href="/file" download>Duplicate</a><a href="/file" download="bound.txt">Bound</a><a href="/slow" download="slow.txt">Slow</a><label>Repeated<input></label><label>Repeated<input></label><input aria-label="Disabled" disabled><iframe src="http://localhost:${(server.address() as { port: number }).port}/frame"></iframe>`,
       );
   });
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -246,26 +246,49 @@ test("atomic targets fail promptly and file operations preserve dispatch certain
         document.body.dataset.nativeEffects = String(Number(document.body.dataset.nativeEffects) + 1);
       });
     });
+    // Replace only the existing external Chrome API method; no test-only
+    // production hook or second adapter/runtime is needed.
+    const tabs = (runtime.executor as any).chromeApi.tabs as { get(id: number): Promise<{ url?: string; title?: string }> };
+    const getTab = tabs.get;
+    const popupTargetId = (await getTab(popupTab.id) as any).targetId;
     const send = CdpConnection.prototype.send;
-    let phase: "close" | "lost-ack" | "cancel" | "timeout" | undefined = "close";
+    let phase: "close" | "lost-ack" | "cancel" | "timeout" | "getter" | undefined = "close";
     let releaseAcknowledged = 0;
     let metadataUnavailable = 0;
+    let metadataReady = false;
+    let getterCallsAtNativeRead: number | undefined;
+    let targetDestroyed: Promise<void> | undefined;
+    let stopWaitingForTarget: (() => void) | undefined;
     const postReadCancellation = new AbortController();
     CdpConnection.prototype.send = async function (method, params = {}, sessionId) {
       if (method === "Input.dispatchMouseEvent" && (params as any).type === "mouseReleased") {
+        if (phase === "close") targetDestroyed = new Promise<void>((resolve) => {
+          const listener = (message: any) => {
+            if (message.method === "Target.targetDestroyed" && message.params.targetId === popupTargetId) {
+              this.listeners.delete(listener); resolve();
+            }
+          };
+          this.listeners.add(listener);
+          stopWaitingForTarget = () => this.listeners.delete(listener);
+        });
         const result = await send.call(this, method, params, sessionId);
         if (phase) releaseAcknowledged++;
+        metadataReady = true;
         if (phase === "lost-ack") {
           phase = undefined;
           throw new Error("Synthetic input acknowledgement lost");
         }
         return result;
       }
-      if (method === "Runtime.evaluate" && (params as any).expression === "({url:location.href,title:document.title})") {
+      return send.call(this, method, params, sessionId);
+    };
+    tabs.get = async function (id) {
+      if (metadataReady) {
         if (phase === "close") {
           phase = undefined;
           await closed;
-          try { return await send.call(this, method, params, sessionId); }
+          await targetDestroyed; // The same adapter must have consumed native removal.
+          try { return await getTab.call(this, id); }
           catch (error) { metadataUnavailable++; throw error; }
         }
         if (phase === "cancel") {
@@ -277,8 +300,14 @@ test("atomic targets fail promptly and file operations preserve dispatch certain
           phase = undefined;
           throw Object.assign(new Error("Synthetic post-action deadline"), { code: "timeout" });
         }
+        if (phase === "getter") {
+          phase = undefined;
+          const info = await getTab.call(this, id);
+          getterCallsAtNativeRead = await page.evaluate(() => Number(document.body.dataset.titleGetterCalls));
+          return info;
+        }
       }
-      return send.call(this, method, params, sessionId);
+      return getTab.call(this, id);
     };
     try {
       const start = runtime.events.length;
@@ -294,6 +323,7 @@ test("atomic targets fail promptly and file operations preserve dispatch certain
       const uncertainStart = runtime.events.length;
       const faultReceipts: unknown[] = [];
       for (const fault of ["lost-ack", "cancel", "timeout"] as const) {
+        metadataReady = false;
         phase = fault;
         const result = await call("click", { target: { by: "css", value: "#ack" } }, fault === "cancel" ? postReadCancellation.signal : undefined);
         expect(result, JSON.stringify(result)).toMatchObject({ ok: false, error: { effectUnknown: true } });
@@ -305,14 +335,43 @@ test("atomic targets fail promptly and file operations preserve dispatch certain
       expect(await call("click", { target: { by: "css", value: "#ack" } })).toMatchObject({ ok: true, result: { performed: true } });
       const preservedJob = await call("get_job", { jobId: (uncertainJob.content as any).jobId });
       expect(JSON.stringify(preservedJob)).toContain('"effectUnknown":true');
+      const mainTab = (await call("list_tabs", {})).result.find((tab: any) => tab.url === `${origin}/`);
+      expect((await getTab(mainTab.id)).title).toBe("Native tab title");
+      await page.evaluate(() => {
+        document.body.dataset.titleGetterCalls = "0";
+        // The page installs its getter in response to the real native click,
+        // after pre-dispatch visibility proof and before the post-action read.
+        document.querySelector("#ack")!.addEventListener("click", () => {
+          Object.defineProperty(document, "title", { configurable: true, get() {
+            document.body.dataset.titleGetterCalls = String(Number(document.body.dataset.titleGetterCalls) + 1);
+            throw new Error("Synthetic authored title getter");
+          } });
+        }, { once: true });
+      });
+      phase = "getter";
+      metadataReady = false;
+      let getterResult: any;
+      let totalGetterCalls: number;
+      try {
+        getterResult = await call("click", { target: { by: "css", value: "#ack" } });
+        expect(getterResult, JSON.stringify(getterResult)).toMatchObject({ ok: true, result: { performed: true, title: "Native tab title" } });
+        expect(getterResult.result).not.toHaveProperty("documentId");
+        expect(getterCallsAtNativeRead).toBe(0);
+        totalGetterCalls = await page.evaluate(() => Number(document.body.dataset.titleGetterCalls));
+      } finally {
+        await page.evaluate(() => { delete (document as any).title; });
+      }
       await test.info().attach("native-action-confirmation", { contentType: "application/json", body: JSON.stringify({
         selfClosed, releaseAcknowledged, metadataUnavailable, faultReceipts,
+        getter: { getterCallsAtNativeRead, totalGetterCalls, result: getterResult },
         priorUnknownJob: { jobId: (uncertainJob.content as any).jobId, status: preservedJob },
         events: runtime.events.slice(start).filter((event) => ["automation.action.finished", "automation.action.failed", "browser.job.state", "tool.finished", "tool.failed"].includes(event.type))
           .map(({ id, type, toolCallId, content }) => ({ id, type, toolCallId, content })),
       }, null, 2) });
     } finally {
       CdpConnection.prototype.send = send;
+      tabs.get = getTab;
+      stopWaitingForTarget?.();
     }
 
     const artifactId = runtime.events.find(

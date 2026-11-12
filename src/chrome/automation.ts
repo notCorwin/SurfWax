@@ -6214,14 +6214,15 @@ export class AutomationRuntime {
 
   private async afterAction(session: Session): Promise<Record<string, unknown>> {
     // Callers have already awaited the action's acknowledgement. This separate
-    // read can disappear on navigation or self-close without undoing that fact.
+    // native read can disappear on navigation or self-close without undoing that
+    // fact. Tab metadata is not proof of the action document's generation.
     const signal = this.context.signal;
     throwIfAborted(signal);
     try {
-      const info = await this.pageValue(session.tabId, "({url:location.href,title:document.title})") as { url: string; title: string };
+      const info = await this.options.chromeApi.tabs.get(session.tabId);
       throwIfAborted(signal);
       if (typeof info?.url === "string" && typeof info.title === "string")
-        return { performed: true, ...info, documentId: session.generation };
+        return { performed: true, url: info.url, title: info.title };
     } catch (error) {
       throwIfAborted(signal);
       if (error && typeof error === "object" && (
