@@ -848,7 +848,7 @@ test("frame region recovery stays within the selected document", async () => {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
     await target.evaluate(() => {
-      document.body.innerHTML = `<p>Root marker</p><iframe id="child" srcdoc="<p>Child marker</p><button>Unbound candidate</button><button>Detached candidate</button>"></iframe><button id="navigate">Navigate</button>`;
+      document.body.innerHTML = `<p>Root marker</p><iframe id="child" srcdoc="<p>Child marker</p><button>Unbound candidate</button><button>Detached candidate</button><button>Multi one</button><button>Multi two</button>"></iframe><button id="navigate">Navigate</button>`;
       document.querySelector<HTMLButtonElement>("#navigate")!.onclick = () => { document.querySelector<HTMLIFrameElement>("#child")!.srcdoc = "<p>New child</p>"; };
     });
     await target.frameLocator("#child").getByText("Child marker").waitFor();
@@ -866,7 +866,7 @@ test("frame region recovery stays within the selected document", async () => {
         if (method === "Accessibility.getFullAXTree" && state.mode) {
           if (state.mode === "multi" || state.mode === "mixed") {
             const nodes = result.nodes?.filter((entry: any) => entry.role?.value === "button" && entry.name?.value?.startsWith("Multi ")) ?? [];
-            if (nodes.length === 2) {
+            if (nodes.length === 2 && nodes.every((node: any) => Number.isSafeInteger(node.backendDOMNodeId) && node.backendDOMNodeId > 0)) {
               for (const [index, node] of nodes.entries()) if (state.mode === "multi" || index === 1) {
                 delete node.backendDOMNodeId; node.name.value = `Multi CANARY_UNBOUND_${index}`;
               }
@@ -910,7 +910,7 @@ test("frame region recovery stays within the selected document", async () => {
     const events = await readEvents(opened.page);
     const event = (id: string) => events.find((entry) => ["tool.finished", "tool.failed"].includes(entry.type) && entry.toolCallId === id);
     const boundary = await worker.evaluate(() => (globalThis as any).__frameScopeBoundary);
-    await test.info().attach("frame-scope-tool-returns", { body: Buffer.from(JSON.stringify({ boundary, events: Object.fromEntries(["scope-missing", "scope-html", "scope-unbound", "scope-detached", "scope-root", "scope-invalid", "scope-stale"].map(id => [id, event(id)])) }, null, 2)), contentType: "application/json" });
+    await test.info().attach("frame-scope-tool-returns", { body: Buffer.from(JSON.stringify({ boundary, events: Object.fromEntries(["scope-missing", "scope-html", "scope-unbound", "scope-multi", "scope-mixed", "scope-strict", "scope-detached", "scope-root", "scope-invalid", "scope-stale"].map(id => [id, event(id)])) }, null, 2)), contentType: "application/json" });
     expect(boundary).toMatchObject({ unbound: 1, detached: 1, multi: 1, mixed: 1 });
     for (const id of ["scope-unbound", "scope-detached"]) {
       const failure = event(id)!.output.error;
@@ -924,7 +924,11 @@ test("frame region recovery stays within the selected document", async () => {
       expect(JSON.stringify(failure)).not.toContain("CANARY_UNBOUND");
       expect(JSON.stringify(failure)).not.toContain("frame-region-no-match");
     }
-    expect(event("scope-strict")!.output.error.code).toBe("strict-mode");
+    const strict = event("scope-strict")!.output.error;
+    expect(strict.code).toBe("strict-mode");
+    expect(JSON.stringify(strict)).toContain("Multi one");
+    expect(JSON.stringify(strict)).toContain("Multi two");
+    expect(JSON.stringify(strict)).not.toContain("CANARY_UNBOUND");
     const missing = event("scope-missing")!;
     expect(missing.output.error).toMatchObject({ code: "not-found", retryable: false });
     expect(missing.output.error.recovery).toContain("selector runs inside the selected frame");
