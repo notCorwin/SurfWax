@@ -16,7 +16,7 @@ export async function runCart(timeout: number): Promise<string> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const report: any = { task: 'pimoroni-cart', startedAt: new Date().toISOString(), timeoutMs: timeout, phases: [], outcome: 'setup_failed', cleanup: 'not started' };
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined, proxy: Awaited<ReturnType<typeof modelProxy>> | undefined;
-  let touched = false, phase = 'setup';
+  let touched = false, agentStarted = false, phase = 'setup';
   try {
     const endpoint = process.env.SURFWAX_EVAL_BASE_URL, key = process.env.SURFWAX_EVAL_API_KEY, model = process.env.SURFWAX_EVAL_MODEL;
     if (!endpoint || !key || !model) throw Error('Set SURFWAX_EVAL_BASE_URL, SURFWAX_EVAL_API_KEY and SURFWAX_EVAL_MODEL');
@@ -54,10 +54,14 @@ export async function runCart(timeout: number): Promise<string> {
     const run = async (prompt: string, wanted: Item[], budget: number) => {
       const start = Date.now(), end = start + timeout;
       await opened!.page.getByTestId('composer-input').fill(prompt);
+      agentStarted = true;
       await opened!.page.getByTestId('composer-input').press('Enter');
       let events: any[] = [];
       while (Date.now() < end) { events = await readEvents(opened!.page); if (deadlineEvidence(events, start, end).state !== 'pending') break; await new Promise(r => setTimeout(r, 1000)); }
       events = await readEvents(opened!.page);
+      const submission = [...events].reverse().find(e => e.type === 'conversation.submitted');
+      events = submission ? events.filter(e => e.conversationId === submission.conversationId && e.runId === submission.runId) : [];
+      await writeFile(resolve(root, `${phase}-events.json`), JSON.stringify(events, null, 2), { mode: 0o600 });
       const terminal = deadlineEvidence(events, start, end), lifecycle = toolLifecycleEvidence(events), jobs = browserJobsSettled(events);
       const actual = sanitizeCart(await request('/cart.js'));
       const valid = verifyCart(actual, wanted, initial.currency, budget);
@@ -87,9 +91,23 @@ export async function runCart(timeout: number): Promise<string> {
     }
   } catch { report.outcome = phase === 'preflight' || phase === 'recovery' ? 'blocked' : 'setup_failed'; report.reason = `Evaluation could not complete during ${phase}`; }
   finally {
-    if (opened && touched) {
-      try { const clear = await opened.context.request.post(base + '/cart/clear.js', { data: {}, timeout: 30000 }); const check = await opened.context.request.get(base + '/cart.js', { timeout: 30000 }); const cart = sanitizeCart(await check.json()); if (!clear.ok() || !check.ok() || cart.items.length || cart.subtotal !== 0) throw Error(); report.cleanup = 'verified empty'; }
-      catch { report.cleanup = 'failed'; report.outcome = 'cleanup_failed'; }
+    if (opened && agentStarted) {
+      try {
+        const stop = opened.page.getByRole('button', { name: '停止生成' });
+        if (await stop.isVisible()) await stop.click({ timeout: 5000 });
+        await expect.poll(async () => {
+          const events = await readEvents(opened!.page);
+          const last = [...events].reverse().find(e => e.type === 'conversation.submitted');
+          return !!last && events.some(e => e.conversationId === last.conversationId && e.runId === last.runId && ['conversation.finished', 'conversation.failed', 'conversation.aborted'].includes(e.type));
+        }, { timeout: 15000 }).toBe(true);
+      } catch { /* Shutdown below remains mandatory when stopping cannot be confirmed. */ }
+      const events = await readEvents(opened.page).catch(() => []);
+      await writeFile(resolve(root, 'final-events.json'), JSON.stringify(events, null, 2), { mode: 0o600 });
+    }
+    if (touched) {
+      // Neither an aborted request nor a terminal event proves a dispatched write settled.
+      report.cleanup = 'uncertain: website effects may still be in flight';
+      report.outcome = 'cleanup_failed';
     } else report.cleanup = 'no write attempted';
     try { if (opened) { await dispose(opened.context, opened.userDataDirectory); await rm(opened.userDataDirectory, { recursive: true, force: true }); } report.profileCleanup = 'completed'; } catch { report.profileCleanup = 'failed'; report.outcome = 'cleanup_failed'; }
     if (proxy) await closeServer(proxy.server).catch(() => { report.outcome = 'cleanup_failed'; });
