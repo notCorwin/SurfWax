@@ -1,5 +1,4 @@
 import { expect } from "@playwright/test";
-import { writeFile } from "node:fs/promises";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, closeServer, type MockResponse } from "./fixtures";
 import { itemLine } from "./snapshot-format";
 import { manifestFixture } from "./evaluation/manifest-fixture";
@@ -873,7 +872,6 @@ test("frame region recovery stays within the selected document", async () => {
     const events = await readEvents(opened.page);
     const event = (id: string) => events.find((entry) => ["tool.finished", "tool.failed"].includes(entry.type) && entry.toolCallId === id);
     const missing = event("scope-missing")!;
-    if (process.env.SURFWAX_FRAME_SCOPE_RECEIPT) await writeFile(process.env.SURFWAX_FRAME_SCOPE_RECEIPT, JSON.stringify(Object.fromEntries(["scope-missing", "scope-html", "scope-root", "scope-invalid", "scope-navigate", "scope-stale"].map(id => [id, event(id)])), null, 2));
     expect(missing.output.error).toMatchObject({ code: "not-found", retryable: false });
     expect(missing.output.error.recovery).toContain("selector runs inside the selected frame");
     expect(missing.output.error.recovery).toContain('value:"html"');
