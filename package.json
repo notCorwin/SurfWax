@@ -21,7 +21,8 @@
     "catalog:check": "node scripts/update-model-catalog.mjs --check",
     "verify:local": "node scripts/verify-local.mjs",
     "tools": "node scripts/tools.mjs",
-    "eval:public-web": "node scripts/public-web.mjs"
+    "eval:public-web": "node scripts/public-web.mjs",
+    "eval:stateful-web": "node scripts/stateful-web.mjs"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^5.0.90",
