@@ -5,15 +5,6 @@ test("stale settings drafts preserve the other page's saved configuration", { ta
   const opened = await openExtension();
   try {
     await opened.context.route("https://models.dev/**", route => route.abort());
-    const probe = await opened.page.evaluate(async () => {
-      const sample = { z: 1, a: { z: 2, a: 3 } };
-      await chrome.storage.local.set({ "settings-order-probe": sample });
-      const roundtrip = (await chrome.storage.local.get("settings-order-probe"))["settings-order-probe"] as typeof sample;
-      await chrome.storage.local.remove("settings-order-probe");
-      return { oldComparison: JSON.stringify(sample) === JSON.stringify(roundtrip), before: Object.keys(sample), after: Object.keys(roundtrip) };
-    });
-    console.log("Synthetic storage probe:", probe);
-    expect(probe.oldComparison).toBe(false);
     const initial = await configure(opened.context, opened.page, provider.baseURL);
     await initial.getByLabel("Model ID", { exact: true }).fill("same-page-second-save");
     await initial.getByRole("button", { name: "保存配置" }).click();
