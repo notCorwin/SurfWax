@@ -294,6 +294,7 @@ test("a recoverable complete-response failure retries without repeating a comple
 });
 
 test("debugger cleanup quarantines delayed native calls without blocking another resource", async () => {
+  const provider = await startProvider([]);
   const opened = await openExtension();
   await opened.page.waitForLoadState("networkidle");
   const worker = opened.context.serviceWorkers().find(worker => new URL(worker.url()).hostname === opened.extensionId)!;
@@ -307,8 +308,10 @@ test("debugger cleanup quarantines delayed native calls without blocking another
       // Only the external native API is delayed. Production ports, ownership,
       // cleanup deadlines, IndexedDB and telemetry remain untouched.
       const gate = (globalThis as any).__debuggerGate = {
-        method: "", tabId: -1, entered: 0, settled: 0, rejectDetach: false, release: () => {},
+        method: "", tabId: -1, entered: 0, settled: 0, targetQueries: 0, rejectDetach: false, release: () => {},
       };
+      const nativeTargets = chrome.debugger.getTargets.bind(chrome.debugger);
+      (chrome.debugger as any).getTargets = async () => { gate.targetQueries++; return nativeTargets(); };
       for (const method of ["attach", "detach", "sendCommand"] as const) {
         const native = chrome.debugger[method].bind(chrome.debugger) as (...args: any[]) => Promise<void>;
         (chrome.debugger as any)[method] = async (...args: any[]) => {
@@ -468,12 +471,55 @@ test("debugger cleanup quarantines delayed native calls without blocking another
     await assertAlive("after-failed-detach", targets[0].tabId);
     await finish("after-failed-detach");
     await idle();
+
+    // A real native click closes its script-opened source. Empty input
+    // bookkeeping still names that tab, but settled cleanup must verify the
+    // native target is gone instead of persisting a false unknown detach.
+    const opener = await opened.context.newPage();
+    await opener.goto(`${provider.origin}/target`);
+    const sourceUrl = `${provider.origin}/target?self-closing-cleanup`;
+    const popupEvent = opener.waitForEvent("popup");
+    await opener.evaluate(url => window.open(url), sourceUrl);
+    const source = await popupEvent;
+    await source.waitForLoadState();
+    await source.setContent('<button onclick="setTimeout(()=>window.close(),100)">Close source</button>');
+    const sourceTabId = await opened.page.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url)!.id!, sourceUrl);
+    const bounds = (await source.getByRole("button", { name: "Close source" }).boundingBox())!;
+    await claim("self-closed");
+    const selfClosedIdentity = await opened.page.evaluate(() => (globalThis as any).__debuggerLifecycle.bridges.get("self-closed").identity);
+    expect((await request("self-closed", "attach", [{ tabId: sourceTabId }, "1.3"])).error).toBeUndefined();
+    const sourceClosed = source.waitForEvent("close");
+    const clicked = await request("self-closed", "sendCommand", [{ tabId: sourceTabId }, "Input.dispatchMouseEvent", {
+      type: "mousePressed", x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2,
+      button: "left", buttons: 1, clickCount: 1, surfWaxAtomicClick: true,
+    }]);
+    expect(clicked.error).toBeUndefined();
+    await sourceClosed;
+    const targetQueriesBeforeCleanup = await worker.evaluate(() => (globalThis as any).__debuggerGate.targetQueries);
+    await finish("self-closed");
+    await idle();
+    const selfClosedEvents = (await readEvents(opened.page)).filter(event => event.runId === selfClosedIdentity.runId);
+    const cleanupTargetQueries = await worker.evaluate(() => (globalThis as any).__debuggerGate.targetQueries) - targetQueriesBeforeCleanup;
+    expect(cleanupTargetQueries).toBe(1);
+    expect(selfClosedEvents.filter(event => event.type === "run.cleanup.failed")).toEqual([]);
+    expect(selfClosedEvents.some(event => event.type === "browser.input.state" && !event.content.keys.length && !event.content.buttons.length)).toBe(true);
+    await claim("after-self-closed");
+    expect((await request("after-self-closed", "attach", [{ tabId: targets[1].tabId }, "1.3"])).error).toBeUndefined();
+    await assertAlive("after-self-closed", targets[1].tabId);
+    await finish("after-self-closed");
+    await idle();
+    await test.info().attach("self-closed-debugger-cleanup", {
+      body: JSON.stringify({ sourceTabId, runIdentity: selfClosedIdentity, nativeInputAcknowledged: !clicked.error, cleanupTargetQueries,
+        cleanupFailures: selfClosedEvents.filter(event => event.type === "run.cleanup.failed"),
+        inputStates: selfClosedEvents.filter(event => event.type === "browser.input.state"),
+        followingRunOtherResourceUsable: true }, null, 2), contentType: "application/json",
+    });
     await test.info().attach("debugger-cleanup-timing", {
       body: JSON.stringify({ cancellationMs, ownerReleaseMs, resources: targets, delayedDetachSettledBeforeOwnerRelease: false,
-        scenarios: ["delayed teardown", "tab/target aliases", "independent resource", "normal detach", "late command", "pending attach", "rejected detach recovery"] }, null, 2),
+        scenarios: ["delayed teardown", "tab/target aliases", "independent resource", "normal detach", "late command", "pending attach", "rejected detach recovery", "self-closed settled cleanup"] }, null, 2),
       contentType: "application/json",
     });
   } finally {
-    await dispose(opened.context, opened.userDataDirectory);
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });

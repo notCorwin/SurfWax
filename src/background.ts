@@ -491,9 +491,12 @@ chrome.runtime.onConnect.addListener((port) => {
         guardCleanup();
         await Promise.all([...heldInput].filter(([, state]) => belongs(state.debuggee)).map(([key]) => releaseHeldInput(key).catch(error => report("release-input", key, error))));
         guardCleanup();
-        await Promise.all(targets.map(debuggee => detach(debuggee).catch(error => report("detach", debuggee, error))));
+        // A self-closed target can remain in input/cleanup bookkeeping. The
+        // finalization below decides whether teardown is unresolved, after all
+        // old native operations settle; this first rejection is not that proof.
+        await Promise.all(targets.map(debuggee => detach(debuggee).catch(() => undefined)));
       })();
-      void (async () => {
+      const finalized = (async () => {
         const pending = [...operations].filter(([key]) => resources.get(key) === resource).flatMap(([, tasks]) => [...tasks]);
         await Promise.allSettled([...pending, work]);
         // An attach can finish after cleanup was revoked. Detach once more only
@@ -502,6 +505,7 @@ chrome.runtime.onConnect.addListener((port) => {
         const finalize = (): Promise<void> => finalizing ??= (async () => {
           if (debuggerLeases.get(resource) !== lease) return;
           let failed = false;
+          let currentTargets: Promise<chrome.debugger.TargetInfo[] | undefined> | undefined;
           await Promise.all(targets.map(async debuggee => {
             try { await chrome.debugger.detach(debuggee); }
             catch (error) {
@@ -510,7 +514,7 @@ chrome.runtime.onConnect.addListener((port) => {
               // attached can also describe another CDP client. This exact native
               // rejection confirms this extension no longer owns the session.
               if (error instanceof Error && error.message === `Debugger is not attached to the ${kind} with id: ${id}.`) return;
-              const current = await chrome.debugger.getTargets().catch(() => undefined);
+              const current = await (currentTargets ??= chrome.debugger.getTargets().catch(() => undefined));
               const target = current?.find(item => debuggee.tabId !== undefined ? item.tabId === debuggee.tabId
                 : debuggee.extensionId !== undefined ? item.extensionId === debuggee.extensionId : item.id === debuggee.targetId);
               // Chrome also rejects detach when the target is already gone or
@@ -528,7 +532,9 @@ chrome.runtime.onConnect.addListener((port) => {
         lease.recovery.set(resource, finalize);
         await finalize();
       })().catch(error => report("final-detach", targets, error));
-      return work;
+      // The same deadline also covers old calls and their final detach. An
+      // unresolved native call must retain both quarantine and an unknown result.
+      return finalized;
     });
     const work = Promise.all(workByResource).then(() => undefined);
     cleanupTask = track(deadline.wait(work).catch(error => {

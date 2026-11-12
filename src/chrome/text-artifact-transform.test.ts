@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { EventLogger } from "../logging";
 import { createMemoryEventStore } from "../memory-event-store";
 import { transformTextArtifact } from "./text-artifact-transform";
+import { ATOMIC_TOOL_REGISTRY } from "./atomic-tools";
 
 it("validates all text sources before writing, preserves exact strings, and confines terminal evidence", async () => {
   const store = createMemoryEventStore();
@@ -30,6 +31,21 @@ it("validates all text sources before writing, preserves exact strings, and conf
   expect(writes.at(-1)).toBe("\uFEFF尾\n\uFEFF尾\n");
   await transformTextArtifact("extract", { ...base, sources: [{ artifactId: 4, path: ["__proto__"], decode: "stored-value" }], selectPath: ["constructor"], itemPath: undefined }, artifacts);
   expect(writes.at(-1)).toBe("key|");
+  const prefixed = { artifactId: 5, prefix: "ENTRY[.*] ", separator: "|", filename: "lines.txt" };
+  values.push(file("\uFEFFENTRY[.*] excluded\nENTRY[.*]  \uFEFF雪🌊 \r\nHEARTBEAT\nENTRY[.*] \nENTRY[.*]  \uFEFF雪🌊 \r\nentry[.*] wrong-case\nENTRYz any-regex\n"));
+  const lines = await transformTextArtifact("prefixed-lines", prefixed, artifacts);
+  const exact = " \uFEFF雪🌊 \r|| \uFEFF雪🌊 \r";
+  expect(writes.at(-1)).toBe(exact);
+  expect(lines).toMatchObject({ matched: 3, skipped: 5, inputLineCount: 8, totalItems: 3, byteLength: Buffer.byteLength(exact), sha256: createHash("sha256").update(exact).digest("hex"), access: { artifactId: 99, path: [] } });
+  const noMatches = await transformTextArtifact("prefixed-lines", { ...prefixed, artifactId: 2 }, artifacts);
+  expect(noMatches).toMatchObject({ matched: 0, skipped: 2, inputLineCount: 2, byteLength: 0, sha256: createHash("sha256").update("").digest("hex") });
+  expect(writes.at(-1)).toBe("");
+  values.push(file(""));
+  expect(await transformTextArtifact("prefixed-lines", { ...prefixed, artifactId: 6 }, artifacts)).toMatchObject({ matched: 0, skipped: 1, inputLineCount: 1 });
+  const schema = ATOMIC_TOOL_REGISTRY.find(tool => tool.name === "extract_prefixed_lines")!.inputSchema;
+  expect(schema.safeParse(prefixed).success).toBe(true);
+  for (const change of [{ prefix: "" }, { prefix: "x\n" }, { prefix: "x\ny" }, { filename: "" }, { text: "copy" }, { artifactId: undefined, evidenceId: "http" }])
+    expect(schema.safeParse({ ...prefixed, ...change }).success).toBe(false);
   const before = writes.length;
   for (const change of [
     { selectPath: ["missing"] }, { itemPath: ["toString"] }, { itemPath: [] },
@@ -38,6 +54,9 @@ it("validates all text sources before writing, preserves exact strings, and conf
     { sources: [...base.sources, { evidenceId: "foreign", path: [], decode: "stored-value" }] },
   ]) await expect(transformTextArtifact("extract", { ...base, ...change }, artifacts)).rejects.toThrow(/source\[/);
   await expect(transformTextArtifact("join", { artifactIds: [2, 3], separator: "", filename: "bad" }, artifacts)).rejects.toThrow("source[1]");
+  await expect(transformTextArtifact("prefixed-lines", { ...prefixed, artifactId: 3 }, artifacts)).rejects.toThrow("invalid base64 or UTF-8");
+  for (const prefix of ["", "x\n"])
+    await expect(transformTextArtifact("prefixed-lines", { ...prefixed, prefix }, artifacts)).rejects.toThrow("prefix");
   await expect(logger.evidenceResult("http", "foreign", "r")).rejects.toThrow();
   await expect(logger.evidenceResult("http", "c", "other")).rejects.toThrow();
   const failed = { ...identity, toolCallId: "failed" };
