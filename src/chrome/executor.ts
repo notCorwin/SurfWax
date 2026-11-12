@@ -902,7 +902,7 @@ export class ChromeExecutor {
           content: { chooserId: chooser.id, source: chooser.source, artifactIds: ids, state: "not-dispatched" } }) : undefined).catch(() => undefined);
         if (!effectiveSignal.aborted) await correction;
       }
-      if (dispatched && error && typeof error === "object") Object.assign(error, { effectUnknown: true });
+      if (error && typeof error === "object") Object.assign(error, { effectUnknown: dispatched || "effectUnknown" in error && error.effectUnknown === true });
       throw error;
     } finally {
       this.blockers.endOperation(operation);

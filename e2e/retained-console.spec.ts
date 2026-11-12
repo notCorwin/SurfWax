@@ -41,7 +41,7 @@ test('retained console reads owned canonical captures after close and navigation
           if (key === 'messages') check(page.sourcePagination?.hasMore === response.sourcePagination.hasMore
             && page.sourcePagination.integrity === response.sourcePagination.integrity, 'artifact page keeps parent source status');
           items.push(...page.result);
-          if (!page.hasMore && response.sourcePagination?.hasMore) check(page.sourcePagination.hasMore === true, 'artifact end is not source end');
+          if (key === 'messages' && !page.hasMore && response.sourcePagination?.hasMore) check(page.sourcePagination.hasMore === true, 'artifact end is not source end');
           access = page.nextAccess;
         }
         return items;
