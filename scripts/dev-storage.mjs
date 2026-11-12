@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readdir, readFile, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -46,10 +46,37 @@ async function measure(path) {
 export async function lockProfile(profile, cwd = process.cwd()) {
   const root = resolve(cwd), lock = `${resolve(profile)}.cleanup-lock`;
   await safePath(root, lock);
+  // A process start time distinguishes a reused PID when inspected with ps.
+  const { stdout } = await promisify(execFile)('ps', ['-o', 'lstart=', '-p', String(process.pid)]);
+  const processStartedAt = stdout.trim();
+  if (!processStartedAt) throw new Error('Unable to identify the profile lock owner process.');
   await mkdir(join(lock, '..'), { recursive: true });
   try { await mkdir(lock); }
   catch (error) { if (error.code === 'EEXIST') return null; throw error; }
-  return async () => { await rm(lock, { recursive: true, force: true }); };
+  const owner = randomUUID(), record = join(lock, owner);
+  let created = false;
+  try {
+    const file = await open(record, 'wx');
+    created = true;
+    try { await file.writeFile(JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString(), owner, processStartedAt })); }
+    finally { await file.close(); }
+  } catch (error) {
+    // Remove only our own record and an empty directory; never recursively delete a lock.
+    await safePath(root, lock);
+    if (created) await unlink(record).catch(e => { if (e.code !== 'ENOENT') throw e; });
+    await rmdir(lock).catch(e => { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(e.code)) throw e; });
+    throw error;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    await safePath(root, lock);
+    try { await unlink(record); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    try { await rmdir(lock); }
+    catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error; }
+  };
 }
 
 export async function cleanDevStorage({ cwd = process.cwd(), apply = false, legacy = false, caches = true,
