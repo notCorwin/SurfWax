@@ -100,10 +100,16 @@ chrome.runtime.onConnect.addListener((port) => {
     return releasing = track((async () => {
       const cleanups = [...(ownerCleanups.get(identity.runId) ?? [])];
       const results = await Promise.allSettled(cleanups.map(cleanup => cleanup()));
-      results.forEach((result, index) => {
-        if (result.status === "rejected") eventLogger.telemetry({ type: "run.cleanup.failed", runId: identity.runId,
+      // Cleanup is authoritative lifecycle state. Publish its durable result
+      // before releasing ownership, so idle status cannot hide failed teardown.
+      for (const [index, result] of results.entries()) {
+        if (result.status === "rejected") await eventLogger.append({ type: "run.cleanup.failed", runId: identity.runId,
           content: { operation: reason, cleanupIndex: index, cleanupCount: cleanups.length, effectUnknown: true }, error: safeDiagnosticError(result.reason) });
-      });
+      }
+      const failures = results.filter(result => result.status === "rejected").length;
+      const recorded = await eventLogger.append({ type: "run.cleanup.finished", runId: identity.runId,
+        content: { operation: reason, cleanupCount: cleanups.length, failures }, output: { ok: failures === 0 } });
+      if (!recorded) throw new Error("Run cleanup result could not be recorded");
       ownerCleanups.delete(identity.runId);
       const owner = runs.release(port);
       if (!owner) return;
