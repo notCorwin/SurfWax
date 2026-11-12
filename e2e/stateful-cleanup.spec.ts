@@ -10,32 +10,35 @@ test('cart cleanup waits for completed writes, closes pages, clears and independ
   let started!: () => void;
   const writeStarted = new Promise<void>(resolve => { started = resolve; });
   const held = new Promise<void>(resolve => { release = resolve; });
-  let quantity = 1, clearRequests = 0, pagesAtClear = -1;
+  let quantity = 1, clearRequests = 0, pagesAtClear = -1, quantityAtClear = -1;
   let context: Awaited<ReturnType<Browser['newContext']>> | undefined;
   const server = createServer(async (request, response) => {
     response.setHeader('content-type', 'application/json');
     if (request.url === '/en-gb/cart') { started(); await held; quantity = 2; response.end('{}'); }
-    else if (request.url === '/cart/clear.js') { clearRequests++; pagesAtClear = context!.pages().length; quantity = 0; response.end('{}'); }
+    else if (request.url === '/cart/clear.js') { clearRequests++; pagesAtClear = context!.pages().length; quantityAtClear = quantity; quantity = 0; response.end('{}'); }
     else if (request.url === '/cart.js') response.end(JSON.stringify({ items: quantity ? [{}] : [], item_count: quantity, items_subtotal_price: quantity * 100 }));
     else { response.setHeader('content-type', 'text/html'); response.end('<title>Cart boundary</title>'); }
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const address = server.address() as { port: number }, origin = `http://127.0.0.1:${address.port}`;
-  const browser = await chromium.launch({ executablePath: systemChromePath(), headless: true });
+  const browser = await chromium.launch({ executablePath: systemChromePath(), headless: true, chromiumSandbox: true });
   context = await browser.newContext();
   const writes = trackCartWrites(context, origin);
   const proof: StopProof = { started: true, acknowledged: true, leaseReleased: true, jobsSettled: true, cleanupSucceeded: true, harnessWritesSettled: true };
   try {
     const page = await context.newPage();
     await page.goto(origin);
-    const pending = page.evaluate(() => fetch('/en-gb/cart', { method: 'POST' }).then(response => response.json()));
+    await page.evaluate(() => { void fetch('/en-gb/cart', { method: 'POST' }).catch(() => {}); });
     await writeStarted;
+    expect(await writes.drain(0)).toEqual({ active: 1, unknown: false });
     const cleaned = cleanupCart(context, origin, proof, writes);
+    expect(await writes.drain(0)).toEqual({ active: 1, unknown: false });
     expect(clearRequests).toBe(0);
+    expect(page.isClosed()).toBe(false);
     release();
-    await pending;
     expect(await cleaned).toMatchObject({ status: 'verified_empty', pagesClosed: 1, writes: { active: 0, unknown: false }, clearStatus: 200, verifyStatus: 200 });
     expect(pagesAtClear).toBe(0);
+    expect(quantityAtClear).toBe(2);
     expect(quantity).toBe(0);
     expect(clearRequests).toBe(1);
   } finally { release(); writes.dispose(); await browser.close(); await closeServer(server); }
@@ -52,7 +55,7 @@ test('cart cleanup refuses unacknowledged stops and unknown effects but permits 
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const browser = await chromium.launch({ executablePath: systemChromePath(), headless: true });
+  const browser = await chromium.launch({ executablePath: systemChromePath(), headless: true, chromiumSandbox: true });
   const context = await browser.newContext(), writes = trackCartWrites(context, origin);
   const proof: StopProof = { started: true, acknowledged: true, leaseReleased: true, jobsSettled: true, cleanupSucceeded: true, harnessWritesSettled: true };
   try {
