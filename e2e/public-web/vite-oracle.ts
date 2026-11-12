@@ -1,4 +1,4 @@
-import type { FrozenSource } from "./sources";
+import type { FrozenSource } from "./sources.ts";
 
 const versions = ["5.4.0", "6.0.0", "7.0.0"] as const;
 const nodes = ["18.20.0", "20.18.0", "20.19.0", "21.7.0", "22.11.0", "22.12.0"] as const;
