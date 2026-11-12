@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ConversationListProjection, EventLogger, fromLogValue } from "./logging";
 import { IncrementalActiveContext } from "./agent/context-choice";
 import { canAutoDispatchFollowup } from "./agent/followups";
@@ -101,6 +101,49 @@ describe("canonical event log", () => {
       "unavailable",
     );
   });
+  it("returns committed submission despite stalled publication and notification failure", async () => {
+    const memory = createMemoryEventStore();
+    let poison = true;
+    let unblock!: () => void;
+    const hanging = new Promise<never>(resolve => { unblock = () => resolve(undefined as never); });
+    const store = { ...memory, async appendMany(events: Parameters<typeof memory.appendMany>[0]) {
+      const saved = await memory.appendMany(events);
+      if (poison && events.some(event => event.type === "conversation.submitted")) {
+        poison = false;
+        return saved.map(event => event.type === "conversation.message" ? { ...event, messagePatch: { baseId: event.id - 1, partsLength: 1, indices: [0] } } : event);
+      }
+      return saved;
+    }, get: async () => hanging };
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const channel = { addEventListener: () => {}, removeEventListener: () => {}, postMessage: () => { throw new Error("private detail"); }, close: () => {} };
+    const logger = new EventLogger({ store, channelFactory: () => channel, ioTimeoutMs: 30 });
+    const commits: string[] = [];
+    logger.subscribeCommits(commit => { commits.push(...commit.types); });
+    await logger.append({ type: "conversation.created", conversationId: "c" });
+    await logger.appendRunSubmission({ conversationId: "c", runId: "run", chatId: "c", messageId: "m", expectedEpoch: await logger.canonicalEpoch(),
+      message: { id: "m", role: "user", parts: [{ type: "text", text: "hello" }] }, parentId: null });
+    await logger.append({ type: "conversation.title.updated", conversationId: "c", content: { title: "after" } });
+    const events = await memory.all();
+    expect(events.filter(event => event.type === "conversation.message")).toHaveLength(1);
+    expect(events.filter(event => event.type === "conversation.submitted")).toHaveLength(1);
+    expect(events.at(-1)?.type).toBe("conversation.title.updated");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(warning).toHaveBeenCalled();
+    expect(commits).toEqual(["conversation.created", "conversation.message", "conversation.submitted", "conversation.title.updated"]);
+    expect(JSON.stringify(warning.mock.calls)).not.toContain("private detail");
+    unblock();
+    warning.mockRestore();
+  });
+
+  it("does not report a receipt when the storage transaction fails", async () => {
+    const memory = createMemoryEventStore();
+    const store = { ...memory, async appendMany() { throw new Error("write failed"); } };
+    const logger = new EventLogger({ store });
+    await expect(logger.appendRunSubmission({ conversationId: "c", runId: "run", chatId: "c", messageId: "m",
+      message: { id: "m", role: "user", parts: [{ type: "text", text: "hello" }] } })).rejects.toThrow("write failed");
+    expect(await memory.all()).toEqual([]);
+  });
+
   it("submits existing messages without duplicating them and dispatches a queued follow-up once", async () => {
     const store = createMemoryEventStore();
     const logger = new EventLogger({ store });

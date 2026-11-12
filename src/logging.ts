@@ -473,6 +473,7 @@ let sharedStore: EventStore | undefined;
 const TERMINAL_EVENT_TYPES = ["tool.finished", "tool.failed", "conversation.finished", "conversation.failed", "conversation.aborted"];
 let localTerminalWrite: Promise<unknown> = Promise.resolve();
 let localJobStateWrite: Promise<unknown> = Promise.resolve();
+const localPublications = new WeakMap<EventStore, Promise<void>>();
 
 function terminalKey(event: Pick<LogEvent, "type" | "runId" | "toolCallId" | "content" | "valueEncoding">): string | undefined {
   if (!event.runId || !TERMINAL_EVENT_TYPES.includes(event.type)) return undefined;
@@ -1105,7 +1106,7 @@ export class EventLogger {
     while (this.messageHeads.size > 64) this.messageHeads.delete(this.messageHeads.keys().next().value!);
   }
 
-  private async materializeEvents(store: EventStore, floor: number, events: readonly LogEvent[]): Promise<LogEvent[]> {
+  private async materializeEvents(store: EventStore, floor: number, events: readonly LogEvent[], remember = true): Promise<LogEvent[]> {
     if (!events.some((event) => event.type === "conversation.message")) return [...events];
     const epoch = JSON.stringify([this.generation ?? null, floor]);
     const available = new Map(events.map((event) => [event.id, event]));
@@ -1132,7 +1133,7 @@ export class EventLogger {
     for (const event of events) {
       const full = event.type === "conversation.message" ? await resolve(event) : event;
       output.push(full);
-      if (full.type === "conversation.message") {
+      if (remember && full.type === "conversation.message") {
         const message = encodedMessageFields(full);
         if (isConversationMessage(message)) this.rememberMessage(full, message, epoch);
       }
@@ -1269,14 +1270,29 @@ export class EventLogger {
         else if (accepted.length && store.appendMany) stored.push(...await store.appendMany(accepted));
         else for (const event of accepted) stored.push(await store.append(event));
         if (stored.length) {
-          const published = stored.some((event) => event.type === "conversation.message")
-            ? await this.materializeEvents(store, terminalFloor >= 0 ? terminalFloor : await this.latestClearIdFresh(store), stored) : stored;
-          for (const event of published) for (const listener of this.listeners) {
-            try { listener(event); } catch (error) { this.options.onError?.(error); }
-          }
-          const commit = { types: [...new Set(stored.map(event => event.type))], lastId: Math.max(...stored.map((event) => event.id)), conversationIds: [...new Set(stored.flatMap((event) => event.conversationId ? [event.conversationId] : []))], cleared: stored.some((event) => event.type === "log.cleared") };
-          for (const writer of localLogWriters.get(this.localStore) ?? []) writer.receiveCommit({ ...commit, external: writer !== this });
-          this.channel?.postMessage({ ...commit, writerId: this.writerId });
+          // Publication is ordered per store but is not part of the durable
+          // transaction or its receipt. A failed observer cannot undo a commit.
+          const publish = async () => {
+            let published: LogEvent[] = [];
+            try {
+              published = stored.some((event) => event.type === "conversation.message")
+                ? await logIO((async () => this.materializeEvents(store, floor ?? terminalFloor, stored, false))(), "发布消息", this.options.ioTimeoutMs)
+                : stored;
+            } catch { console.warn("[Surf Wax] 已提交的日志消息无法发布，消费者将从日志恢复。"); }
+            for (const event of published) for (const listener of this.listeners) {
+              try { listener(event); } catch { console.warn("[Surf Wax] 日志事件通知失败。"); }
+            }
+            const commit = { types: [...new Set(stored.map(event => event.type))], lastId: Math.max(...stored.map((event) => event.id)), conversationIds: [...new Set(stored.flatMap((event) => event.conversationId ? [event.conversationId] : []))], cleared: stored.some((event) => event.type === "log.cleared") };
+            for (const writer of localLogWriters.get(this.localStore) ?? []) {
+              try { writer.receiveCommit({ ...commit, external: writer !== this }); } catch { console.warn("[Surf Wax] 日志提交通知失败。"); }
+            }
+            try { this.channel?.postMessage({ ...commit, writerId: this.writerId }); }
+            catch { console.warn("[Surf Wax] 跨页面日志通知失败。"); }
+          };
+          const previous = localPublications.get(this.localStore) ?? Promise.resolve();
+          const publication = previous.then(publish, publish);
+          localPublications.set(this.localStore, publication);
+          void publication.catch(() => console.warn("[Surf Wax] 日志发布失败。"));
         }
         // Return the accepted durable terminal to a competing callback, without
         // publishing a second event or replacing the original reason/result.
