@@ -314,6 +314,8 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const savingFollowup = useRef(false);
   const mounted = useRef(false);
   const [saving, setSaving] = useState(false);
+  const [dispatchingId, setDispatchingId] = useState<string>();
+  const [dispatchPaused, setDispatchPaused] = useState(false);
   const [queueError, setQueueError] = useState<{ summary: string; error: unknown }>();
   const [immediateId, setImmediateId] = useState<string>();
   const [resumeQueue, setResumeQueue] = useState(false);
@@ -346,21 +348,24 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const dispatchFollowup = useCallback((message: FollowupMessage, mode: "followup" | "immediate") => {
     if (dispatching.current || blocked || otherRunning) return;
     dispatching.current = message.id;
+    setDispatchingId(message.id);
     setQueueError(undefined);
     void waitForConversationRun(conversationId).then(() => runtimeCommands.thread.append({
       role: "user",
       content: [{ type: "text", text: message.text }],
       createdAt: new Date(),
       metadata: { custom: { followupId: message.id, followupMode: mode } },
-    })).catch((error) => {
+    })).then((accepted) => {
+      if (!accepted) throw new Error("操作未完成，请检查设置后重试。");
+    }).catch((error) => {
       dispatching.current = undefined;
-      if (mounted.current) setQueueError({ summary: "排队消息未能发送，请重试。", error });
+      if (mounted.current) { setDispatchingId(undefined); setDispatchPaused(true); setQueueError({ summary: "排队消息未能发送，请重试。", error }); }
     });
   }, [runtimeCommands, blocked, conversationId, otherRunning]);
 
   useEffect(() => {
     if (!dispatching.current) return;
-    if (!followups.messages.some(({ id }) => id === dispatching.current)) dispatching.current = undefined;
+    if (!followups.messages.some(({ id }) => id === dispatching.current)) { dispatching.current = undefined; setDispatchingId(undefined); }
   }, [followups.messages]);
 
   useEffect(() => {
@@ -371,11 +376,11 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   }, [blocked, dispatchFollowup, followups.messages, immediateId, isRunning]);
 
   useEffect(() => {
-    if (!followups.ready || isRunning || blocked || immediateId || dispatching.current || followups.messages.length === 0) return;
+    if (!followups.ready || isRunning || blocked || immediateId || dispatching.current || dispatchPaused || followups.messages.length === 0) return;
     if (!followups.autoDispatch && !resumeQueue) return;
     setResumeQueue(false);
     dispatchFollowup(followups.messages[0]!, "followup");
-  }, [blocked, dispatchFollowup, followups, immediateId, isRunning, resumeQueue]);
+  }, [blocked, dispatchFollowup, dispatchPaused, followups, immediateId, isRunning, resumeQueue]);
 
   const submit = useCallback(() => {
     const input = inputRef.current;
@@ -414,6 +419,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
 
   const sendImmediately = useCallback((message: FollowupMessage) => {
     if (blocked || otherRunning || dispatching.current) return;
+    setDispatchPaused(false);
     if (isRunning) {
       setImmediateId(message.id);
       runtimeCommands.thread.cancelRun();
@@ -457,11 +463,11 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           className="flex min-w-0 items-center gap-2 rounded-lg border border-border/70 bg-muted/50 px-2 py-1.5 text-xs">
           <span className="shrink-0 text-muted-foreground">{index + 1}</span>
           <span className="min-w-0 flex-1 truncate" title={message.text}>{message.text}</span>
-          <Button type="button" variant="ghost" size="icon-xs" disabled={Boolean(immediateId) || Boolean(dispatching.current) || blocked || otherRunning}
+          <Button type="button" variant="ghost" size="icon-xs" disabled={Boolean(immediateId) || Boolean(dispatchingId) || blocked || otherRunning}
             aria-label="立即发送" title="中断当前工作并立即发送" onClick={() => sendImmediately(message)}>
             <ForwardIcon aria-hidden="true" />
           </Button>
-          <Button type="button" variant="ghost" size="icon-xs" disabled={immediateId === message.id || dispatching.current === message.id}
+          <Button type="button" variant="ghost" size="icon-xs" disabled={immediateId === message.id || dispatchingId === message.id}
             aria-label="移除排队消息" title="移除" onClick={() => removeFollowup(message.id)}>
             <XIcon aria-hidden="true" />
           </Button>

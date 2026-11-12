@@ -869,9 +869,11 @@ export class ConversationListProjection {
   private conversations = new Map<string, ConversationSummary>();
   private deleted = new Set<string>();
   private manuallyTitled = new Set<string>();
+  // Presence distinguishes a legacy submission without an ID from no submission.
+  private submittedRuns = new Map<string, string | undefined>();
 
   reset(events: readonly LogEvent[]): ConversationSummary[] {
-    this.conversations.clear(); this.deleted.clear(); this.manuallyTitled.clear();
+    this.conversations.clear(); this.deleted.clear(); this.manuallyTitled.clear(); this.submittedRuns.clear();
     for (const event of events) this.apply(event);
     return this.snapshot();
   }
@@ -880,6 +882,7 @@ export class ConversationListProjection {
     if (!event.conversationId) return false;
     if (event.type === "conversation.created") {
       this.manuallyTitled.delete(event.conversationId);
+      this.submittedRuns.delete(event.conversationId);
       const content = fromLogValue(event.content, event.valueEncoding) as { title?: unknown };
       this.conversations.set(event.conversationId, { id: event.conversationId,
         title: typeof content?.title === "string" && content.title.trim() ? content.title : "新对话",
@@ -900,9 +903,16 @@ export class ConversationListProjection {
       }
     }
     if (event.type !== "conversation.selected") conversation.lastMessageAt = event.timestamp;
-    if (event.type === "conversation.submitted") conversation.runStatus = "running";
-    if (event.type === "conversation.finished") conversation.runStatus = "idle";
-    if (event.type === "conversation.aborted" || event.type === "conversation.failed") conversation.runStatus = "interrupted";
+    if (event.type === "conversation.submitted") {
+      this.submittedRuns.set(event.conversationId, event.runId);
+      conversation.runStatus = "running";
+    }
+    // Without a submission, retain historical terminal-only behavior. Once a
+    // submission exists, unknown identities match only other unknown identities.
+    const current = !this.submittedRuns.has(event.conversationId)
+      || this.submittedRuns.get(event.conversationId) === event.runId;
+    if (current && event.type === "conversation.finished") conversation.runStatus = "idle";
+    if (current && (event.type === "conversation.aborted" || event.type === "conversation.failed")) conversation.runStatus = "interrupted";
     return true;
   }
 
@@ -982,6 +992,7 @@ export class EventLogger {
   private channel?: CommitChannel;
   private writerPort?: chrome.runtime.Port;
   private readonly writerId = crypto.randomUUID();
+  private observedClearId = -1;
   private readonly localStore: EventStore;
   private disposed = false;
   private messageWrites = new Map<string, Promise<void>>();
@@ -1060,8 +1071,8 @@ export class EventLogger {
   }
 
   private receiveCommit(commit: LogCommit): void {
-    if (this.disposed) return;
-    if (commit.cleared) { this.messageHeads.clear(); this.resetArtifactCache(); }
+    if (this.disposed || commit.lastId <= this.observedClearId) return;
+    if (commit.cleared) { this.observedClearId = commit.lastId; this.messageHeads.clear(); this.resetArtifactCache(); }
     else if (commit.external) for (const [key, head] of this.messageHeads) {
       if (head.event.conversationId && commit.conversationIds.includes(head.event.conversationId)) this.messageHeads.delete(key);
     }
@@ -1189,7 +1200,7 @@ export class EventLogger {
       artifactPart: { key: graph.key, owner: event.conversationId, node: part.node, section: part.section, part: part.part }, output: part.value })) };
   }
 
-  private enqueue(events: readonly Omit<LogEvent, "id">[], expectedEpoch?: string, expectedJobStateId?: number, artifactLink?: "resultArtifactId", artifactParts: readonly Omit<LogEvent, "id">[] = [], requireAtomic = false): Promise<LogEvent[]> {
+  private enqueue(events: readonly Omit<LogEvent, "id">[], expectedEpoch?: string, expectedJobStateId?: number, artifactLink?: "resultArtifactId", artifactParts: readonly Omit<LogEvent, "id">[] = [], requireAtomic = false, fullMessage?: LogEvent): Promise<LogEvent[]> {
     const generation = this.generation;
     const task = this.pending.then(async () => {
       await this.ready;
@@ -1198,8 +1209,8 @@ export class EventLogger {
         // Recheck after the cross-page lock: maintenance may have advanced while
         // this writer was waiting for another page's terminal transaction.
         if (generation === undefined ? this.handshakePaused : generation !== this.generation) return [];
-        if (requireAtomic) {
-          const dispatch = events.find((event) => event.type === "conversation.followup.dispatched");
+        const dispatch = events.find((event) => event.type === "conversation.followup.dispatched");
+        if (requireAtomic && dispatch) {
           const followup = fromLogValue(dispatch?.content, dispatch?.valueEncoding) as { id?: unknown } | null;
           if (!dispatch?.conversationId || typeof followup?.id !== "string") throw new Error("Invalid follow-up submission");
           const floor = await this.latestClearIdFresh(store);
@@ -1258,15 +1269,21 @@ export class EventLogger {
         } else if (requireAtomic && accepted.length && !store.appendMany) throw new Error("Event store does not support atomic conversation submission");
         else if (accepted.length && store.appendMany) stored.push(...await store.appendMany(accepted));
         else for (const event of accepted) stored.push(await store.append(event));
-        if (stored.length) {
-          const published = stored.some((event) => event.type === "conversation.message")
-            ? await this.materializeEvents(store, terminalFloor >= 0 ? terminalFloor : await this.latestClearIdFresh(store), stored) : stored;
-          for (const event of published) for (const listener of this.listeners) {
-            try { listener(event); } catch (error) { this.options.onError?.(error); }
+        // All writes and clear share the same lock. Publish synchronously while
+        // it is held, with no storage reads after the confirmed commit.
+        if (stored.length && !this.disposed && generation === this.generation && !(generation === undefined && this.handshakePaused)) {
+          for (const saved of stored) {
+            const event = fullMessage && saved.messagePatch ? { ...fullMessage, id: saved.id } : saved;
+            for (const listener of this.listeners) {
+              try { listener(event); } catch { console.warn("[Surf Wax] 日志事件通知失败。"); }
+            }
           }
           const commit = { types: [...new Set(stored.map(event => event.type))], lastId: Math.max(...stored.map((event) => event.id)), conversationIds: [...new Set(stored.flatMap((event) => event.conversationId ? [event.conversationId] : []))], cleared: stored.some((event) => event.type === "log.cleared") };
-          for (const writer of localLogWriters.get(this.localStore) ?? []) writer.receiveCommit({ ...commit, external: writer !== this });
-          this.channel?.postMessage({ ...commit, writerId: this.writerId });
+          for (const writer of localLogWriters.get(this.localStore) ?? []) {
+            try { writer.receiveCommit({ ...commit, external: writer !== this }); } catch { console.warn("[Surf Wax] 日志提交通知失败。"); }
+          }
+          try { this.channel?.postMessage({ ...commit, writerId: this.writerId }); }
+          catch { console.warn("[Surf Wax] 跨页面日志通知失败。"); }
         }
         // Return the accepted durable terminal to a competing callback, without
         // publishing a second event or replacing the original reason/result.
@@ -1276,8 +1293,7 @@ export class EventLogger {
           .filter((event): event is LogEvent => Boolean(event));
       };
       const terminalWrite = () => events.some((event) => terminalKey(event) || FOLLOWUP_EVENT_TYPES.includes(event.type as typeof FOLLOWUP_EVENT_TYPES[number])) ? withTerminalWriteLock(write) : write();
-      return expectedEpoch !== undefined || events.some((event) => event.type === "browser.job.state" || event.type === "log.cleared")
-        ? withJobStateWriteLock(terminalWrite, Boolean(this.options.store)) : terminalWrite();
+      return withJobStateWriteLock(terminalWrite, Boolean(this.options.store));
     });
     const bounded = logIO(task, "写入", this.options.ioTimeoutMs);
     this.pending = bounded.catch((error) => {
@@ -1337,13 +1353,14 @@ export class EventLogger {
     this.bufferTimer ??= setTimeout(() => this.flushBuffer(), 16);
   }
 
-  async appendMessage(conversationId: string, message: ConversationMessage, options: { runId?: string; parentId?: string | null; changedParts?: readonly number[] } = {}): Promise<void> {
+  async appendMessage(conversationId: string, message: ConversationMessage, options: { runId?: string; parentId?: string | null; changedParts?: readonly number[]; expectedEpoch?: string } = {}): Promise<void> {
     const key = JSON.stringify([conversationId, message.id]);
     const priorWrite = this.messageWrites.get(key) ?? Promise.resolve();
     const write = priorWrite.then(async () => {
       if (this.fatalError !== undefined) throw this.fatalError;
       if (!this.accepting) throw new DOMException("日志维护已阻止消息保存。", "AbortError");
       const epoch = await this.canonicalEpoch();
+      if (options.expectedEpoch !== undefined && options.expectedEpoch !== epoch) throw new Error("日志正在维护，请稍后重试。");
       let previous = this.messageHeads.get(key);
       if (previous?.epoch !== epoch) previous = undefined;
       if (options.changedParts?.some((index) => !Number.isSafeInteger(index) || index < 0 || index >= message.parts.length)) throw new Error("Invalid changed message part index");
@@ -1355,7 +1372,8 @@ export class EventLogger {
         content: previous ? { ...message, parts: indices.map((index) => message.parts[index]) } : message });
       if (previous) prepared.messagePatch = { baseId: previous.event.id, partsLength: message.parts.length, indices };
       this.flushBuffer();
-      const [saved] = await this.enqueue([prepared]);
+      const fullMessage = materializeMessageEvent({ ...prepared, id: 0 }, previous?.event);
+      const [saved] = await this.enqueue([prepared], epoch, undefined, undefined, [], false, fullMessage);
       if (!saved) throw new DOMException("日志维护已阻止消息保存。", "AbortError");
       const full = materializeMessageEvent(saved, previous?.event);
       this.rememberMessage(full, encodedMessageFields(full) as ConversationMessage, epoch);
@@ -1364,19 +1382,21 @@ export class EventLogger {
     try { await write; } finally { if (this.messageWrites.get(key) === write) this.messageWrites.delete(key); }
   }
 
-  /** A follow-up leaves its queue only when its message and run are durable. */
-  async appendFollowupSubmission(input: { conversationId: string; runId: string; chatId: string; message: ConversationMessage;
-    parentId: string | null; followup: { id: string; mode: "followup" | "immediate" } }): Promise<void> {
+  /** A new user message and its submission commit together; follow-ups also leave their queue atomically. */
+  async appendRunSubmission(input: { conversationId: string; runId: string; chatId: string; messageId: string | null;
+    message?: ConversationMessage; parentId?: string | null; followup?: { id: string; mode: "followup" | "immediate" }; expectedEpoch?: string }): Promise<void> {
     if (this.fatalError !== undefined) throw this.fatalError;
-    if (!this.accepting) throw new DOMException("日志维护已阻止后续消息发送。", "AbortError");
+    if (!this.accepting) throw new Error("日志正在维护，请稍后重试。");
+    if (input.followup && !input.message) throw new Error("Invalid follow-up submission");
     this.flushBuffer();
     const { conversationId, runId, message, parentId, followup } = input;
-    const saved = await this.enqueue([
-      this.event({ type: "conversation.message", conversationId, runId, parentId, content: message }),
-      this.event({ type: "conversation.followup.dispatched", conversationId, runId, content: followup }),
-      this.event({ type: "conversation.submitted", conversationId, runId, content: { chatId: input.chatId, messageId: message.id } }),
-    ], undefined, undefined, undefined, [], true);
-    if (saved.length !== 3) throw new Error("后续消息已发送、移除或日志正在维护。");
+    const events = [
+      ...(message ? [this.event({ type: "conversation.message", conversationId, runId, parentId, content: message })] : []),
+      ...(followup ? [this.event({ type: "conversation.followup.dispatched", conversationId, runId, content: followup })] : []),
+      this.event({ type: "conversation.submitted", conversationId, runId, content: { chatId: input.chatId, messageId: input.messageId } }),
+    ];
+    const saved = await this.enqueue(events, input.expectedEpoch, undefined, undefined, [], events.length > 1);
+    if (saved.length !== events.length) throw new Error("日志正在维护，请稍后重试。");
   }
 
   async repository(conversationId: string): Promise<ConversationRepository> {
@@ -1828,12 +1848,18 @@ export class EventLogger {
       : (await store.all()).filter((event) => event.id > floor && event.conversationId === conversationId)));
   }
 
-  async deleteConversation(conversationId: string): Promise<void> {
-    await this.append({ type: "conversation.deleted", conversationId, content: null });
+  async deleteConversation(conversationId: string, epoch?: string): Promise<void> {
+    const saved = epoch === undefined
+      ? await this.append({ type: "conversation.deleted", conversationId, content: null })
+      : await this.appendIfEpoch({ type: "conversation.deleted", conversationId, content: null }, epoch);
+    if (!saved) throw new Error("日志正在维护，请稍后重试。");
   }
 
-  async restoreConversation(conversationId: string): Promise<void> {
-    await this.append({ type: "conversation.restored", conversationId, content: null });
+  async restoreConversation(conversationId: string, epoch?: string): Promise<void> {
+    const saved = epoch === undefined
+      ? await this.append({ type: "conversation.restored", conversationId, content: null })
+      : await this.appendIfEpoch({ type: "conversation.restored", conversationId, content: null }, epoch);
+    if (!saved) throw new Error("日志正在维护，请稍后重试。");
   }
 
   private async artifactForCall(event: LogEvent, events: readonly LogEvent[], source?: { store: EventStore; floor: number }): Promise<{ id: number } | undefined> {
