@@ -1,4 +1,3 @@
-import { fromLogValue } from '../../src/logging';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -6,13 +5,12 @@ import { resolve } from 'node:path';
 import { expect, type Page } from '@playwright/test';
 import { fitWindowToScreen } from '../../scripts/development-extension.mjs';
 import { configure, openExtension, readEvents, dispose, closeServer } from '../fixtures';
-import { modelProxy, usageEvidence } from '../evaluation/model-proxy';
+import { modelProxy } from '../evaluation/model-proxy';
 import { buildFingerprint, fileFingerprint } from '../evaluation/build-fingerprint';
-import { deadlineEvidence } from '../evaluation/deadline-evidence';
-import { toolLifecycleEvidence } from '../evaluation/tool-lifecycle';
 import { browserJobsSettled } from '../evaluation/job-evidence';
 import { sanitizeCart, verifyCart, sameCart, type Item } from './oracle';
-import { providerFailure, missingStock } from './diagnosis';
+import { missingStock } from './diagnosis';
+import { collectCartStage } from './stage';
 import { cleanupCart, trackCartWrites, backgroundCleanupSucceeded, type StopProof } from './cleanup';
 
 type Opened = Awaited<ReturnType<typeof openExtension>>;
@@ -105,7 +103,7 @@ export async function runCart(timeout: number): Promise<string> {
   let writes: ReturnType<typeof trackCartWrites> | undefined;
   let touched = false, agentStarted = false, harnessWritesSettled = true, phase = 'setup';
   let scope: Scope | undefined;
-  const evaluationFiles = ['e2e/stateful-web/run.ts', 'e2e/stateful-web/cleanup.ts', 'e2e/stateful-web/oracle.ts', 'e2e/stateful-web/diagnosis.ts', 'e2e/fixtures.ts', 'e2e/evaluation/job-evidence.ts'];
+  const evaluationFiles = ['e2e/stateful-web/run.ts', 'e2e/stateful-web/stage.ts', 'e2e/stateful-web/cleanup.ts', 'e2e/stateful-web/oracle.ts', 'e2e/stateful-web/diagnosis.ts', 'e2e/fixtures.ts', 'e2e/evaluation/job-evidence.ts'];
   report.gitHead = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   report.gitDirty = !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
   report.evaluationSource = await Promise.all(evaluationFiles.map(path => fileFingerprint(resolve(path))));
@@ -169,48 +167,15 @@ export async function runCart(timeout: number): Promise<string> {
     if (!(await target.goto(base + '/cart', { waitUntil: 'load', timeout: 45000 }))?.ok()) throw new WebsiteError('cart page', null);
     await target.bringToFront();
     const label = (product: Product) => `${product.name}（${product.variant}），${product.url}`;
-    const run = async (prompt: string, wanted: Item[], limit: number) => {
-      const start = Date.now(), end = start + timeout, requestOffset = proxy!.requests.length;
-      await opened!.page.getByTestId('composer-input').fill(prompt);
-      agentStarted = true;
-      scope = undefined;
-      await opened!.page.getByTestId('composer-input').press('Enter');
-      let all: any[] = [], progressAt = 0;
-      while (Date.now() < end) {
-        all = await bounded(readEvents(opened!.page));
-        const submission = [...all].reverse().find(event => event.type === 'conversation.submitted' && Date.parse(event.timestamp) >= start);
-        if (submission) scope = { conversationId: submission.conversationId, runId: submission.runId };
-        if (Date.now() - progressAt >= 30000) { console.log(JSON.stringify({ phase, elapsedMs: Date.now() - start, toolCalls: all.filter(event => event.type === 'tool.started' && event.runId === scope?.runId).length })); progressAt = Date.now(); }
-        if (scope && deadlineEvidence(scoped(all, scope), start, end).state !== 'pending') break;
-        await new Promise(resolveWait => setTimeout(resolveWait, Math.max(1, Math.min(1000, end - Date.now()))));
-      }
-      if (scope && deadlineEvidence(scoped(all, scope), start, end).state === 'on_time') {
-        await expect.poll(() => leaseReleased(opened!.page), { timeout: 15000, intervals: [500] }).toBe(true);
-      }
-      all = await bounded(readEvents(opened!.page));
-      const events = scope ? scoped(all, scope) : [];
-      await writeFile(resolve(root, `${phase}-events.json`), JSON.stringify(events, null, 2), { flag: 'wx', mode: 0o600 });
-      const terminal = deadlineEvidence(events, start, end), lifecycle = toolLifecycleEvidence(events), jobs = browserJobsSettled(events);
-      const cleanupSucceeded = !!scope && backgroundCleanupSucceeded(events, scope.runId);
-      const actual = sanitizeCart(await request('/cart.js'));
-      const valid = verifyCart(actual, wanted, initial.currency, limit);
-      const page = await finalCartPage(opened!, selected, wanted);
-      const priceChanged = actual.items.some(item => selected.some(product => product.variantId === item.variantId && product.price !== (item.originalPrice ?? item.price)));
-      const requests = structuredClone(proxy!.requests.slice(requestOffset));
-      const provider = providerFailure(requests);
-      const stock = !valid && terminal.state === 'on_time' ? await missingStock(ctx.request, wanted, actual, selected) : [];
-      const soldOut = stock.some(item => item.available === false);
-      const finished = events.filter(event => event.type === 'conversation.finished').at(-1);
-      const goal = finished ? (fromLogValue(finished.content, finished.valueEncoding) as any)?.goal : undefined;
-      const outcome = (terminal.state === 'pending' || terminal.state === 'late') && provider.unavailable ? 'blocked'
-        : terminal.state === 'pending' || terminal.state === 'late' ? 'timed_out'
-        : priceChanged || soldOut ? 'blocked' : terminal.state !== 'on_time' || terminal.terminal !== 'conversation.finished' ? 'blocked'
-          : goal?.status === 'completed' && valid && lifecycle.complete === true && jobs === true && cleanupSucceeded && page.verified ? 'passed' : 'failed';
-      const result = { scope, prompt, startedAt: new Date(start).toISOString(), elapsedMs: Date.now() - start, terminal, lifecycle, jobs, cleanupSucceeded, actual,
-        actualHash: hash(actual), valid, page, priceChanged, stock, provider, goalStatus: goal?.status, outcome, usage: usageEvidence(events), modelRequests: requests };
-      report.phases.push(result);
-      return result;
-    };
+    const run = (prompt: string, wanted: Item[], limit: number) => collectCartStage({
+      root, phase, prompt, timeout, wanted, limit, currency: initial.currency, products: selected, phases: report.phases,
+      setScope: value => { scope = value; },
+      start: async () => { await opened!.page.getByTestId('composer-input').fill(prompt); agentStarted = true; await opened!.page.getByTestId('composer-input').press('Enter'); },
+      read: () => readEvents(opened!.page), requests: () => proxy!.requests,
+      lease: async () => { await expect.poll(() => leaseReleased(opened!.page), { timeout: 15000, intervals: [500] }).toBe(true); return true; },
+      cart: async () => sanitizeCart(await request('/cart.js')), page: () => finalCartPage(opened!, selected, wanted),
+      stock: actual => missingStock(ctx.request, wanted, actual, selected),
+    });
     phase = 'stage1';
     const one = await run(`请保留购物车中原有的 ${label(a)} 一件。我多加了 ${label(b)}，请改成一件。商品小计不超过 ${initial.currency} ${(budget(first) / 100).toFixed(2)}。核对购物车页面的商品、数量及小计，完成后停留在购物车。`, first, budget(first));
     report.outcome = one.outcome;
@@ -230,7 +195,8 @@ export async function runCart(timeout: number): Promise<string> {
       }
     }
   } catch (error) {
-    report.outcome = error instanceof WebsiteError ? 'blocked' : 'setup_failed';
+    const observed = report.phases.at(-1);
+    report.outcome = observed?.outcome ?? (error instanceof WebsiteError ? 'blocked' : 'setup_failed');
     report.reason = error instanceof WebsiteError ? error.message : `Evaluation observation failed during ${phase}`;
     report.phase = phase;
   } finally {
