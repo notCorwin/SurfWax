@@ -31,3 +31,8 @@ export function sourceReader() {
     return read;
   };
 }
+
+export function canonicalUrl(url: string): string {
+  try { const value = new URL(url); if (value.hostname === "developer.chrome.com") value.searchParams.delete("hl"); return `${value.origin}${value.pathname.replace(/\/$/, "")}${value.search}`; }
+  catch { return ""; }
+}

@@ -1,3 +1,4 @@
+import { canonicalUrl } from "./sources.ts";
 import type { FrozenSource } from './sources.ts';
 export const chromeDoc = 'https://developer.chrome.com/docs/extensions/reference/api/userScripts';
 export const proposal = 'https://github.com/w3c/webextensions/issues/477';
@@ -14,5 +15,5 @@ export function gradeUserscripts(answer: unknown, expected: ReturnType<typeof us
   return Array.isArray(a.versions) && a.versions.length === expected.length && expected.every(row => {
     const matches = a.versions.filter((x: any) => x?.chrome_version === row.chrome_version);
     return matches.length === 1 && Object.entries(row).every(([k,v]) => matches[0][k] === v);
-  }) && a.scripts_cleared_on_extension_update === true && a.proposal_is_implementation_status === false && Array.isArray(a.sources) && [chromeDoc,proposal].every(u => a.sources.includes(u));
+  }) && a.scripts_cleared_on_extension_update === true && a.proposal_is_implementation_status === false && Array.isArray(a.sources) && [chromeDoc,proposal].every(u => a.sources.some((url: unknown) => typeof url === "string" && canonicalUrl(url) === canonicalUrl(u)));
 }

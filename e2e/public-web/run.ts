@@ -11,6 +11,7 @@ import { deadlineEvidence } from "../evaluation/deadline-evidence";
 import { toolLifecycleEvidence } from "../evaluation/tool-lifecycle";
 import { browserJobsSettled } from "../evaluation/job-evidence";
 import { buildFingerprint, type BuildFingerprint } from "../evaluation/build-fingerprint";
+import { httpEvidence, settledReadJobs } from "./http-evidence";
 import { canonicalUrl, finalAnswer, snapshotEvidence, verifyBrowsing, type DocumentEvidence } from "./evidence";
 import { sourceReader, type FrozenSource } from "./sources";
 import type { publicTasks } from "./tasks";
@@ -26,6 +27,10 @@ export async function runPublicTask(task: Task, timeoutMs: number): Promise<Outc
   let sources: FrozenSource[] = [], expected: unknown, requiredUrls: string[] = [];
   let events: any[] = [], outcome: Outcome = "setup_failed", phase = "oracle_preflight", reason = "";
   let startedAt: number | null = null, deadlineAt: number | null = null;
+  let http: Awaited<ReturnType<typeof httpEvidence>> = [];
+  let effectCertainty: boolean | null = null;
+  const gitHeadAtStart = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const gitDirtyAtStart = !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
   let answer: ReturnType<typeof finalAnswer> = { text: "", value: null };
   let correct: boolean | null = null, lifecycle: ReturnType<typeof toolLifecycleEvidence> | null = null, jobs: boolean | null = null;
   let buildBefore: BuildFingerprint | null = null, buildAfter: BuildFingerprint | null = null;
@@ -97,12 +102,13 @@ export async function runPublicTask(task: Task, timeoutMs: number): Promise<Outc
     }
     events = await readBounded(opened.page, 5000);
     const terminal = deadlineEvidence(events, startedAt, deadlineAt);
-    lifecycle = toolLifecycleEvidence(events); jobs = browserJobsSettled(events);
+    lifecycle = toolLifecycleEvidence(events); effectCertainty = browserJobsSettled(events); jobs = settledReadJobs(events);
     answer = finalAnswer(events);
     await Promise.allSettled(pageAssociations);
     for (const doc of documents) doc.tabId = pageTabs.get(doc.pageId) ?? null;
     const snapshots = snapshotEvidence(events);
-    browsing = verifyBrowsing(requiredUrls.map(url => ({ url, terms: task.evidenceTerms(expected, url) })), documents, snapshots);
+    http = await httpEvidence(events);
+    browsing = verifyBrowsing(requiredUrls.map(url => ({ url, terms: task.evidenceTerms(expected, url), alternatives: task.evidenceUrls(url) })), documents, snapshots, http);
     const observed = browsing.complete;
     if (terminal.state === "pending" || terminal.state === "late") { outcome = "timed_out"; reason = "Task deadline exceeded"; }
     else if (terminal.state !== "on_time" || terminal.terminal !== "conversation.finished") {
@@ -110,7 +116,7 @@ export async function runPublicTask(task: Task, timeoutMs: number): Promise<Outc
     } else {
       correct = task.grade(answer.value, expected);
       outcome = correct && observed && lifecycle.complete === true && jobs === true ? "passed" : "failed";
-      reason = !correct ? "Structured result is incorrect or incomplete" : !observed ? "Required source pages lack successful navigation and tool snapshot evidence"
+      reason = !correct ? "Structured result is incorrect or incomplete" : !observed ? "Required sources lack verified visible or HTTP response facts"
         : lifecycle.complete !== true || jobs !== true ? "Tool or browser-job terminal evidence is incomplete" : "All required facts and browser evidence verified";
       // A demonstrated failure to load a required source makes research inconclusive, never an invented answer a pass.
       const inaccessible = browsing.blocked || requiredUrls.some(url => {
@@ -131,10 +137,10 @@ export async function runPublicTask(task: Task, timeoutMs: number): Promise<Outc
     if (outcome === "passed" && buildBefore?.sha256 !== buildAfter?.sha256) { outcome = "setup_failed"; reason = "Extension build changed during evaluation"; }
     const gitDirty = !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
     const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    const report = { task: task.id, title: task.title, difficulty: task.difficulty, outcome, reason, phase, gitHead: head, gitDirty,
+    const report = { task: task.id, title: task.title, difficulty: task.difficulty, outcome, reason, phase, gitHead: head, gitDirty, gitHeadAtStart, gitDirtyAtStart,
       model: process.env.SURFWAX_EVAL_MODEL, browser, timeoutMs, startedAt, deadlineAt, elapsedMs: startedAt ? Date.now() - startedAt : null,
       buildBefore, buildAfter, sources: sources.map(({ body: _body, ...metadata }) => metadata), requiredUrls, documents, navigationFailures,
-      browsing, snapshots: snapshotEvidence(events).map(({ text: _text, ...metadata }) => metadata), finalAnswer: answer, correct, lifecycle, jobs, usage: usageEvidence(events), requests: structuredClone(proxy?.requests ?? []) };
+      browsing, httpEvidence: http.map(({ text, ...metadata }) => ({ ...metadata, deliveredCharacters: text.length })), snapshots: snapshotEvidence(events).map(({ text: _text, ...metadata }) => metadata), finalAnswer: answer, correct, lifecycle, jobs, effectCertainty, readOnlyResearch: true, usage: usageEvidence(events), requests: structuredClone(proxy?.requests ?? []) };
       await writeFile(resolve(root, "report.json"), JSON.stringify(report, null, 2), { flag: "wx", mode: 0o600 });
       await writeFile(resolve(root, "events.json"), JSON.stringify(events, null, 2), { flag: "wx", mode: 0o600 });
       console.log(JSON.stringify({ outcome, reason, report: resolve(root, "report.json") }));

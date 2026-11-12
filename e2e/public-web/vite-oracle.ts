@@ -1,3 +1,4 @@
+import { canonicalUrl } from "./sources.ts";
 import type { FrozenSource } from "./sources.ts";
 
 const versions = ["5.4.0", "6.0.0", "7.0.0"] as const;
@@ -35,6 +36,6 @@ export function gradeViteFacts(answer: unknown, oracle: ReturnType<typeof viteOr
     return actual.node_engine === expected.node_engine && compatibility && Object.keys(compatibility).length === nodes.length &&
       nodes.every(node => compatibility[node] === expected.node_compatibility[node]) &&
       actual.dependencies?.esbuild === expected.dependencies.esbuild && actual.dependencies?.rollup === expected.dependencies.rollup &&
-      Array.isArray(actual.sources) && actual.sources.includes(`https://github.com/vitejs/vite/blob/v${expected.vite_version}/packages/vite/package.json`);
+      Array.isArray(actual.sources) && actual.sources.some((url: unknown) => typeof url === "string" && [`https://github.com/vitejs/vite/blob/v${expected.vite_version}/packages/vite/package.json`, `https://raw.githubusercontent.com/vitejs/vite/v${expected.vite_version}/packages/vite/package.json`].includes(canonicalUrl(url)));
   });
 }

@@ -16,6 +16,7 @@ describe("Vite oracle", () => {
     const oracle = viteOracle(sources);
     const valid = { highest_matching_candidate: "6.0.0", candidates: oracle.map(item => ({ ...item, sources: [`https://github.com/vitejs/vite/blob/v${item.vite_version}/packages/vite/package.json`] })) };
     expect(gradeViteFacts(valid, oracle)).toBe(true);
+    expect(gradeViteFacts({ ...valid, candidates: valid.candidates.map(item => ({ ...item, sources: item.sources.map(url => url.replace("https://github.com/vitejs/vite/blob/", "https://raw.githubusercontent.com/vitejs/vite/")) })) }, oracle)).toBe(true);
     expect(gradeViteFacts({}, oracle)).toBe(false);
     expect(gradeViteFacts({ ...valid, candidates: valid.candidates.slice(1) }, oracle)).toBe(false);
     expect(gradeViteFacts({ ...valid, highest_matching_candidate: "7.0.0" }, oracle)).toBe(false);
@@ -31,7 +32,8 @@ it("accepts browser snapshot evidence only from actual completed tool outputs", 
     { id: 1, type: "conversation.message", content: { id: "a", role: "assistant", parts: [{ type: "text", text: JSON.stringify(snapshot) }] } },
     { id: 2, type: "tool.started", content: snapshot },
     { id: 3, type: "tool.failed", output: snapshot },
-    { id: 4, type: "tool.finished", output: { pageSnapshot: snapshot } },
+    { id: 4, type: "tool.finished", content: {toolName: "navigate"}, output: { pageSnapshot: snapshot } },
+    { id: 5, type: "tool.finished", content: {toolName: "execute_program"}, output: { result: { pageSnapshot: snapshot } } },
   ] as any;
   expect(snapshotEvidence(events)).toEqual([{ eventId: 4, url: snapshot.url, observationId: "obs", itemCount: 1, partial: false, text: JSON.stringify(snapshot.items), tabId: null, at: NaN }]);
   expect(canonicalUrl("https://example.org/source/#section")).toBe("https://example.org/source");
@@ -58,6 +60,8 @@ it("requires relevant visible facts and honors newer navigation failures and lan
   expect(verifyBrowsing(required, docs, [{ ...snapshots[0], text: "unrelated" }]).complete).toBe(false);
   const blocked = verifyBrowsing(required, [...docs, { ...docs[0], status: 403, duringTask: true, at: "2026-11-12T00:00:02.000Z" }], snapshots);
   expect(blocked).toMatchObject({ complete: false, blocked: true });
+  expect(verifyBrowsing(required, [], [], [{ url: url + "?hl=en", status: 200, text: "execute 135" }])).toMatchObject({ complete: true, blocked: false });
+  expect(verifyBrowsing(required, [], [], [{ url: "https://example.org", status: 200, text: "execute 135" }]).complete).toBe(false);
 });
 
 import { nobelOracle, gradeNobel } from "../e2e/public-web/nobel-oracle";
@@ -71,4 +75,33 @@ it("rejects incomplete Nobel sources, missing co-laureates, duplicates and round
     expect(gradeNobel({ results: [{ ...result, awards: [bad] }] }, expected)).toBe(false);
   expect(gradeNobel({ results: [result, result] }, expected)).toBe(false);
   expect(gradeNobel({ results: [] }, expected)).toBe(false);
+});
+
+import { httpEvidence, settledReadJobs } from "../e2e/public-web/http-evidence";
+import { partitionArtifact } from "../src/artifact-graph";
+it("requires native response ownership and actual artifact delivery, including partitioned sources", async () => {
+  const url = "https://raw.githubusercontent.com/vitejs/vite/v5.4.0/packages/vite/package.json";
+  const body = "verified public facts " + "x".repeat(9000);
+  const base = { timestamp: "2026-11-12T00:00:00.000Z", conversationId: "c", runId: "r", toolCallId: "request" };
+  const { graph, parts } = partitionArtifact({ result: { url, status: 200, body } });
+  const artifact = { ...base, id: 100, type: "tool.result.data", content: {}, artifactGraph: graph, valueEncoding: 5 };
+  const request = { ...base, id: 101, type: "tool.finished", content: { toolName: "send_extension_request" }, input: { url }, output: { ok: true, $ref: 100 } };
+  const delivered = body.slice(0, 40);
+  const read = { ...base, id: 102, toolCallId: "read", type: "tool.finished", content: { toolName: "read_artifact" }, input: { artifactId: 100, path: ["result", "body"] }, output: { ok: true, result: delivered, partial: true, sourceAccess: { artifactId: 100, path: ["result", "body"] } } };
+  const events = [...parts.map((part, index) => ({ ...base, id: index + 1, type: "artifact.part", artifactPart: { ...part, key: graph.key, owner: "c" }, output: part.value })), artifact, request, read] as any;
+  expect(await httpEvidence(events)).toEqual([{ eventId: 101, url, status: 200, text: delivered }]);
+  expect(await httpEvidence(events.slice(0, -1))).toEqual([]);
+  expect(await httpEvidence(events.map((event: any) => event.id === 100 ? { ...event, toolCallId: "unrelated" } : event))).toEqual([]);
+  expect(await httpEvidence([{ ...request, content: { toolName: "execute_program" }, output: { ok: true, result: { url, status: 200, body } } }] as any)).toEqual([]);
+});
+
+it("accepts settled interrupted reads, rejects active jobs and refuses missing job ownership", () => {
+  const base = { timestamp: "2026-11-12T00:00:00.000Z", conversationId: "c", runId: "r", toolCallId: "call" };
+  const state = { ...base, id: 1, type: "browser.job.state", content: { jobId: "j", state: "running" } };
+  const tool = { ...base, id: 3, type: "tool.failed", content: { toolName: "read_text" }, output: { ok: false, jobId: "j" } };
+  expect(settledReadJobs([state, tool] as any)).toBe(false);
+  expect(settledReadJobs([state, { ...state, id: 2, content: { jobId: "j", state: "interrupted" } }, tool] as any)).toBe(true);
+  expect(settledReadJobs([tool] as any)).toBe(null);
+  expect(settledReadJobs([{ ...tool, type: "tool.finished", content: { toolName: "send_extension_request" }, output: { ok: true, result: {} } }] as any)).toBe(null);
+  expect(settledReadJobs([state, { ...state, id: 2, content: { jobId: "j", state: "succeeded" } }, { ...tool, toolCallId: "observer", content: { toolName: "get_job" } }] as any)).toBe(true);
 });
