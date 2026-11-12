@@ -8,6 +8,15 @@ export type ModelProfile = ModelConfig & { providerId: string; sdk: ModelSdk; pr
 export type PersistedModelConfig = { selectedProviderId: string; profiles: Record<string, ModelProfile>; systemPrompt?: string };
 export const EMPTY_MODEL_CONFIG: PersistedModelConfig = { selectedProviderId: "", profiles: {} };
 
+export class ModelConfigConflictError extends Error {
+  constructor() { super("配置已在其他页面更改。请复制当前草稿，然后重新加载页面。"); }
+}
+
+async function withModelConfigLock<T>(operation: () => Promise<T>): Promise<T> {
+  if (!globalThis.navigator?.locks) throw new Error("无法安全保存配置，请重新打开设置页。");
+  return navigator.locks.request("surf-wax:model-config", operation);
+}
+
 export type StorageAreaLike = Pick<chrome.storage.StorageArea, "get" | "set">;
 
 export function isCompleteModelConfig(config: ModelConfig | undefined): boolean {
@@ -32,6 +41,7 @@ export async function loadModelConfig(
     persistMigration?: boolean;
     signal?: AbortSignal;
     sleep?: (ms: number) => Promise<void>;
+    onBaseline?: (value: unknown) => void;
   } = {},
 ): Promise<PersistedModelConfig> {
   const signal = options.signal ?? new AbortController().signal;
@@ -41,6 +51,7 @@ export async function loadModelConfig(
   const stored = await storage.get(MODEL_CONFIG_STORAGE_KEY);
   signal.throwIfAborted();
   const value = stored[MODEL_CONFIG_STORAGE_KEY];
+  options.onBaseline?.(structuredClone(value));
   if (!value || typeof value !== "object") return fallback;
 
   const candidate = value as Record<string, unknown>;
@@ -118,12 +129,14 @@ export async function loadModelConfig(
         catalogRouteVersion: MODEL_ROUTING_VERSION,
       };
       if (options.persistMigration !== false) {
-        const current = await storage.get(MODEL_CONFIG_STORAGE_KEY);
-        signal.throwIfAborted();
-        if (JSON.stringify(current[MODEL_CONFIG_STORAGE_KEY]) !== JSON.stringify(value)) {
-          throw new DOMException("Model configuration changed during migration", "AbortError");
-        }
-        await storage.set({ [MODEL_CONFIG_STORAGE_KEY]: result });
+        await withModelConfigLock(async () => {
+          const current = await storage.get(MODEL_CONFIG_STORAGE_KEY);
+          signal.throwIfAborted();
+          if (JSON.stringify(current[MODEL_CONFIG_STORAGE_KEY]) !== JSON.stringify(value)) {
+            throw new DOMException("Model configuration changed during migration", "AbortError");
+          }
+          await storage.set({ [MODEL_CONFIG_STORAGE_KEY]: result });
+        });
         signal.throwIfAborted();
       }
     }
@@ -136,10 +149,11 @@ export async function loadModelConfig(
 export async function saveModelConfig(
   config: PersistedModelConfig,
   storage = getStorageArea(),
-): Promise<void> {
+  baseline?: { value: unknown },
+): Promise<unknown> {
   if (!storage) throw new Error("Chrome storage is unavailable");
 
-  await storage.set({
+  const data = {
     [MODEL_CONFIG_STORAGE_KEY]: {
       selectedProviderId: config.selectedProviderId,
       profiles: Object.fromEntries(Object.entries(config.profiles).map(([providerId, profile]) => [providerId, {
@@ -160,5 +174,13 @@ export async function saveModelConfig(
       }])),
       ...(config.systemPrompt?.trim() ? { systemPrompt: config.systemPrompt } : {}),
     } satisfies PersistedModelConfig,
+  };
+  await withModelConfigLock(async () => {
+    if (baseline) {
+      const current = await storage.get(MODEL_CONFIG_STORAGE_KEY);
+      if (JSON.stringify(current[MODEL_CONFIG_STORAGE_KEY]) !== JSON.stringify(baseline.value)) throw new ModelConfigConflictError();
+    }
+    await storage.set(data);
   });
+  return structuredClone(data[MODEL_CONFIG_STORAGE_KEY]);
 }

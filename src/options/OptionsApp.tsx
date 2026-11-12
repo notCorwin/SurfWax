@@ -18,6 +18,7 @@ import type { ModelProfile } from "../sidepanel/config";
 import {
   EMPTY_MODEL_CONFIG,
   loadModelConfig,
+  ModelConfigConflictError,
   saveModelConfig,
   selectedModelConfig,
 } from "../sidepanel/config";
@@ -43,6 +44,7 @@ export function OptionsApp() {
   const [errorFocus, setErrorFocus] = useState<string>();
   const [clearMessage, setClearMessage] = useState("");
   const [clearError, setClearError] = useState<unknown>();
+  const storageBaseline = useRef<unknown>(undefined);
   const savedConfig = useRef(JSON.stringify({ modelSettings: EMPTY_MODEL_CONFIG, providerInput: "" }));
   const dirty = ready && JSON.stringify({ modelSettings, providerInput }) !== savedConfig.current;
   const storedProfile = selectedModelConfig(modelSettings);
@@ -70,7 +72,7 @@ export function OptionsApp() {
     const catalog = loadModelCatalog({ refresh: true, onStale: () => { if (active) setCatalogStale(true); } });
     void Promise.all([
       // Always restore all settings for repair, even when migration cannot fetch a catalog.
-      loadModelConfig(undefined, undefined, { migrateCatalogRouting: false }),
+      loadModelConfig(undefined, undefined, { migrateCatalogRouting: false, onBaseline: (value) => { storageBaseline.current = value; } }),
       catalog.then(modelProviderPresets).catch((error) => { if (active) setCatalogError(error); return []; }),
     ]).then(([stored, catalogProviders]) => {
       if (!active) return;
@@ -194,13 +196,17 @@ export function OptionsApp() {
       const savedModelSettings = { ...modelSettings, profiles: { ...modelSettings.profiles,
         ...(config ? { [config.providerId]: config } : {}),
       } };
-      await saveModelConfig(savedModelSettings);
+      storageBaseline.current = await saveModelConfig(savedModelSettings, undefined, { value: storageBaseline.current });
       setModelSettings(savedModelSettings);
       savedConfig.current = JSON.stringify({ modelSettings: savedModelSettings, providerInput });
       setStatus("saved");
       setMessage("配置已保存，Side Panel 会立即使用新配置");
     } catch (error) {
-      fail("配置保存失败。", error);
+      if (error instanceof ModelConfigConflictError) {
+        setStatus("error");
+        setMessage(error.message);
+        setErrorDetail(undefined);
+      } else fail("配置保存失败。", error);
     }
   };
 
