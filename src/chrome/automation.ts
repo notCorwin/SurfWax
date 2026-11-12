@@ -226,7 +226,7 @@ class AutomationError extends Error {
 
 function automationError(code: string, detail: Record<string, unknown>): AutomationError {
   return new AutomationError(code, ["not-found", "strict-mode", "frame-not-found"].includes(code)
-    ? { ...detail, recovery: "Use list_frames and specify the target frame, or inspect_page/find_elements and use a unique observed element ID." } : detail);
+    ? { ...detail, recovery: detail.recovery ?? "Use list_frames and specify the target frame, or inspect_page/find_elements and use a unique observed element ID." } : detail);
 }
 
 /** Validate Chrome's metadata for the exact resolved node before any upload effect. */
@@ -4612,7 +4612,8 @@ export class AutomationRuntime {
       }
       guard();
       if (changed()) { await delay(0, signal); continue; }
-      if (region && !regionNode?.node?.backendNodeId) throw automationError("not-found", { locator: region });
+      if (region && !regionNode?.node?.backendNodeId) throw automationError("not-found", { locator: region,
+        ...(!regionObject && region.queries.some(query => query.kind === "frame" || query.kind === "frameRef") ? { reason: "frame-region-no-match", recovery: 'The region selector runs inside the selected frame. To inspect the whole frame, use inspect_page with region:{by:"css",value:"html",frame:{ref:"<frameRef>"}} using the selected frame ref.' } : {}) });
       const depthOf = (frameId: string) => { let depth = 0; let current = session.frameParents.get(frameId); while (current) { depth += 1; current = session.frameParents.get(current); } return depth; };
       const childFrames = [...session.frames]
         .filter(([, debuggee]) => debuggee.sessionId)

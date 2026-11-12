@@ -607,3 +607,9 @@ Excalidraw 的编辑、文件导出与恢复尚未完成准入，其初步 oracl
 来源：`e2e/stateful-web/`、`e2e/stateful-web-evaluation.spec.ts`、`e2e/stateful-cleanup.spec.ts`，以及本地准入与模型运行报告。
 
 有状态购物车评估在阶段首次观察后先保存原始事件、截止判定与模型请求；后续补读另存并标明生命周期判断所用文件。租约与核验错误独立记录，不改写首次截止判定，也不放宽清理证明。
+
+### Frame 区域恢复与动作回执
+
+已明确选定 frame 后，区域选择器在该 frame 内执行；若选择器无匹配，检查工具提示使用同一 frame 的 `html` 区域，而不切回主文档。失效 frame 和导航变化仍按原守卫报错。点击的 `performed` 表示浏览器输入已执行，异步业务状态仍须通过后续观察或 `verify_state` 确认；此说明不增加等待或重试。工具目录语义变更时递增版本。
+
+来源：`src/chrome/automation.ts`、`src/chrome/tool.ts`、`src/chrome/atomic-tools.ts`。

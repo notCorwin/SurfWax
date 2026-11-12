@@ -72,7 +72,7 @@ const verificationConditions = ["textIncludes", "textEquals", "valueEquals", "st
 
 /** Only capabilities supported by the existing program host are registered here. */
 export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.freeze([
-  targetAction("click", "Click exactly one matching element. Fails immediately if it is missing, blocked or otherwise not actionable. Defaults to a 5 second execution timeout.", "click"),
+  targetAction("click", "Click exactly one matching element. performed means browser input was executed, not that asynchronous application state has completed; confirm the business result with a new observation or verify_state. Fails immediately if it is missing, blocked or otherwise not actionable. Defaults to a 5 second execution timeout.", "click"),
   targetAction("double_click", "Double-click exactly one matching element. Fails immediately if it is missing, blocked or otherwise not actionable. Defaults to a 5 second execution timeout.", "dblclick"),
   targetAction("hover", "Move the pointer over exactly one matching element.", "hover"),
   targetAction("focus_element", "Focus exactly one matching element. Fails immediately if the target or frame is missing; use verify_state to wait explicitly.", "focus"),

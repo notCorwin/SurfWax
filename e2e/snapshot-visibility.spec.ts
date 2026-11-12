@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, closeServer, type MockResponse } from "./fixtures";
 import { itemLine } from "./snapshot-format";
 import { manifestFixture } from "./evaluation/manifest-fixture";
@@ -838,4 +839,50 @@ test("native values retain exact UTF-8 through fill, focus, blur and replacement
     }
     await test.info().attach("native-value-chain",{contentType:"application/json",body:Buffer.from(JSON.stringify({axBefore,events,wires:[...wires]},null,2))});
   } finally { await dispose(opened.context,opened.userDataDirectory,provider.server); }
+});
+
+test("frame region recovery stays within the selected document", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => {
+      document.body.innerHTML = `<p>Root marker</p><iframe id="child" srcdoc="<p>Child marker</p>"></iframe><button id="navigate">Navigate</button>`;
+      document.querySelector<HTMLButtonElement>("#navigate")!.onclick = () => { document.querySelector<HTMLIFrameElement>("#child")!.srcdoc = "<p>New child</p>"; };
+    });
+    await target.frameLocator("#child").getByText("Child marker").waitFor();
+    let frameRef = "";
+    const region = (value: string, ref = frameRef) => ({ by: "css", value, frame: { ref } });
+    responses.push(
+      commandResponse("list_frames", {}, "scope-frames"),
+      (request) => { const frames = lastTool(request).frames; frameRef = frames.find((frame: any) => frame.parentFrameRef)?.frameRef; return commandResponse("inspect_page", { region: region("iframe"), timeoutMs: 3000 }, "scope-missing"); },
+      () => commandResponse("inspect_page", { region: region("html"), full: true }, "scope-html"),
+      commandResponse("inspect_page", { region: { by: "css", value: "#missing" }, timeoutMs: 3000 }, "scope-root"),
+      () => commandResponse("inspect_page", { region: region("iframe", "invalid-frame"), timeoutMs: 3000 }, "scope-invalid"),
+      commandResponse("click", { target: { by: "css", value: "#navigate" } }, "scope-navigate"),
+      () => commandResponse("inspect_page", { region: region("iframe"), timeoutMs: 3000 }, "scope-stale"),
+      textResponse("FRAME_SCOPE_OK"), textResponse("frame scope"),
+    );
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Inspect the selected frame and recover");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FRAME_SCOPE_OK", { timeout: 45_000 });
+    const events = await readEvents(opened.page);
+    const event = (id: string) => events.find((entry) => ["tool.finished", "tool.failed"].includes(entry.type) && entry.toolCallId === id);
+    const missing = event("scope-missing")!;
+    if (process.env.SURFWAX_FRAME_SCOPE_RECEIPT) await writeFile(process.env.SURFWAX_FRAME_SCOPE_RECEIPT, JSON.stringify(Object.fromEntries(["scope-missing", "scope-html", "scope-root", "scope-invalid", "scope-navigate", "scope-stale"].map(id => [id, event(id)])), null, 2));
+    expect(missing.output.error).toMatchObject({ code: "not-found", retryable: false });
+    expect(missing.output.error.recovery).toContain("selector runs inside the selected frame");
+    expect(missing.output.error.recovery).toContain('value:"html"');
+    expect(missing.latencyMs).toBeLessThan(3000);
+    expect(JSON.stringify(event("scope-html")!.output.items)).toContain("Child marker");
+    expect(JSON.stringify(event("scope-html")!.output.items)).not.toContain("Root marker");
+    expect(event("scope-root")!.output.error.code).toBe("not-found");
+    expect(event("scope-root")!.output.error.recovery).toContain("list_frames");
+    expect(event("scope-invalid")!.output.error.code).toBe("stale-frame");
+    expect(event("scope-stale")!.output.error.code).toBe("stale-frame");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
