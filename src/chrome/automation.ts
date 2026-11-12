@@ -168,7 +168,7 @@ type Session = {
   lastSnapshot?: SnapshotLine[];
   snapshotStyleProfile?: { generation: number; computedStyles: readonly string[] };
   rootDocumentRevision: number;
-  observationPrimitives?: RootReadScope & { ready: Promise<void> };
+  observationPrimitives?: RootReadScope & { ready: Promise<void>; pending: boolean; abandon?: () => void };
   observationReceipt?: { identity: string; scope: RootReadScope; matches: Set<ObservationContext> };
   observationContexts: Map<number, ObservationContext>;
   nativeControlCandidates?: NativeControlCandidates & { frameId: string; loaderId?: string };
@@ -815,6 +815,7 @@ export class AutomationRuntime {
       // An unknown context cannot be proved to belong to an unrelated child.
       if (!destroyed || destroyed.frameId === session.rootFrameId) {
         session.rootDocumentRevision++;
+        session.observationPrimitives?.abandon?.();
         delete session.observationPrimitives;
       }
       if (destroyed) session.observationContexts.delete(destroyed.id);
@@ -4310,9 +4311,21 @@ export class AutomationRuntime {
   /** Install pure helpers once per root document, independent of child frames. */
   private prepareObservationPrimitives(session: Session): Promise<void> {
     const scope = this.rootReadScope(session), previous = session.observationPrimitives;
-    if (previous && previous.frameId === scope.frameId && previous.loaderId === scope.loaderId && previous.revision === scope.revision)
+    if (previous && previous.frameId === scope.frameId && previous.loaderId === scope.loaderId && previous.revision === scope.revision
+      && (!previous.pending || !previous.signal?.aborted))
       return previous.ready;
+    previous?.abandon?.();
     const receipt = { identity: crypto.randomUUID(), scope, matches: new Set<ObservationContext>() };
+    const removeAbortListeners = () => {
+      scope.signal?.removeEventListener("abort", abandon);
+      session.lifetime.signal.removeEventListener("abort", abandon);
+    };
+    const abandon = () => {
+      if (!cached.pending) return;
+      removeAbortListeners();
+      if (session.observationPrimitives === cached) delete session.observationPrimitives;
+      if (session.observationReceipt === receipt) delete session.observationReceipt;
+    };
     session.observationReceipt = receipt;
     const ready = Promise.resolve().then(() => {
       this.assertRootReadScope(session, scope);
@@ -4321,6 +4334,9 @@ export class AutomationRuntime {
         func: snapshotObservationPrimitives as (install: true, observationReceipt: string) => 2, args: [true, receipt.identity],
       });
     }).then(async (results) => {
+      this.assertRootReadScope(session, scope);
+      if (session.observationPrimitives !== cached || session.observationReceipt !== receipt)
+        throw automationError("stale-observation", { reason: "observation-context-changed-during-read" });
       if (results.length !== 1 || results[0]?.frameId !== 0 || results[0].result !== 2)
         throw automationError("snapshot-unavailable", { reason: "observation-primitives-unavailable" });
       // Only the trusted ISOLATED injection receives the fresh challenge.
@@ -4333,12 +4349,24 @@ export class AutomationRuntime {
       if (session.observationReceipt !== receipt) throw automationError("stale-observation", { reason: "observation-context-changed-during-read" });
       if (matches.length !== 1) throw automationError("snapshot-unavailable", { reason: "observation-context-identity-unavailable" });
       cached.context = matches[0];
+      cached.pending = false;
     }).finally(() => {
+      // Abort only abandons unfinished work. A completed, document-valid
+      // helper survives the successful caller's deadline-controller cleanup.
+      abandon();
+      removeAbortListeners();
+      delete cached.abandon;
+      delete cached.signal;
       if (session.observationReceipt === receipt) delete session.observationReceipt;
     });
-    const cached: RootReadScope & { ready: Promise<void> } = { frameId: scope.frameId, loaderId: scope.loaderId, revision: scope.revision, ready };
+    const cached: NonNullable<Session["observationPrimitives"]> = { frameId: scope.frameId, loaderId: scope.loaderId,
+      revision: scope.revision, signal: scope.signal, ready, pending: true, abandon };
     session.observationPrimitives = cached;
-    void ready.catch(() => { if (session.observationPrimitives === cached) delete session.observationPrimitives; });
+    scope.signal?.addEventListener("abort", abandon, { once: true });
+    session.lifetime.signal.addEventListener("abort", abandon, { once: true });
+    if (scope.signal?.aborted || session.lifetime.signal.aborted) abandon();
+    // A cancelled capture may have returned before this native work settles.
+    void ready.catch(() => undefined);
     return ready;
   }
 

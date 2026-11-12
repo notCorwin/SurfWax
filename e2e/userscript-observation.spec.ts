@@ -175,3 +175,99 @@ test("observation receipts do not execute user-script getters or proxies", async
     }
   }
 });
+
+test("cancelled observation initialization cannot hold the next same-document inspect", async () => {
+  test.setTimeout(45_000);
+  const provider = await startProvider([]);
+  const opened = await openExtension(undefined, { viewport: null });
+  try {
+    await expect(opened.page.getByTestId("open-settings")).toBeVisible();
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const before = await target.evaluate(() => ({ url: location.href, timeOrigin: performance.timeOrigin }));
+    const protocol = await opened.context.newCDPSession(target);
+    const { targetInfo } = await protocol.send("Target.getTargetInfo");
+    const tabId = await opened.page.evaluate(async targetId => (await chrome.debugger.getTargets()).find(target => target.id === targetId)!.tabId!, targetInfo.targetId);
+    await protocol.detach();
+    const result = await opened.page.evaluate(async ({ dev, tabId }) => {
+      const [{ ChromeExecutor }, { EventLogger }, { createMemoryEventStore }, { claimConversationRun }] = await Promise.all([
+        import(`${dev}/src/chrome/executor.ts`), import(`${dev}/src/logging.ts`),
+        import(`${dev}/src/memory-event-store.ts`), import(`${dev}/src/agent/coordinator.ts`),
+      ]);
+      const events: any[] = [], stages: any[] = [];
+      const logger = new EventLogger({ store: createMemoryEventStore(events) });
+      const conversationId = crypto.randomUUID();
+      const lease = await claimConversationRun(conversationId);
+      logger.beginRun(conversationId, lease.runId);
+      let releaseOld!: () => void, reachedOld!: () => void, completedOld!: () => void;
+      const oldGate = new Promise<void>(resolve => { releaseOld = resolve; });
+      const oldReached = new Promise<void>(resolve => { reachedOld = resolve; });
+      const oldCompleted = new Promise<void>(resolve => { completedOld = resolve; });
+      const native = chrome.scripting.executeScript.bind(chrome.scripting);
+      let initializations = 0, oldReleased = false;
+      // Hold a real external Chrome API invocation, not a private runtime
+      // method or fabricated protocol result. Its native dispatch arrives late.
+      const executeScript = async (definition: any) => {
+        const initialization = definition.target?.tabId === tabId && definition.world === "ISOLATED"
+          && definition.args?.[0] === true && typeof definition.args?.[1] === "string";
+        if (!initialization || ++initializations !== 1) return native(definition);
+        reachedOld();
+        await oldGate;
+        try { return await native(definition); }
+        finally { completedOld(); }
+      };
+      const chromeApi = Object.create(chrome, { scripting: {
+        value: Object.create(chrome.scripting, { executeScript: { value: executeScript } }),
+      } });
+      const executor = new ChromeExecutor({ chromeApi, logger });
+      const bounded = async <T,>(task: Promise<T>, label: string, milliseconds = 5000): Promise<T> => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try { return await Promise.race([task, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(label)), milliseconds); })]); }
+        finally { clearTimeout(timer); }
+      };
+      const context = (id: string) => ({ conversationId, toolCallId: id, logIdentity: logger.toolIdentity(conversationId, id), runSignal: lease.signal });
+      let failure: string | undefined;
+      try {
+        await executor.beginRun();
+        const firstController = new AbortController();
+        const first = executor.inspect({ tabId, full: true, region: { by: "css", value: "main" }, timeoutMs: 10000 }, firstController.signal, context("cancelled-inspect"))
+          .then((value: unknown) => ({ ok: true, value }), (error: any) => ({ ok: false, name: error.name, effectUnknown: error.effectUnknown, message: error.message }));
+        await bounded(oldReached, "First inspect never reached native initialization");
+        const cancelledAt = performance.now();
+        firstController.abort(new DOMException("Cancelled observation initialization", "AbortError"));
+        const cancelled: any = await bounded(first, "Cancelled inspect did not return while native initialization was held", 2000);
+        if (cancelled.ok || cancelled.effectUnknown !== false) throw new Error(`Unexpected cancellation: ${JSON.stringify(cancelled)}`);
+        stages.push({ stage: "cancelled inspect returns before native completion", elapsedMs: performance.now() - cancelledAt, cancelled, initializations, oldReleased });
+        const secondController = new AbortController();
+        const fresh = await bounded(executor.inspect({ tabId, full: true, region: { by: "css", value: "main" }, timeoutMs: 4000 }, secondController.signal, context("fresh-inspect")),
+          "Fresh same-document inspect inherited the abandoned initialization");
+        if (initializations !== 2 || oldReleased || !JSON.stringify(fresh).includes("ready"))
+          throw new Error(`Fresh inspect did not independently finish: ${JSON.stringify({ initializations, oldReleased, fresh })}`);
+        stages.push({ stage: "fresh same-document inspect completes while the old native call remains held", initializations, oldReleased, fresh });
+        secondController.abort(new DOMException("Successful caller finished", "AbortError"));
+        oldReleased = true; releaseOld();
+        await bounded(oldCompleted, "Late native initialization did not finish", 2000);
+        // One task boundary drains the late promise continuations/finally
+        // handlers before checking that they did not discard the new cache.
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const retained = await bounded(executor.inspect({ tabId, full: true, region: { by: "css", value: "main" }, timeoutMs: 4000 }, undefined, context("retained-inspect")),
+          "Late completion poisoned the new observation identity");
+        if (initializations !== 2 || !JSON.stringify(retained).includes("ready"))
+          throw new Error(`Completed helper cache was discarded: ${JSON.stringify({ initializations, retained })}`);
+        stages.push({ stage: "late old native completion and successful owner abort preserve the completed cache", initializations, retained });
+      } catch (error) { failure = String(error); }
+      finally {
+        oldReleased = true; releaseOld();
+        await bounded(oldCompleted, "Late cleanup boundary", 1000).catch(() => undefined);
+        try { await executor.endRun(); }
+        finally { executor.dispose(); lease.finish(); await logger.flush(); logger.dispose(); }
+      }
+      return { failure, stages, initializations, oldReleased, events };
+    }, { dev: process.env.SURFWAX_DEV_SERVER_URL!, tabId });
+    await test.info().attach("observation-initialization-cancellation", { body: JSON.stringify(result), contentType: "application/json" });
+    expect(result.failure).toBeUndefined();
+    expect(result.stages).toHaveLength(3);
+    expect(await target.evaluate(() => ({ url: location.href, timeOrigin: performance.timeOrigin }))).toEqual(before);
+    await expect(target.locator("main")).toHaveText("ready");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
