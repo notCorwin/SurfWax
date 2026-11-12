@@ -1,3 +1,4 @@
+import { fromLogValue } from "../src/logging";
 import { gunzipSync } from "node:zlib";
 import bundledCatalog from "../src/data/models-dev-api";
 import {
@@ -62,7 +63,12 @@ test("automatically summarizes after a completed turn and preserves the full can
     );
     await expect(opened.page.getByTestId("context-choice")).toHaveCount(0);
     await expect(composer).toBeEnabled();
+    await expect.poll(() => opened.page.evaluate(async () => (await chrome.runtime.sendMessage({ type: "surf-wax:run-status" })).identity)).toBeUndefined();
     const events = await readEvents(opened.page);
+    const completedRun = [...events].reverse().find(event => event.type === "conversation.submitted")!.runId;
+    const cleanup = events.filter(event => event.runId === completedRun && event.type === "run.cleanup.finished");
+    expect(cleanup).toHaveLength(1);
+    expect(fromLogValue(cleanup[0].output, cleanup[0].valueEncoding)).toEqual({ ok: true });
     const checkpoint = events.find(
       (event) => event.type === "context.compacted",
     );
