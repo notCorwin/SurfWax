@@ -1,3 +1,4 @@
+import { fromLogValue } from '../../src/logging';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -11,6 +12,7 @@ import { deadlineEvidence } from '../evaluation/deadline-evidence';
 import { toolLifecycleEvidence } from '../evaluation/tool-lifecycle';
 import { browserJobsSettled } from '../evaluation/job-evidence';
 import { sanitizeCart, verifyCart, sameCart, type Item } from './oracle';
+import { providerFailure, missingStock } from './diagnosis';
 import { cleanupCart, trackCartWrites, backgroundCleanupSucceeded, type StopProof } from './cleanup';
 
 type Opened = Awaited<ReturnType<typeof openExtension>>;
@@ -103,7 +105,7 @@ export async function runCart(timeout: number): Promise<string> {
   let writes: ReturnType<typeof trackCartWrites> | undefined;
   let touched = false, agentStarted = false, harnessWritesSettled = true, phase = 'setup';
   let scope: Scope | undefined;
-  const evaluationFiles = ['e2e/stateful-web/run.ts', 'e2e/stateful-web/cleanup.ts', 'e2e/stateful-web/oracle.ts', 'e2e/fixtures.ts', 'e2e/evaluation/job-evidence.ts'];
+  const evaluationFiles = ['e2e/stateful-web/run.ts', 'e2e/stateful-web/cleanup.ts', 'e2e/stateful-web/oracle.ts', 'e2e/stateful-web/diagnosis.ts', 'e2e/fixtures.ts', 'e2e/evaluation/job-evidence.ts'];
   report.gitHead = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   report.gitDirty = !!execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim();
   report.evaluationSource = await Promise.all(evaluationFiles.map(path => fileFingerprint(resolve(path))));
@@ -194,11 +196,18 @@ export async function runCart(timeout: number): Promise<string> {
       const valid = verifyCart(actual, wanted, initial.currency, limit);
       const page = await finalCartPage(opened!, selected, wanted);
       const priceChanged = actual.items.some(item => selected.some(product => product.variantId === item.variantId && product.price !== (item.originalPrice ?? item.price)));
-      const outcome = terminal.state === 'pending' || terminal.state === 'late' ? 'timed_out'
-        : priceChanged ? 'blocked' : terminal.state !== 'on_time' || terminal.terminal !== 'conversation.finished' ? 'blocked'
-          : valid && lifecycle.complete === true && jobs === true && cleanupSucceeded && page.verified ? 'passed' : 'failed';
+      const requests = structuredClone(proxy!.requests.slice(requestOffset));
+      const provider = providerFailure(requests);
+      const stock = !valid && terminal.state === 'on_time' ? await missingStock(ctx.request, wanted, actual, selected) : [];
+      const soldOut = stock.some(item => item.available === false);
+      const finished = events.filter(event => event.type === 'conversation.finished').at(-1);
+      const goal = finished ? (fromLogValue(finished.content, finished.valueEncoding) as any)?.goal : undefined;
+      const outcome = (terminal.state === 'pending' || terminal.state === 'late') && provider.unavailable ? 'blocked'
+        : terminal.state === 'pending' || terminal.state === 'late' ? 'timed_out'
+        : priceChanged || soldOut ? 'blocked' : terminal.state !== 'on_time' || terminal.terminal !== 'conversation.finished' ? 'blocked'
+          : goal?.status === 'completed' && valid && lifecycle.complete === true && jobs === true && cleanupSucceeded && page.verified ? 'passed' : 'failed';
       const result = { scope, prompt, startedAt: new Date(start).toISOString(), elapsedMs: Date.now() - start, terminal, lifecycle, jobs, cleanupSucceeded, actual,
-        actualHash: hash(actual), valid, page, priceChanged, outcome, usage: usageEvidence(events), modelRequests: structuredClone(proxy!.requests.slice(requestOffset)) };
+        actualHash: hash(actual), valid, page, priceChanged, stock, provider, goalStatus: goal?.status, outcome, usage: usageEvidence(events), modelRequests: requests };
       report.phases.push(result);
       return result;
     };

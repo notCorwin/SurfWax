@@ -22,7 +22,18 @@ export function trackCartWrites(context: BrowserContext, origin: string) {
   };
   const finish = async (request: Request) => {
     if (!active.has(request)) return;
-    try { if (!(await request.response())?.ok()) unknown = true; }
+    try {
+      const response = await request.response();
+      let successfulRedirect = false;
+      if (response && [301, 302, 303, 307, 308].includes(response.status())) {
+        const location = response.headers()['location'];
+        if (location) {
+          const target = new URL(location, request.url());
+          successfulRedirect = target.origin === origin && /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?cart\/?$/i.test(target.pathname);
+        }
+      }
+      if (!response?.ok() && !successfulRedirect) unknown = true;
+    }
     catch { unknown = true; }
     finally { active.delete(request); wake(); }
   };

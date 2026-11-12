@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { chromium, type Browser } from '@playwright/test';
+import { chromium, request as apiRequest, type Browser } from '@playwright/test';
 import { test, expect, closeServer } from './fixtures';
 import { systemChromePath } from '../scripts/development-extension.mjs';
 import { cleanupCart, trackCartWrites, type StopProof } from './stateful-web/cleanup';
@@ -45,6 +45,7 @@ test('cart cleanup refuses unacknowledged stops and unknown effects but permits 
   let cleared = 0;
   const server = createServer((request, response) => {
     response.setHeader('content-type', 'application/json');
+    if (request.url === '/cart' && request.method === 'POST') { response.writeHead(303, { location: '/cart' }); response.end(); return; }
     if (request.url === '/cart/update.js') { request.socket.destroy(); return; }
     if (request.url === '/cart/clear.js') { cleared++; response.end('{}'); }
     else response.end('{"items":[],"item_count":0,"items_subtotal_price":0}');
@@ -63,8 +64,35 @@ test('cart cleanup refuses unacknowledged stops and unknown effects but permits 
     expect(cleared).toBe(1);
     const page = await context.newPage();
     await page.goto(origin);
-    await page.evaluate(() => fetch('/cart/update.js', { method: 'POST' }).catch(() => null));
+    await page.evaluate(() => fetch('/cart', { method: 'POST' }).then(response => response.json()));
+    expect(await cleanupCart(context, origin, proof, writes)).toMatchObject({ status: 'verified_empty', writes: { unknown: false } });
+    expect(cleared).toBe(2);
+    const again = await context.newPage();
+    await again.goto(origin);
+    await again.evaluate(() => fetch('/cart/update.js', { method: 'POST' }).catch(() => null));
     expect(await cleanupCart(context, origin, proof, writes)).toMatchObject({ status: 'unverified', writes: { unknown: true } });
-    expect(cleared).toBe(1);
+    expect(cleared).toBe(2);
   } finally { writes.dispose(); await browser.close(); await closeServer(server); }
+});
+
+import { missingStock } from './stateful-web/diagnosis';
+test('stock drift requires an independent response and rechecks only missing variants', async () => {
+  const paths: string[] = [];
+  const server = createServer((request, response) => {
+    paths.push(request.url!);
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/products/unknown.js') { response.writeHead(503); response.end('{"available":false}'); }
+    else response.end('{"variants":[{"id":"missing","available":false}]}');
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const request = await apiRequest.newContext();
+  const wanted = [{ variantId: 'present', quantity: 1, price: 100 }, { variantId: 'missing', quantity: 1, price: 100 }];
+  const actual = { currency: 'GBP', subtotal: 100, items: wanted.slice(0, 1) };
+  try {
+    const products = wanted.map(item => ({ variantId: item.variantId, url: origin + '/products/' + item.variantId }));
+    expect(await missingStock(request, wanted, actual, products)).toEqual([{ variantId: 'missing', status: 200, available: false }]);
+    expect(paths).toEqual(['/products/missing.js']);
+    expect(await missingStock(request, wanted, actual, [{ ...products[1], url: origin + '/products/unknown' }])).toEqual([{ variantId: 'missing', status: 503, available: null }]);
+  } finally { await request.dispose(); await closeServer(server); }
 });

@@ -26,3 +26,12 @@ it('requires a durable successful cleanup for this run and rejects background er
   expect(backgroundCleanupSucceeded([] as any, 'run')).toBe(false);
   expect(backgroundCleanupSucceeded([success, { ...success, id: 2, type: 'run.cleanup.failed', content: { effectUnknown: true } }] as any, 'run')).toBe(false);
 });
+
+import { providerFailure } from '../e2e/stateful-web/diagnosis';
+it('distinguishes sustained provider failure from a recovered or single transient response', () => {
+  const requests = (statuses: (number | null)[]) => statuses.map(responseStatus => ({ responseStatus }));
+  expect(providerFailure(requests([200, 408, 500, 500, null])).unavailable).toBe(true);
+  expect(providerFailure(requests([500, 500, 200, null])).unavailable).toBe(false);
+  expect(providerFailure(requests([200, 500])).unavailable).toBe(false);
+  expect(providerFailure(requests([401])).unavailable).toBe(true);
+});
