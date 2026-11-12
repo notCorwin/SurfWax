@@ -71,7 +71,7 @@ test("observation receipts do not execute user-script getters or proxies", async
       records.push({ name, input: args, elapsedMs: Date.now() - started, output: result });
       expect(result?.ok ?? !result?.error).toBe(success);
       await writeFile(`${directory}/progress.json`, JSON.stringify({ started, records, assertions, contexts, consoleEvents }, null, 2));
-      return result?.ok === undefined ? { ok: !result?.error, result: result?.result ?? result } : result;
+      return result?.ok === undefined ? { ...result, ok: !result?.error, result: result?.result ?? result } : result;
     }
     const url = `${provider.origin}/target`;
     await opened.page.getByTestId("composer-input").fill("Run the supplied browser checks and wait for each independent verification.");
@@ -120,12 +120,42 @@ test("observation receipts do not execute user-script getters or proxies", async
     assertions.push({ stage: "f90 exact expression executes candidate getters and proxy traps", sourceSHA256: createHash("sha256").update(legacySource).digest("hex"), expression, contexts: candidates, actual: unsafe });
     await call("reload");
     await assertSafeObservation("new document resets counters and safely re-identifies the observation world");
-    const publicEvents = await call("wait_event", { subscriptionId: consoleSubscription.result.subscriptionId, after: consoleSubscription.result.cursor, waitMs: 0 }, true);
-    expect(JSON.stringify(publicEvents.result)).toContain("forged-page-log");
+    const publicPackets: any[] = [], deliveredEvents: any[] = [];
+    let sourceCursor = consoleSubscription.result.cursor;
+    while (true) {
+      const packet = await call("wait_event", { subscriptionId: consoleSubscription.result.subscriptionId, after: sourceCursor, waitMs: 0 }, true);
+      publicPackets.push(packet);
+      const envelope = packet.result;
+      let access = packet.access ?? envelope?.access;
+      if (access) {
+        let offset = access.offset ?? 0;
+        while (access) {
+          const page = await call("read_artifact", access, true);
+          expect(Array.isArray(page.result)).toBe(true);
+          expect(page.range.start).toBe(offset);
+          offset += page.result.length;
+          expect(page.range.endExclusive).toBe(offset);
+          deliveredEvents.push(...page.result);
+          expect(typeof page.hasMore).toBe("boolean");
+          if (!page.hasMore) break;
+          expect(page.nextAccess).toBeTruthy();
+          access = page.nextAccess;
+        }
+      } else {
+        expect(Array.isArray(envelope?.events)).toBe(true);
+        deliveredEvents.push(...envelope.events);
+      }
+      const hasMore = envelope?.hasMore ?? packet.hasMore, nextCursor = envelope?.nextCursor ?? packet.nextCursor;
+      expect(typeof hasMore).toBe("boolean");
+      if (!hasMore) break;
+      expect(nextCursor).toBeGreaterThan(sourceCursor);
+      sourceCursor = nextCursor;
+    }
+    expect(JSON.stringify(deliveredEvents)).toContain("forged-page-log");
     const nativeReceipts = consoleEvents.filter(event => event.type === "debug" && event.args?.[0]?.value === "surf-wax.observation-world.v1"
       && typeof event.args?.[1]?.value === "string" && event.args[1].value !== "forged-page-log");
     expect(nativeReceipts.length).toBeGreaterThan(0);
-    for (const receipt of nativeReceipts) expect(JSON.stringify(publicEvents.result)).not.toContain(receipt.args[1].value);
+    for (const receipt of nativeReceipts) expect(JSON.stringify({ publicPackets, deliveredEvents })).not.toContain(receipt.args[1].value);
     assertions.push({ stage: "only active matching internal receipts consumed; forged prefix stays visible", nativeReceipts: nativeReceipts.length });
     await call("unsubscribe_event", { subscriptionId: consoleSubscription.result.subscriptionId }, true);
     await protocol.detach();
