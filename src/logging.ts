@@ -869,9 +869,11 @@ export class ConversationListProjection {
   private conversations = new Map<string, ConversationSummary>();
   private deleted = new Set<string>();
   private manuallyTitled = new Set<string>();
+  // Presence distinguishes a legacy submission without an ID from no submission.
+  private submittedRuns = new Map<string, string | undefined>();
 
   reset(events: readonly LogEvent[]): ConversationSummary[] {
-    this.conversations.clear(); this.deleted.clear(); this.manuallyTitled.clear();
+    this.conversations.clear(); this.deleted.clear(); this.manuallyTitled.clear(); this.submittedRuns.clear();
     for (const event of events) this.apply(event);
     return this.snapshot();
   }
@@ -880,6 +882,7 @@ export class ConversationListProjection {
     if (!event.conversationId) return false;
     if (event.type === "conversation.created") {
       this.manuallyTitled.delete(event.conversationId);
+      this.submittedRuns.delete(event.conversationId);
       const content = fromLogValue(event.content, event.valueEncoding) as { title?: unknown };
       this.conversations.set(event.conversationId, { id: event.conversationId,
         title: typeof content?.title === "string" && content.title.trim() ? content.title : "新对话",
@@ -900,9 +903,16 @@ export class ConversationListProjection {
       }
     }
     if (event.type !== "conversation.selected") conversation.lastMessageAt = event.timestamp;
-    if (event.type === "conversation.submitted") conversation.runStatus = "running";
-    if (event.type === "conversation.finished") conversation.runStatus = "idle";
-    if (event.type === "conversation.aborted" || event.type === "conversation.failed") conversation.runStatus = "interrupted";
+    if (event.type === "conversation.submitted") {
+      this.submittedRuns.set(event.conversationId, event.runId);
+      conversation.runStatus = "running";
+    }
+    // Without a submission, retain historical terminal-only behavior. Once a
+    // submission exists, unknown identities match only other unknown identities.
+    const current = !this.submittedRuns.has(event.conversationId)
+      || this.submittedRuns.get(event.conversationId) === event.runId;
+    if (current && event.type === "conversation.finished") conversation.runStatus = "idle";
+    if (current && (event.type === "conversation.aborted" || event.type === "conversation.failed")) conversation.runStatus = "interrupted";
     return true;
   }
 

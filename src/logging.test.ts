@@ -101,6 +101,61 @@ describe("canonical event log", () => {
       "unavailable",
     );
   });
+  it("keeps a newer run active when recovery finishes an older run", async () => {
+    const memory = createMemoryEventStore();
+    let block = false;
+    let reached!: () => void;
+    let release!: () => void;
+    const atBarrier = new Promise<void>(resolve => { reached = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const store = { ...memory, async all() {
+      if (block) { block = false; reached(); await gate; }
+      return memory.all();
+    } };
+    const owner = new EventLogger({ store });
+    const recovery = new EventLogger({ store });
+    await owner.append({ type: "conversation.created", conversationId: "c" });
+    await owner.append({ type: "conversation.submitted", conversationId: "c", runId: "old" });
+    await owner.append({ type: "tool.started", conversationId: "c", runId: "old", toolCallId: "tool" });
+    const recovering = recovery.recoverDanglingRuns(async () => { block = true; return []; });
+    await atBarrier;
+    await owner.append({ type: "conversation.submitted", conversationId: "c", runId: "new" });
+    release();
+    await recovering;
+    const events = await owner.summaryEvents("c");
+    expect(events.some(event => event.type === "conversation.aborted" && event.runId === "old")).toBe(true);
+    expect((await memory.all()).some(event => event.type === "tool.failed" && event.runId === "old")).toBe(true);
+    const projection = new ConversationListProjection();
+    for (const event of events) projection.apply(event);
+    expect(projection.snapshot()[0]?.runStatus).toBe("running");
+    expect(projection.reset(events)[0]?.runStatus).toBe("running");
+    await owner.append({ type: "conversation.finished", conversationId: "c", runId: "new" });
+    expect(projection.reset(await owner.summaryEvents("c"))[0]?.runStatus).toBe("idle");
+  });
+
+  it("handles legacy unknown run identities and creation resets consistently", async () => {
+    const logger = new EventLogger({ store: createMemoryEventStore() });
+    const emit = (type: string, runId?: string) => logger.append({ type, conversationId: "c", runId });
+    const projection = new ConversationListProjection();
+    const check = async (status: string) => {
+      const events = await logger.summaryEvents("c");
+      const incremental = new ConversationListProjection();
+      for (const event of events) incremental.apply(event);
+      expect(incremental.snapshot()[0]?.runStatus).toBe(status);
+      expect(projection.reset(events)[0]?.runStatus).toBe(status);
+    };
+    await emit("conversation.created");
+    await emit("conversation.failed", "orphan"); await check("interrupted");
+    await emit("conversation.submitted");
+    await emit("conversation.finished", "unrelated"); await check("running");
+    await emit("conversation.finished"); await check("idle");
+    await emit("conversation.submitted", "known");
+    await emit("conversation.aborted"); await check("running");
+    await emit("conversation.failed", "known"); await check("interrupted");
+    await emit("conversation.created");
+    await emit("conversation.finished", "orphan2"); await check("idle");
+  });
+
   it("serializes terminal writes from independent owners and recovery writers", async () => {
     const store = createMemoryEventStore();
     const owner = new EventLogger({ store });
