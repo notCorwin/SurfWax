@@ -101,38 +101,98 @@ describe("canonical event log", () => {
       "unavailable",
     );
   });
-  it("returns committed submission despite stalled publication and notification failure", async () => {
+  it("publishes complete message patches without post-commit reads and isolates notification errors", async () => {
     const memory = createMemoryEventStore();
-    let poison = true;
-    let unblock!: () => void;
-    const hanging = new Promise<never>(resolve => { unblock = () => resolve(undefined as never); });
-    const store = { ...memory, async appendMany(events: Parameters<typeof memory.appendMany>[0]) {
-      const saved = await memory.appendMany(events);
-      if (poison && events.some(event => event.type === "conversation.submitted")) {
-        poison = false;
-        return saved.map(event => event.type === "conversation.message" ? { ...event, messagePatch: { baseId: event.id - 1, partsLength: 1, indices: [0] } } : event);
-      }
-      return saved;
-    }, get: async () => hanging };
+    const get = vi.fn(async () => { throw new Error("unexpected read"); });
+    const store = { ...memory, get };
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const channel = { addEventListener: () => {}, removeEventListener: () => {}, postMessage: () => { throw new Error("private detail"); }, close: () => {} };
-    const logger = new EventLogger({ store, channelFactory: () => channel, ioTimeoutMs: 30 });
-    const commits: string[] = [];
-    logger.subscribeCommits(commit => { commits.push(...commit.types); });
-    await logger.append({ type: "conversation.created", conversationId: "c" });
-    await logger.appendRunSubmission({ conversationId: "c", runId: "run", chatId: "c", messageId: "m", expectedEpoch: await logger.canonicalEpoch(),
-      message: { id: "m", role: "user", parts: [{ type: "text", text: "hello" }] }, parentId: null });
-    await logger.append({ type: "conversation.title.updated", conversationId: "c", content: { title: "after" } });
-    const events = await memory.all();
-    expect(events.filter(event => event.type === "conversation.message")).toHaveLength(1);
-    expect(events.filter(event => event.type === "conversation.submitted")).toHaveLength(1);
-    expect(events.at(-1)?.type).toBe("conversation.title.updated");
-    await new Promise(resolve => setTimeout(resolve, 50));
+    const logger = new EventLogger({ store, channelFactory: () => channel });
+    const published: unknown[] = [];
+    logger.subscribe(event => { if (event.type === "conversation.message") published.push(fromLogValue(event.content, event.valueEncoding)); });
+    const message = { id: "m", role: "user" as const, parts: [{ type: "text" as const, text: "first" }] };
+    await logger.appendMessage("c", message);
+    await logger.appendMessage("c", { ...message, parts: [{ type: "text", text: "second" }] });
+    for (let i = 0; i < 50; i++) await logger.append({ type: "context.compaction.started", conversationId: "c" });
+    expect(published).toEqual([message, { ...message, parts: [{ type: "text", text: "second" }] }]);
+    expect((await memory.all()).filter(event => event.type === "conversation.message")[1]?.messagePatch).toBeDefined();
+    expect(get).not.toHaveBeenCalled();
     expect(warning).toHaveBeenCalled();
-    expect(commits).toEqual(["conversation.created", "conversation.message", "conversation.submitted", "conversation.title.updated"]);
     expect(JSON.stringify(warning.mock.calls)).not.toContain("private detail");
-    unblock();
     warning.mockRestore();
+  });
+
+  it("serializes cross-writer clear after committed event publication", async () => {
+    const memory = createMemoryEventStore();
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    let block = false;
+    const firstStore = { ...memory, async appendMany(events: Parameters<typeof memory.appendMany>[0]) {
+      if (block) { block = false; entered(); await gate; }
+      return memory.appendMany(events);
+    } };
+    const old = new EventLogger({ store: firstStore });
+    const clearer = new EventLogger({ store: { ...memory } });
+    const order: string[] = [];
+    old.subscribe(event => order.push(`old:${event.type}`));
+    clearer.subscribe(event => order.push(`clear:${event.type}`));
+    block = true;
+    const pending = old.append({ type: "context.compaction.started", conversationId: "c" });
+    await waiting;
+    const clear = clearer.clear();
+    release();
+    await Promise.all([pending, clear]);
+    expect(order).toEqual(["old:context.compaction.started", "clear:log.cleared"]);
+    expect((await old.summaryEvents("c"))).toEqual([]);
+  });
+
+  it("ignores an old cross-context commit delivered after a clear", async () => {
+    const store = createMemoryEventStore();
+    let deliver!: (event: { data: unknown }) => void;
+    const channel = { addEventListener: (_type: string, listener: typeof deliver) => { deliver = listener; }, removeEventListener: () => {}, postMessage: () => {}, close: () => {} };
+    const logger = new EventLogger({ store, channelFactory: () => channel as unknown as BroadcastChannel });
+    const commits = vi.fn(); logger.subscribeCommits(commits);
+    deliver({ data: { writerId: "other", lastId: 10, types: ["log.cleared"], conversationIds: [], cleared: true } });
+    deliver({ data: { writerId: "old", lastId: 9, types: ["context.compaction.started"], conversationIds: ["c"] } });
+    expect(commits).toHaveBeenCalledTimes(1);
+    expect(commits.mock.calls[0]?.[0].cleared).toBe(true);
+  });
+
+  it("drops publication when maintenance changes generation during a commit", async () => {
+    const memory = createMemoryEventStore();
+    let release!: () => void, entered!: () => void, receive!: (message: any) => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const store = { ...memory, async appendMany(events: Parameters<typeof memory.appendMany>[0]) { entered(); await gate; return memory.appendMany(events); } };
+    const port = { onMessage: { addListener: (listener: typeof receive) => { receive = listener; } }, onDisconnect: { addListener: () => {} }, postMessage: () => {} } as unknown as chrome.runtime.Port;
+    const logger = new EventLogger({ store, writerPort: port });
+    receive({ type: "writer-ready", generation: 1 });
+    const listener = vi.fn(); const commit = vi.fn();
+    logger.subscribe(listener); logger.subscribeCommits(commit);
+    const pending = logger.append({ type: "context.compaction.started", conversationId: "c" });
+    await waiting;
+    receive({ type: "writer-ready", generation: 2, paused: true });
+    release();
+    expect(await pending).toBeDefined();
+    expect(listener).not.toHaveBeenCalled(); expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("does not publish a commit after its logger is disposed", async () => {
+    const memory = createMemoryEventStore();
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const store = { ...memory, async appendMany(events: Parameters<typeof memory.appendMany>[0]) { entered(); await gate; return memory.appendMany(events); } };
+    const logger = new EventLogger({ store });
+    const listener = vi.fn(); logger.subscribe(listener);
+    const pending = logger.append({ type: "context.compaction.started", conversationId: "c" });
+    await waiting;
+    const disposing = logger.dispose();
+    release();
+    expect(await pending).toBeDefined();
+    await disposing;
+    expect(listener).not.toHaveBeenCalled();
   });
 
   it("does not report a receipt when the storage transaction fails", async () => {

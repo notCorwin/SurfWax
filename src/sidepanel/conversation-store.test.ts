@@ -3,6 +3,7 @@ import { EventLogger } from "../logging";
 import { createMemoryEventStore } from "../memory-event-store";
 import { errorDetails } from "../components/ui/error-notice";
 import { createChatTransport } from "../agent/transport";
+import { ensureConversationPrompt } from "../agent/prompt";
 import { ConversationStore } from "./conversation-store";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -60,7 +61,8 @@ describe("conversation command persistence", () => {
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const waiting = new Promise<void>(resolve => { entered = resolve; });
-    let block = true;
+    await ensureConversationPrompt(logger, "c");
+    let block = false;
     vi.stubGlobal("navigator", { locks: { request: async (name: string, options: unknown, callback?: (lock: object) => Promise<unknown>) => {
       const action = callback ?? options as (lock: object) => Promise<unknown>;
       if (name === "surf-wax:job-state-log" && block) { block = false; entered(); await gate; }
@@ -70,6 +72,8 @@ describe("conversation command persistence", () => {
     const agent = vi.fn(() => ({ generate: async ({ messages }: { messages: unknown }) => { inputs.push(messages); } }));
     const panel = new ConversationStore(logger, id => createChatTransport(agent as never, logger, id), "c");
     await panel.threads.switchToThread("c");
+    await logger.flush();
+    block = true;
     panel.composer.setText("keep this draft");
     const first = panel.composer.send();
     await waiting;

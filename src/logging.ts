@@ -473,7 +473,6 @@ let sharedStore: EventStore | undefined;
 const TERMINAL_EVENT_TYPES = ["tool.finished", "tool.failed", "conversation.finished", "conversation.failed", "conversation.aborted"];
 let localTerminalWrite: Promise<unknown> = Promise.resolve();
 let localJobStateWrite: Promise<unknown> = Promise.resolve();
-const localPublications = new WeakMap<EventStore, Promise<void>>();
 
 function terminalKey(event: Pick<LogEvent, "type" | "runId" | "toolCallId" | "content" | "valueEncoding">): string | undefined {
   if (!event.runId || !TERMINAL_EVENT_TYPES.includes(event.type)) return undefined;
@@ -993,6 +992,7 @@ export class EventLogger {
   private channel?: CommitChannel;
   private writerPort?: chrome.runtime.Port;
   private readonly writerId = crypto.randomUUID();
+  private observedClearId = -1;
   private readonly localStore: EventStore;
   private disposed = false;
   private messageWrites = new Map<string, Promise<void>>();
@@ -1071,8 +1071,8 @@ export class EventLogger {
   }
 
   private receiveCommit(commit: LogCommit): void {
-    if (this.disposed) return;
-    if (commit.cleared) { this.messageHeads.clear(); this.resetArtifactCache(); }
+    if (this.disposed || commit.lastId <= this.observedClearId) return;
+    if (commit.cleared) { this.observedClearId = commit.lastId; this.messageHeads.clear(); this.resetArtifactCache(); }
     else if (commit.external) for (const [key, head] of this.messageHeads) {
       if (head.event.conversationId && commit.conversationIds.includes(head.event.conversationId)) this.messageHeads.delete(key);
     }
@@ -1106,7 +1106,7 @@ export class EventLogger {
     while (this.messageHeads.size > 64) this.messageHeads.delete(this.messageHeads.keys().next().value!);
   }
 
-  private async materializeEvents(store: EventStore, floor: number, events: readonly LogEvent[], remember = true): Promise<LogEvent[]> {
+  private async materializeEvents(store: EventStore, floor: number, events: readonly LogEvent[]): Promise<LogEvent[]> {
     if (!events.some((event) => event.type === "conversation.message")) return [...events];
     const epoch = JSON.stringify([this.generation ?? null, floor]);
     const available = new Map(events.map((event) => [event.id, event]));
@@ -1133,7 +1133,7 @@ export class EventLogger {
     for (const event of events) {
       const full = event.type === "conversation.message" ? await resolve(event) : event;
       output.push(full);
-      if (remember && full.type === "conversation.message") {
+      if (full.type === "conversation.message") {
         const message = encodedMessageFields(full);
         if (isConversationMessage(message)) this.rememberMessage(full, message, epoch);
       }
@@ -1200,7 +1200,7 @@ export class EventLogger {
       artifactPart: { key: graph.key, owner: event.conversationId, node: part.node, section: part.section, part: part.part }, output: part.value })) };
   }
 
-  private enqueue(events: readonly Omit<LogEvent, "id">[], expectedEpoch?: string, expectedJobStateId?: number, artifactLink?: "resultArtifactId", artifactParts: readonly Omit<LogEvent, "id">[] = [], requireAtomic = false): Promise<LogEvent[]> {
+  private enqueue(events: readonly Omit<LogEvent, "id">[], expectedEpoch?: string, expectedJobStateId?: number, artifactLink?: "resultArtifactId", artifactParts: readonly Omit<LogEvent, "id">[] = [], requireAtomic = false, fullMessage?: LogEvent): Promise<LogEvent[]> {
     const generation = this.generation;
     const task = this.pending.then(async () => {
       await this.ready;
@@ -1269,30 +1269,21 @@ export class EventLogger {
         } else if (requireAtomic && accepted.length && !store.appendMany) throw new Error("Event store does not support atomic conversation submission");
         else if (accepted.length && store.appendMany) stored.push(...await store.appendMany(accepted));
         else for (const event of accepted) stored.push(await store.append(event));
-        if (stored.length) {
-          // Publication is ordered per store but is not part of the durable
-          // transaction or its receipt. A failed observer cannot undo a commit.
-          const publish = async () => {
-            let published: LogEvent[] = [];
-            try {
-              published = stored.some((event) => event.type === "conversation.message")
-                ? await logIO((async () => this.materializeEvents(store, floor ?? terminalFloor, stored, false))(), "发布消息", this.options.ioTimeoutMs)
-                : stored;
-            } catch { console.warn("[Surf Wax] 已提交的日志消息无法发布，消费者将从日志恢复。"); }
-            for (const event of published) for (const listener of this.listeners) {
+        // All writes and clear share the same lock. Publish synchronously while
+        // it is held, with no storage reads after the confirmed commit.
+        if (stored.length && !this.disposed && generation === this.generation && !(generation === undefined && this.handshakePaused)) {
+          for (const saved of stored) {
+            const event = fullMessage && saved.messagePatch ? { ...fullMessage, id: saved.id } : saved;
+            for (const listener of this.listeners) {
               try { listener(event); } catch { console.warn("[Surf Wax] 日志事件通知失败。"); }
             }
-            const commit = { types: [...new Set(stored.map(event => event.type))], lastId: Math.max(...stored.map((event) => event.id)), conversationIds: [...new Set(stored.flatMap((event) => event.conversationId ? [event.conversationId] : []))], cleared: stored.some((event) => event.type === "log.cleared") };
-            for (const writer of localLogWriters.get(this.localStore) ?? []) {
-              try { writer.receiveCommit({ ...commit, external: writer !== this }); } catch { console.warn("[Surf Wax] 日志提交通知失败。"); }
-            }
-            try { this.channel?.postMessage({ ...commit, writerId: this.writerId }); }
-            catch { console.warn("[Surf Wax] 跨页面日志通知失败。"); }
-          };
-          const previous = localPublications.get(this.localStore) ?? Promise.resolve();
-          const publication = previous.then(publish, publish);
-          localPublications.set(this.localStore, publication);
-          void publication.catch(() => console.warn("[Surf Wax] 日志发布失败。"));
+          }
+          const commit = { types: [...new Set(stored.map(event => event.type))], lastId: Math.max(...stored.map((event) => event.id)), conversationIds: [...new Set(stored.flatMap((event) => event.conversationId ? [event.conversationId] : []))], cleared: stored.some((event) => event.type === "log.cleared") };
+          for (const writer of localLogWriters.get(this.localStore) ?? []) {
+            try { writer.receiveCommit({ ...commit, external: writer !== this }); } catch { console.warn("[Surf Wax] 日志提交通知失败。"); }
+          }
+          try { this.channel?.postMessage({ ...commit, writerId: this.writerId }); }
+          catch { console.warn("[Surf Wax] 跨页面日志通知失败。"); }
         }
         // Return the accepted durable terminal to a competing callback, without
         // publishing a second event or replacing the original reason/result.
@@ -1302,8 +1293,7 @@ export class EventLogger {
           .filter((event): event is LogEvent => Boolean(event));
       };
       const terminalWrite = () => events.some((event) => terminalKey(event) || FOLLOWUP_EVENT_TYPES.includes(event.type as typeof FOLLOWUP_EVENT_TYPES[number])) ? withTerminalWriteLock(write) : write();
-      return expectedEpoch !== undefined || events.some((event) => event.type === "browser.job.state" || event.type === "log.cleared")
-        ? withJobStateWriteLock(terminalWrite, Boolean(this.options.store)) : terminalWrite();
+      return withJobStateWriteLock(terminalWrite, Boolean(this.options.store));
     });
     const bounded = logIO(task, "写入", this.options.ioTimeoutMs);
     this.pending = bounded.catch((error) => {
@@ -1382,7 +1372,8 @@ export class EventLogger {
         content: previous ? { ...message, parts: indices.map((index) => message.parts[index]) } : message });
       if (previous) prepared.messagePatch = { baseId: previous.event.id, partsLength: message.parts.length, indices };
       this.flushBuffer();
-      const [saved] = await this.enqueue([prepared], epoch);
+      const fullMessage = materializeMessageEvent({ ...prepared, id: 0 }, previous?.event);
+      const [saved] = await this.enqueue([prepared], epoch, undefined, undefined, [], false, fullMessage);
       if (!saved) throw new DOMException("日志维护已阻止消息保存。", "AbortError");
       const full = materializeMessageEvent(saved, previous?.event);
       this.rememberMessage(full, encodedMessageFields(full) as ConversationMessage, epoch);
