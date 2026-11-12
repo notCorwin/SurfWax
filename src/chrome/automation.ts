@@ -2946,6 +2946,7 @@ export class AutomationRuntime {
     if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
       const matches = await this.resolveAccessibility(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, undefined, includeUnbound);
       observe?.(matches);
+      if (includeUnbound && matches.some(match => !Number.isSafeInteger(match.backendNodeId) || match.backendNodeId! <= 0)) return undefined;
       this.assertStrict(spec, matches);
       const match = matches[0];
       if (!match?.backendNodeId) return undefined;
@@ -3098,7 +3099,7 @@ export class AutomationRuntime {
       return role === query.value && (query.name === undefined || equal(name)) ? [{ role, name, backendNodeId: node.backendDOMNodeId, debuggee }] : [];
     });
     world.guard(); read.world.guard();
-    if (spec.index === undefined) return matches;
+    if (spec.index === undefined || includeUnbound && matches.some(match => !Number.isSafeInteger(match.backendNodeId) || match.backendNodeId! <= 0)) return matches;
     const index = spec.index < 0 ? matches.length + spec.index : spec.index;
     return matches[index] ? [matches[index]!] : [];
   }
