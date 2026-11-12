@@ -29,7 +29,9 @@ export function rebuildFollowups(events: readonly LogEvent[]): FollowupMessage[]
 }
 
 export function canAutoDispatchFollowup(events: readonly LogEvent[]): boolean {
-  const terminal = [...events].reverse().find((event) =>
-    event.type === "conversation.finished" || event.type === "conversation.failed" || event.type === "conversation.aborted");
+  const latestSubmission = [...events].reverse().find((event) => event.type === "conversation.submitted");
+  if (!latestSubmission) return false;
+  const terminal = [...events].reverse().find((event) => event.id > latestSubmission.id && event.runId === latestSubmission.runId &&
+    (event.type === "conversation.finished" || event.type === "conversation.failed" || event.type === "conversation.aborted"));
   return terminal?.type === "conversation.finished";
 }

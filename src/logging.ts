@@ -868,9 +868,10 @@ export type ConversationSummary = {
 export class ConversationListProjection {
   private conversations = new Map<string, ConversationSummary>();
   private deleted = new Set<string>();
+  private manuallyTitled = new Set<string>();
 
   reset(events: readonly LogEvent[]): ConversationSummary[] {
-    this.conversations.clear(); this.deleted.clear();
+    this.conversations.clear(); this.deleted.clear(); this.manuallyTitled.clear();
     for (const event of events) this.apply(event);
     return this.snapshot();
   }
@@ -878,6 +879,7 @@ export class ConversationListProjection {
   apply(event: LogEvent): boolean {
     if (!event.conversationId) return false;
     if (event.type === "conversation.created") {
+      this.manuallyTitled.delete(event.conversationId);
       const content = fromLogValue(event.content, event.valueEncoding) as { title?: unknown };
       this.conversations.set(event.conversationId, { id: event.conversationId,
         title: typeof content?.title === "string" && content.title.trim() ? content.title : "新对话",
@@ -888,11 +890,16 @@ export class ConversationListProjection {
     if (!conversation) return false;
     if (event.type === "conversation.deleted") { this.deleted.add(event.conversationId); return true; }
     if (event.type === "conversation.restored") { this.deleted.delete(event.conversationId); return true; }
-    if (event.type !== "conversation.selected") conversation.lastMessageAt = event.timestamp;
+    if (event.type.startsWith("model.title.")) return false;
     if (event.type === "conversation.title.updated") {
-      const content = fromLogValue(event.content, event.valueEncoding) as { title?: unknown };
-      if (typeof content?.title === "string" && content.title.trim()) conversation.title = content.title.trim();
+      const content = fromLogValue(event.content, event.valueEncoding) as { title?: unknown; source?: unknown };
+      if (content?.source !== "manual" && this.manuallyTitled.has(event.conversationId)) return false;
+      if (typeof content?.title === "string" && content.title.trim()) {
+        conversation.title = content.title.trim();
+        if (content.source === "manual") this.manuallyTitled.add(event.conversationId);
+      }
     }
+    if (event.type !== "conversation.selected") conversation.lastMessageAt = event.timestamp;
     if (event.type === "conversation.submitted") conversation.runStatus = "running";
     if (event.type === "conversation.finished") conversation.runStatus = "idle";
     if (event.type === "conversation.aborted" || event.type === "conversation.failed") conversation.runStatus = "interrupted";

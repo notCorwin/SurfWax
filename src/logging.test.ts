@@ -1,10 +1,41 @@
 import { describe, expect, it } from "vitest";
-import { EventLogger, fromLogValue } from "./logging";
+import { ConversationListProjection, EventLogger, fromLogValue } from "./logging";
 import { IncrementalActiveContext } from "./agent/context-choice";
+import { canAutoDispatchFollowup } from "./agent/followups";
 import { runEvidence } from "./agent/goal-completion";
 import { createMemoryEventStore } from "./memory-event-store";
 
 describe("canonical event log", () => {
+  it("preserves a manual title when a pending generated title arrives late", async () => {
+    const logger = new EventLogger({ store: createMemoryEventStore() });
+    await logger.append({ type: "conversation.created", conversationId: "c", content: null });
+    await logger.append({ type: "conversation.title.updated", conversationId: "c", content: { title: "My title", source: "manual" } });
+    await logger.append({ type: "model.title.finished", conversationId: "c", content: { title: "Generated" } });
+    await logger.append({ type: "conversation.title.updated", conversationId: "c", content: { title: "Generated" } });
+    const events = await logger.summaryEvents("c");
+    const projection = new ConversationListProjection();
+    expect(projection.reset(events)[0]?.title).toBe("My title");
+    expect(projection.reset(events)[0]?.lastMessageAt).toBe(events[1]?.timestamp);
+    projection.reset(events.slice(0, -1));
+    const before = projection.snapshot()[0];
+    projection.apply(events.at(-1)!);
+    expect(projection.snapshot()[0]?.title).toBe("My title");
+    expect(projection.snapshot()[0]?.lastMessageAt).toBe(before?.lastMessageAt);
+    await logger.append({ type: "conversation.title.updated", conversationId: "c", content: { title: "Renamed", source: "manual" } });
+    expect(projection.reset(await logger.summaryEvents("c"))[0]?.title).toBe("Renamed");
+  });
+  it("only dispatches queued messages after the latest run finishes successfully", async () => {
+    const logger = new EventLogger({ store: createMemoryEventStore() });
+    await logger.append({ type: "conversation.submitted", conversationId: "c", runId: "one", content: null });
+    await logger.append({ type: "conversation.finished", conversationId: "c", runId: "one", content: null });
+    expect(canAutoDispatchFollowup(await logger.followupEvents("c"))).toBe(true);
+    await logger.append({ type: "conversation.submitted", conversationId: "c", runId: "two", content: null });
+    expect(canAutoDispatchFollowup(await logger.followupEvents("c"))).toBe(false);
+    await logger.append({ type: "conversation.finished", conversationId: "c", runId: "one", content: null });
+    expect(canAutoDispatchFollowup(await logger.followupEvents("c"))).toBe(false);
+    await logger.append({ type: "conversation.failed", conversationId: "c", runId: "two", content: null });
+    expect(canAutoDispatchFollowup(await logger.followupEvents("c"))).toBe(false);
+  });
   it("keeps action attempts out of model context while replaying evidence across cursors and clears", async () => {
     const store = createMemoryEventStore();
     const logger = new EventLogger({ store });
