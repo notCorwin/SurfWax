@@ -173,3 +173,91 @@ test(
     }
   },
 );
+
+test("stale script drafts cannot undo another page's delete or disable", { tag: "@user-journey" }, async () => {
+  test.setTimeout(120_000);
+  const provider = await startProvider([]);
+  const opened = await openExtension();
+  try {
+    await enableUserScripts(opened.context, opened.extensionId, opened.page);
+    const a = await opened.context.newPage();
+    const b = await opened.context.newPage();
+    const url = `chrome-extension://${opened.extensionId}/userscripts.html`;
+    await Promise.all([a.goto(url), b.goto(url)]);
+    const create = async (page: typeof a, id: string, code: string) => {
+      await page.getByRole("button", { name: "新建脚本" }).click();
+      await page.locator("#script-id").fill(id);
+      await page.locator("#script-matches").fill(`${provider.origin}/*`);
+      await page.locator("#script-code .cm-content").fill(code);
+      await page.getByRole("button", { name: "保存", exact: true }).click();
+      await expect(page.getByRole("status")).toContainText("脚本已保存");
+      await page.getByRole("button", { name: "返回列表" }).click();
+    };
+    await create(b, "shared", "document.documentElement.dataset.concurrentScript = 'original'");
+    await expect(a.getByRole("button", { name: /shared/ }).first()).toBeVisible();
+    await a.getByRole("button", { name: /shared/ }).first().click();
+    await a.locator("#script-code .cm-content").fill("document.documentElement.dataset.concurrentScript = 'draft_canary'");
+    await b.getByRole("button", { name: /shared/ }).first().click();
+    await b.getByRole("button", { name: "删除", exact: true }).click();
+    await b.getByRole("button", { name: "确认删除" }).click();
+    await expect(b.getByRole("status")).toContainText("已删除 1 个脚本");
+    await a.getByRole("button", { name: "保存", exact: true }).click();
+    const error = a.getByRole("alert");
+    await expect(error).toContainText("用户脚本操作失败");
+    await error.getByText("错误详情").click();
+    await expect(error.getByText("脚本已更改或删除，请复制草稿后刷新并重新编辑。")).toBeVisible();
+    await expect(error).not.toContainText(/draft_canary|stack/i);
+    await expect(a.locator("#script-code .cm-content")).toContainText("draft_canary");
+    const deleted = await b.evaluate(async () => ({
+      stored: (await chrome.storage.local.get(["side-agent:user-scripts", "side-agent:user-scripts-disabled"])),
+      native: await chrome.userScripts.getScripts({ ids: ["shared"] }),
+    }));
+    expect(JSON.stringify(deleted.stored)).not.toContain('"shared"');
+    expect(deleted.native).toEqual([]);
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    expect(await target.evaluate(() => document.documentElement.dataset.concurrentScript)).toBeUndefined();
+    await create(b, "shared", "document.documentElement.dataset.concurrentScript = 'recreated'");
+    await a.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(error).toContainText("用户脚本操作失败");
+    await error.getByText("错误详情").click();
+    await expect(error.getByText("脚本已更改或删除，请复制草稿后刷新并重新编辑。")).toBeVisible();
+    await expect(a.locator("#script-code .cm-content")).toContainText("draft_canary");
+    const recreated = await b.evaluate(async () => (await chrome.storage.local.get("side-agent:user-scripts"))["side-agent:user-scripts"]);
+    expect(JSON.stringify(recreated)).toContain("recreated");
+    expect(JSON.stringify(recreated)).not.toContain("draft_canary");
+    a.once("dialog", dialog => dialog.accept());
+    await a.goto(url);
+    await expect(a.getByRole("button", { name: /shared/ }).first()).toBeVisible();
+    await a.getByRole("button", { name: /shared/ }).first().click();
+    await a.locator("#script-code .cm-content").fill("document.documentElement.dataset.concurrentScript = 'saved_after_other'");
+    await create(b, "other", "document.documentElement.dataset.otherScript = 'other'");
+    await a.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(a.getByRole("status")).toContainText("脚本已保存");
+    const afterOther = await a.evaluate(async () => ({ stored: (await chrome.storage.local.get("side-agent:user-scripts"))["side-agent:user-scripts"], native: await chrome.userScripts.getScripts({ ids: ["shared", "other"] }) }));
+    expect(JSON.stringify(afterOther.stored)).toContain("saved_after_other");
+    expect(afterOther.native.map(script => script.id).sort()).toEqual(["other", "shared"]);
+    await a.getByRole("button", { name: "返回列表" }).click();
+    await a.getByRole("button", { name: /shared/ }).first().click();
+    await a.locator("#script-code .cm-content").fill("document.documentElement.dataset.concurrentScript = 'disabled_canary'");
+    await b.getByRole("button", { name: "停用 shared" }).click();
+    await expect(b.getByRole("status")).toContainText("脚本已停用");
+    await a.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(error).toContainText("用户脚本操作失败");
+    await error.getByText("错误详情").click();
+    await expect(error.getByText("脚本已更改或删除，请复制草稿后刷新并重新编辑。")).toBeVisible();
+    await expect(error).not.toContainText(/disabled_canary|stack/i);
+    await expect(a.locator("#script-code .cm-content")).toContainText("disabled_canary");
+    const disabled = await b.evaluate(async () => ({
+      stored: await chrome.storage.local.get(["side-agent:user-scripts", "side-agent:user-scripts-disabled"]),
+      native: await chrome.userScripts.getScripts({ ids: ["shared"] }),
+    }));
+    expect(disabled.stored["side-agent:user-scripts-disabled"]).toEqual(expect.arrayContaining([expect.objectContaining({ id: "shared" })]));
+    expect(disabled.native).toEqual([]);
+    const afterDisable = await opened.context.newPage();
+    await afterDisable.goto(`${provider.origin}/target`);
+    expect(await afterDisable.evaluate(() => document.documentElement.dataset.concurrentScript)).toBeUndefined();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
