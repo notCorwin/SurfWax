@@ -16,7 +16,7 @@ import { createDeadline } from "../deadline";
 import { ARTIFACT_READ_NOTE, artifactReadSelection, nativeArtifactPageLimit as nativePageLimit } from "../artifact-selection";
 
 const timeoutMs = z.number().int().positive().optional();
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v55";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v56";
 export const inspectInputSchema = z.object({ timeoutMs, since: z.string().min(1).max(256).optional().describe("Compare with this completely delivered observation ID from the same tab, run and scope. Omit to reuse the latest valid baseline automatically."), full: z.boolean().optional().describe("Request a complete new baseline instead of an automatic delta when prior rows are unavailable."), tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional().describe("Restrict inspection to one matching element. To inspect a frame use region:{by:\"css\",value:\"html\",frame:{ref:\"frameRef\"}}; frame is not a top-level inspect_page field. Prefer a structured target. A plain string is a CSS selector, except supported locator expressions such as getByRole('button', {name:'Save'})."),
   fields: z.array(z.enum(["text", "state", "actions"])).min(1).optional().describe("Fields to include; defaults to visible text, state and measured layout. IDs are always present; actionable=true identifies a single element usable as target:{id}. Request actions for supported action hints."), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -906,12 +906,13 @@ function recoveryError<T extends Record<string, any>>(error: T, toolName: string
 
 function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable?: boolean; effectUnknown?: boolean; recovery?: string }; artifact?: unknown } {
   const message = safeDiagnosticText(error instanceof Error || error instanceof DOMException ? error.message : String(error));
+  const restrictedPage = /^Cannot access a chrome:\/\/ URL$/i.test(message);
   const code = error instanceof DOMException && error.name === "AbortError" ? "aborted"
     : error instanceof DOMException && error.name === "TimeoutError" ? "timeout"
     : error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code
-    : /(?:Command|Automation)Error\[([^\]]+)\]/.exec(message)?.[1] ?? "tool-error";
+    : restrictedPage ? "restricted-page" : /(?:Command|Automation)Error\[([^\]]+)\]/.exec(message)?.[1] ?? "tool-error";
   const effectUnknown = error && typeof error === "object" && "effectUnknown" in error && typeof error.effectUnknown === "boolean" ? error.effectUnknown : undefined;
-  return { ok: false, error: { code, message, ...(effectUnknown === undefined ? {} : { effectUnknown }) }, ...(error && typeof error === "object" && "artifact" in error ? { artifact: error.artifact } : {}) };
+  return { ok: false, error: { code, message: restrictedPage ? "Chrome 不允许扩展访问此浏览器内部页面。请切换到普通网页后重试。" : message, ...(restrictedPage ? { retryable: false } : {}), ...(effectUnknown === undefined ? {} : { effectUnknown }) }, ...(error && typeof error === "object" && "artifact" in error ? { artifact: error.artifact } : {}) };
 }
 
 export const repairProgramToolCall: ToolCallRepairFunction<Record<string, ReturnType<typeof dynamicTool>>> = async ({ toolCall, tools }) => {

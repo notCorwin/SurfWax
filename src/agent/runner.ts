@@ -6,7 +6,7 @@ import { createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM
 import { ToolScheduler } from "../chrome/tool-scheduler";
 import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
-import type { EventLogger } from "../logging";
+import { fromLogValue, type EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
 import { safeDiagnosticText } from "../diagnostic-error";
 import { inputBudget, type ModelLimit } from "./model-limits";
@@ -161,6 +161,10 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   const activeTools = () => currentTools().map(({ name }) => name);
   const canonicalContext = logger && options.conversationId ? new IncrementalActiveContext(logger, options.conversationId) : undefined;
   let browserDigest: string | undefined;
+  let diagnosticCursor = -1;
+  let diagnosticEpoch: string | undefined;
+  let diagnosticRun: string | undefined;
+  let pendingDiagnosticPosition: { cursor: number; epoch: string } | undefined;
   const completion = options.model.endpointType === "openai-completions"
     || !options.model.endpointType && options.model.modelProvider?.shape === "completion";
   return new ToolLoopAgent<never, BrowserAgentTools>({
@@ -185,6 +189,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       await options.onResponse?.(event);
     },
     prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber }) => {
+      pendingDiagnosticPosition = undefined;
       if (stepNumber === 0) reviewRequirements = goalRequirements(messages);
       logger?.telemetry({ type: "model.context.preparing", conversationId: options.conversationId, content: { stepNumber } });
       const currentAnchor = options.contextAnchor?.();
@@ -198,13 +203,40 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       const browserChanged = stepNumber === 0 || nextBrowserDigest !== browserDigest;
       browserDigest = nextBrowserDigest;
       if (browserChanged) logger?.telemetry({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
+      // Read committed records between model steps, never on the interactive tool path.
+      // Event IDs advance once per run; ownership is scoped to run and tab, not
+      // to a concurrent action. Late captures appear on a subsequent step.
+      let diagnosticNotice: string | undefined;
+      let nextDiagnosticPosition: { cursor: number; epoch: string } | undefined;
+      const runId = currentAnchor?.runId ?? (logger && options.conversationId ? logger.toolIdentity(options.conversationId, "diagnostic-notice").runId : undefined);
+      if (logger && options.conversationId && runId) {
+        if (diagnosticRun !== runId) { diagnosticRun = runId; diagnosticCursor = -1; diagnosticEpoch = undefined; pendingDiagnosticPosition = undefined; }
+        let snapshot = await logger.diagnosticEventsSnapshot(options.conversationId, { runId, afterId: diagnosticCursor, limit: 256 });
+        if (diagnosticEpoch !== undefined && diagnosticEpoch !== snapshot.epoch) {
+          diagnosticCursor = -1;
+          pendingDiagnosticPosition = undefined;
+          snapshot = await logger.diagnosticEventsSnapshot(options.conversationId, { runId, afterId: diagnosticCursor, limit: 256 });
+        }
+        nextDiagnosticPosition = { cursor: snapshot.throughEventId, epoch: snapshot.epoch };
+        const counts = new Map<number, number>();
+        const scannedTabs = new Set<number>();
+        for (const event of snapshot.value) {
+          const content = fromLogValue(event.content, event.valueEncoding) as { method?: unknown; tabId?: unknown } | null;
+          if (Number.isSafeInteger(content?.tabId)) scannedTabs.add(content!.tabId as number);
+          if (event.type === "browser.diagnostic" && content?.method === "Runtime.consoleAPICalled" && Number.isSafeInteger(content.tabId)) {
+            const tabId = content.tabId as number;
+            counts.set(tabId, (counts.get(tabId) ?? 0) + 1);
+          }
+        }
+        if (counts.size || snapshot.hasMore) diagnosticNotice = `Committed console events captured since the previous model step: ${JSON.stringify([...counts].map(([tabId, observed]) => ({ tabId, observed })))}. Counts are a lower bound, not proof of cause or completeness${snapshot.hasMore ? `; further captured records remain to scan in a subsequent model step. Tabs seen in this batch: ${JSON.stringify([...scannedTabs].slice(0, 8))}` : ""}. Use read_console with the original tabId; retained mode can read captured history after closure.`;
+      }
       const modelLimit = options.modelLimit;
       const prepareMessages = async (source: typeof prepared) => {
         const readArtifact = logger ? (id: number, selection?: { path: Array<string | number> }) => logger.result(id, selection, options.conversationId ?? "") : undefined;
         // Replayed tool JSON has scrubbed image bytes. Extract this step's new
         // visual input from the SDK receipt, then append it to canonical history.
         const observed = await prepareToolMessages(canonical ? messages : source, stepNumber,
-          browserChanged ? browserContextMessage(browserContext) : undefined, readArtifact, await toolOptions.visualEnabled());
+          (browserChanged || diagnosticNotice) ? [browserChanged ? browserContextMessage(browserContext) : "", diagnosticNotice ? `<browser-context>\nSupplemental diagnostic state only. ${diagnosticNotice}\n</browser-context>` : ""].filter(Boolean).join("\n") : undefined, readArtifact, await toolOptions.visualEnabled());
         if (!canonical) return observed;
         const supplemental = observed.length > messages.length ? observed.at(-1) : undefined;
         return supplemental ? [...source, supplemental] : source;
@@ -223,6 +255,20 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         options.compactor?.useBranch(canonical.branchIds);
         prepared = canonical.messages;
         outgoing = prepared;
+      }
+      // Advance only after the supplemental context is durably appended. If no
+      // anchor is available, its in-memory outgoing message is the delivery.
+      if (nextDiagnosticPosition) {
+        if (anchor && supplemental && logger && options.conversationId) {
+          diagnosticCursor = nextDiagnosticPosition.cursor;
+          diagnosticEpoch = nextDiagnosticPosition.epoch;
+        } else if (!anchor && supplemental) {
+          // A model response, not merely preparation, confirms in-memory delivery.
+          pendingDiagnosticPosition = nextDiagnosticPosition;
+        } else {
+          diagnosticCursor = nextDiagnosticPosition.cursor;
+          diagnosticEpoch = nextDiagnosticPosition.epoch;
+        }
       }
       // The durable supplemental message is already in prepared after this point.
       const finalizeMessages = (source: typeof prepared) => anchor ? Promise.resolve(source) : prepareMessages(source);
@@ -262,6 +308,11 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         options.compactor?.recordPrompt(event);
       },
       onStepEnd: async (event) => {
+        if (pendingDiagnosticPosition) {
+          diagnosticCursor = pendingDiagnosticPosition.cursor;
+          diagnosticEpoch = pendingDiagnosticPosition.epoch;
+          pendingDiagnosticPosition = undefined;
+        }
         options.compactor?.recordUsage(event.usage.inputTokens, event.stepNumber);
         logger.telemetry({
           type: "model.step.finished",

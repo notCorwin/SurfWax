@@ -65,21 +65,32 @@ export async function transformTextArtifact(mode: "extract" | "join" | "prefixed
           catch { throw new Error(`${label}: invalid JSON`); }
         }
         value = path(value, input.selectPath, `${label} selectPath`);
-        if (input.itemPath !== undefined && !Array.isArray(value)) throw new Error(`${label} selectPath: itemPath requires an array`);
+        if ((input.itemPath !== undefined || input.itemFilter !== undefined) && !Array.isArray(value)) throw new Error(`${label} selectPath: itemPath and itemFilter require an array`);
         const items = Array.isArray(value) ? value : [value];
         for (let i = 0; i < items.length; i++) {
+          if (input.itemFilter !== undefined) {
+            let candidate = items[i], found = true;
+            for (const part of input.itemFilter.path) {
+              if (candidate === null || typeof candidate !== "object" || !Object.hasOwn(candidate, part)) { found = false; break; }
+              candidate = candidate[part];
+            }
+            if (!found || candidate !== input.itemFilter.equals) continue;
+          }
           const itemLabel = `${label} selectPath ${JSON.stringify(input.selectPath)} item[${i}]${input.itemPath === undefined ? "" : ` itemPath ${JSON.stringify(input.itemPath)}`}`;
           const item = input.itemPath === undefined ? items[i] : path(items[i], input.itemPath, `${itemLabel} itemPath`);
           if (typeof item !== "string") throw new Error(`${itemLabel}: expected string, received ${item === null ? "null" : Array.isArray(item) ? "array" : typeof item}`);
           chunks.push(item);
         }
       }
-      sources.push({ ...(source.artifactId !== undefined ? { artifactId: source.artifactId } : { evidenceId: source.evidenceId }), count: chunks.length - start });
+      sources.push({ ...(source.artifactId !== undefined ? { artifactId: source.artifactId } : { evidenceId: source.evidenceId }), ...(mode === "extract" && input.itemFilter !== undefined ? { inputCount: value.length } : {}), count: chunks.length - start });
     }
   }
   const text = chunks.join(input.separator);
   const bytes = new TextEncoder().encode(text);
   const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), byte => byte.toString(16).padStart(2, "0")).join("");
   const artifact = await artifacts.text(input.filename, text, "text/plain;charset=utf-8");
-  return { sources, totalItems: chunks.length, ...lineCounts, byteLength: bytes.byteLength, sha256, artifact, access: { artifactId: artifact.id, path: [] } };
+  const sample = (value: string) => ({ text: value.slice(0, 160), truncated: value.length > 160 });
+  return { sources, totalItems: chunks.length, ...lineCounts, byteLength: bytes.byteLength, sha256, artifact, access: { artifactId: artifact.id, path: [] },
+    ...(mode === "extract" && chunks.length ? { samples: { first: sample(chunks[0]!), last: sample(chunks[chunks.length - 1]!) } } : {}) };
+
 }

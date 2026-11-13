@@ -69,6 +69,87 @@ describe("createAgent", () => {
     expect(runProgram.mock.calls[0]?.[2]?.visualEnabled).toBe(enabled);
   });
 
+  it("announces newly committed console events once per run between model steps", async () => {
+    const { logger } = memoryLog();
+    const requests: string[] = [];
+    let step = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async (options) => {
+      requests.push(JSON.stringify(options.prompt));
+      return ++step < 3 ? tool(`click-${step}`, "click", { target: { id: "e1" } }) : text();
+    } });
+    const executor = browserExecutor({ runProgram: async (_input: unknown, _signal: unknown, context: any) => {
+      if (step === 1) {
+        await logger.append({ type: "browser.diagnostic", conversationId: "conversation", runId: "run", content: { tabId: 41, method: "Runtime.consoleAPICalled" }, output: { args: [{ value: "secret page content" }] }, toolCallId: context.toolCallId });
+        await logger.append({ type: "browser.diagnostic", conversationId: "conversation", runId: "other", content: { tabId: 99, method: "Runtime.consoleAPICalled" } });
+      }
+      return { ok: true };
+    } });
+    await createAgent({ model: config, modelLimit: { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" }, languageModel: model, executor, logger, conversationId: "conversation" }).generate({ prompt: "click" });
+    expect(requests[1]).toContain('Committed console events captured');
+    expect(requests[1]).toContain('tabId');
+    expect(requests[1]).not.toContain('secret page content');
+    expect(requests[1]).not.toContain('99');
+    expect(requests[2]!.match(/Committed console events captured/g)).toHaveLength(1);
+  });
+
+  it("discloses bounded scans before later console records", async () => {
+    const { logger } = memoryLog();
+    const requests: string[] = [];
+    let step = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async options => {
+      requests.push(JSON.stringify(options.prompt));
+      return ++step < 3 ? tool(`click-${step}`, "click", { target: { id: "e1" } }) : text();
+    } });
+    const executor = browserExecutor({ runProgram: async () => {
+      if (step === 1) {
+        for (let i = 0; i < 256; i++) await logger.append({ type: "browser.diagnostic", conversationId: "conversation", runId: "run", content: { tabId: 41, method: "Network.requestWillBeSent" } });
+        await logger.append({ type: "browser.diagnostic", conversationId: "conversation", runId: "run", content: { tabId: 41, method: "Runtime.consoleAPICalled" } });
+      }
+      return { ok: true };
+    } });
+    await createAgent({ model: config, modelLimit: { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" }, languageModel: model, executor, logger, conversationId: "conversation" }).generate({ prompt: "click" });
+    expect(requests[1]).toContain("further captured records remain to scan");
+    expect(requests[2]).toContain('tabId');
+    expect(requests[2]!.match(/Committed console events captured/g)).toHaveLength(2);
+  });
+
+  it("replays undelivered diagnostic notice after model failure without an anchor", async () => {
+    const { logger } = memoryLog();
+    await logger.append({ type: "browser.diagnostic", conversationId: "conversation", runId: "run", content: { tabId: 41, method: "Runtime.consoleAPICalled" } });
+    const requests: string[] = [];
+    let calls = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async options => {
+      requests.push(JSON.stringify(options.prompt));
+      if (++calls === 1) throw new Error("model unavailable");
+      return text();
+    } });
+    const agent = createAgent({ model: config, modelLimit: { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" }, languageModel: model, executor: browserExecutor(), logger, conversationId: "conversation" });
+    await expect(agent.generate({ prompt: "test" })).rejects.toThrow("model unavailable");
+    await agent.generate({ prompt: "test" });
+    expect(requests[0]).toContain("Committed console events captured");
+    expect(requests[1]).toContain("Committed console events captured");
+  });
+
+  it("does not carry an undelivered cursor into a replacement run", async () => {
+    const { logger } = memoryLog();
+    await logger.append({ type: "browser.diagnostic", conversationId: "conversation", runId: "run", content: { tabId: 41, method: "Runtime.consoleAPICalled" } });
+    const requests: string[] = [];
+    let calls = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async options => {
+      requests.push(JSON.stringify(options.prompt));
+      if (++calls === 1) throw new Error("model unavailable");
+      return text();
+    } });
+    const agent = createAgent({ model: config, modelLimit: { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" }, languageModel: model, executor: browserExecutor(), logger, conversationId: "conversation" });
+    await expect(agent.generate({ prompt: "test" })).rejects.toThrow();
+    logger.endRun("conversation", "run");
+    logger.beginRun("conversation", "replacement");
+    await logger.append({ type: "browser.diagnostic", conversationId: "conversation", runId: "replacement", content: { tabId: 73, method: "Runtime.consoleAPICalled" } });
+    await agent.generate({ prompt: "test" });
+    expect(requests[1]).toContain('73');
+    expect(requests[1]).not.toContain('41');
+  });
+
   it("executes concurrent SDK tool calls in model order and waits for the prior result to be recorded", async () => {
     const { events, logger } = memoryLog();
     let release!: () => void;

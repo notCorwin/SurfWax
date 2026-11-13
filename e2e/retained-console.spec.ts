@@ -10,11 +10,12 @@ test('retained console reads owned canonical captures after close and navigation
   let generations = 0;
   const server = createServer((req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    if (req.url === '/generate') { generations++; res.end('<!doctype html><title>generated</title><p>ready</p>'); }
+    if (req.url === '/missing') { res.writeHead(404).end(); }
+    else if (req.url === '/generate') { generations++; res.end('<!doctype html><title>generated</title><p>ready</p>'); }
     else if (req.url === '/delivery') res.end('<!doctype html><title>delivery</title><textarea id="delivery" aria-label="Delivery"></textarea>');
     else if (req.url === '/next') res.end('<!doctype html><title>next</title><button onclick="console.log(\'NEXT\')">Next log</button>');
     else if (req.url === '/noise') res.end('<!doctype html><title>noise</title><button onclick="for(let i=0;i<110;i++)console.log(\'NOISE:\'+i)">Noise</button>');
-    else res.end(`<!doctype html><title>source</title><button onclick="generate()">Generate</button><script>async function generate(){await fetch('/generate');const values=${JSON.stringify(suffixes)};for(let i=0;i<values.length;i++)console[['log','info','warn'][i%3]](${JSON.stringify(prefix)}+values[i]);console.log('HEARTBEAT');console.warn('Unrelated message')}</script>`);
+    else res.end(`<!doctype html><title>source</title><button onclick="generate()">Generate</button><script>async function generate(){await fetch('/missing');await fetch('/generate');const values=${JSON.stringify(suffixes)};for(let i=0;i<values.length;i++)console[['log','info','warn'][i%3]](${JSON.stringify(prefix)}+values[i]);console.log('HEARTBEAT');console.warn('Unrelated message')}</script>`);
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const opened = await openExtension();
@@ -108,15 +109,16 @@ test('retained console reads owned canonical captures after close and navigation
         check(initial.messages.some(m => m.data?.args?.[0]?.value === 'HEARTBEAT'), 'heartbeat retained');
         check(new Set(audit.map(m => m.captureEpoch)).size === 1, 'epoch provenance');
         check(new Set(initial.messages.map(m => m.captureEpoch)).size === 2, 'navigation epochs explicit');
-        const extracted = await call('extract_json_text', { sources: initial.sources, selectPath: ['messages'], itemPath: ['data', 'args', 0, 'value'], separator: '\n', filename: 'captured-lines.txt' });
-        check(extracted.ok !== false && extracted.result.totalItems === initial.messages.length, JSON.stringify(extracted));
+        const extracted = await call('extract_json_text', { sources: initial.sources, selectPath: ['messages'], itemFilter: { path: ['method'], equals: 'Runtime.consoleAPICalled' }, itemPath: ['data', 'args', 0, 'value'], separator: '\n', filename: 'captured-lines.txt' });
+        check(extracted.ok !== false && extracted.result.totalItems === initial.messages.filter(m => m.method === 'Runtime.consoleAPICalled').length && initial.messages.some(m => m.method === 'Log.entryAdded'), JSON.stringify(extracted));
+        check(extracted.result.samples.first.text.startsWith(prefix) && extracted.result.samples.first.truncated === false, 'first sample exposes the extracted prefix');
         const transformed = await call('extract_prefixed_lines', { artifactId: extracted.result.artifact.id, prefix, separator: '\n', filename: 'selected-lines.txt' });
         const exactText = suffixes.join('\n');
         const exactBytes = new TextEncoder().encode(exactText);
         const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', exactBytes)), byte => byte.toString(16).padStart(2, '0')).join('');
         check(transformed.ok !== false && transformed.result.matched === 180
-          && transformed.result.inputLineCount === initial.messages.length
-          && transformed.result.skipped === initial.messages.length - 180
+          && transformed.result.inputLineCount === extracted.result.totalItems
+          && transformed.result.skipped === extracted.result.totalItems - 180
           && transformed.result.byteLength === exactBytes.length && transformed.result.sha256 === sha256, 'literal prefix extraction preserves exact suffix bytes and counts');
         const destination = await chrome.tabs.create({ url: `${url}delivery`, active: false });
         try {

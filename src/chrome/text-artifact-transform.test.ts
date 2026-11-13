@@ -25,6 +25,7 @@ it("validates all text sources before writing, preserves exact strings, and conf
   const result = await transformTextArtifact("extract", base, artifacts);
   expect(writes).toEqual(["雪||雪"]);
   expect(result).toMatchObject({ totalItems: 3, byteLength: 8, sha256: createHash("sha256").update("雪||雪").digest("hex"), access: { artifactId: 99, path: [] } });
+  expect(result.samples).toEqual({ first: { text: "雪", truncated: false }, last: { text: "雪", truncated: false } });
   await transformTextArtifact("extract", { ...base, sources: [{ artifactId: 1, path: [], decode: "utf8-json-file" }], itemPath: undefined }, artifacts);
   expect(writes.at(-1)).toBe("尾\n|");
   await transformTextArtifact("join", { artifactIds: [2, 2], separator: "", filename: "join.txt" }, artifacts);
@@ -46,6 +47,30 @@ it("validates all text sources before writing, preserves exact strings, and conf
   expect(schema.safeParse(prefixed).success).toBe(true);
   for (const change of [{ prefix: "" }, { prefix: "x\n" }, { prefix: "x\ny" }, { filename: "" }, { text: "copy" }, { artifactId: undefined, evidenceId: "http" }])
     expect(schema.safeParse({ ...prefixed, ...change }).success).toBe(false);
+  // Mixed diagnostic records must be filtered before projecting console arguments.
+  values.push({ messages: [{ method: "Log.entryAdded", data: {} }, { method: "Runtime.consoleAPICalled", data: { args: [{ value: "AUDIT α" }] } }, { method: "Runtime.consoleAPICalled", data: { args: [{ value: "HEARTBEAT" }] } }, { data: {} }] });
+  const filtered = await transformTextArtifact("extract", { sources: [{ artifactId: 7, path: [], decode: "stored-value" }], selectPath: ["messages"], itemFilter: { path: ["method"], equals: "Runtime.consoleAPICalled" }, itemPath: ["data", "args", 0, "value"], separator: "\n", filename: "logs.txt" }, artifacts);
+  expect(filtered.sources).toEqual([{ artifactId: 7, inputCount: 4, count: 2 }]);
+  expect(writes.at(-1)).toBe("AUDIT α\nHEARTBEAT");
+  const extractedSchema = ATOMIC_TOOL_REGISTRY.find(tool => tool.name === "extract_json_text")!.inputSchema;
+  expect(extractedSchema.safeParse({ ...base, itemFilter: { path: ["method"], equals: "Runtime.consoleAPICalled" } }).success).toBe(true);
+  const filterInput = { sources: [{ artifactId: 7, path: [], decode: "stored-value" }, { artifactId: 7, path: [], decode: "stored-value" }], selectPath: ["messages"], itemFilter: { path: ["method"], equals: "Runtime.consoleAPICalled" }, itemPath: ["data", "args", 0, "value"], separator: "|", filename: "mixed.txt" };
+  const multi = await transformTextArtifact("extract", filterInput, artifacts);
+  expect(multi.sources).toEqual([{ artifactId: 7, inputCount: 4, count: 2 }, { artifactId: 7, inputCount: 4, count: 2 }]);
+  expect(writes.at(-1)).toBe("AUDIT α|HEARTBEAT|AUDIT α|HEARTBEAT");
+  const empty = await transformTextArtifact("extract", { ...filterInput, itemFilter: { path: ["missing"], equals: null } }, artifacts);
+  expect(empty).toMatchObject({ totalItems: 0, sources: [{ inputCount: 4, count: 0 }, { inputCount: 4, count: 0 }] });
+  expect(writes.at(-1)).toBe("");
+  await expect(transformTextArtifact("extract", { ...filterInput, selectPath: [], itemPath: undefined }, artifacts)).rejects.toThrow("require an array");
+  await expect(transformTextArtifact("extract", { ...filterInput, itemPath: ["data"] }, artifacts)).rejects.toThrow("expected string");
+  values.push({ strings: ["short"] }, { strings: ["x".repeat(161)] }, { strings: [] });
+  const sampleInput = { sources: [{ artifactId: 8, path: [], decode: "stored-value" }], selectPath: ["strings"], separator: "", filename: "sample.txt" };
+  const single = await transformTextArtifact("extract", sampleInput, artifacts);
+  expect(single.samples).toEqual({ first: { text: "short", truncated: false }, last: { text: "short", truncated: false } });
+  const long = await transformTextArtifact("extract", { ...sampleInput, sources: [{ artifactId: 9, path: [], decode: "stored-value" }] }, artifacts);
+  expect(long.samples).toEqual({ first: { text: "x".repeat(160), truncated: true }, last: { text: "x".repeat(160), truncated: true } });
+  const emptySamples = await transformTextArtifact("extract", { ...sampleInput, sources: [{ artifactId: 10, path: [], decode: "stored-value" }] }, artifacts);
+  expect(emptySamples.samples).toBeUndefined();
   const before = writes.length;
   for (const change of [
     { selectPath: ["missing"] }, { itemPath: ["toString"] }, { itemPath: [] },

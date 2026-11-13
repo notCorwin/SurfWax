@@ -144,3 +144,13 @@ it("keeps packed partial associations inside wire budgets and paginates only act
   expect(delta.every(item => item.change === "updated")).toBe(true);
   expect(automaticContexts(delta, contextFor)!.targets[0]!.context).toMatchObject({ observationId: "observation", visibleLabels: [{ text: "Visible label" }] });
 });
+
+it("preserves uncertain effects when reporting a restricted browser page", async () => {
+  const { createProgramTools } = await import("./tool");
+  const failure = Object.assign(new Error("Cannot access a chrome:// URL"), { effectUnknown: true, artifact: { id: "evidence" } });
+  const executor = { inspect: async () => { throw failure; } };
+  const result: any = await createProgramTools(executor as any).inspect_page.execute!({}, { toolCallId: "restricted", messages: [], context: {} });
+  expect(result.error).toMatchObject({ code: "restricted-page", effectUnknown: true, retryable: false });
+  expect(result.error.recovery).toContain("Effect unknown");
+  expect(result.artifact).toEqual({ id: "evidence" });
+});
